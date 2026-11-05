@@ -708,6 +708,22 @@ def _main_section(spec: Dict[str, Any], framework: str) -> str:
     )
 
 
+def default_block(kind: str, label: str = "", description: str = "",
+                  params: Dict[str, Any] | None = None,
+                  name: str | None = None) -> str:
+    """给某类节点生成一份默认的原生代码块（新增节点时直接用这个）。"""
+    node = {
+        "id": f"new_{kind}",
+        "kind": kind,
+        "name": name or f"{kind}_1",
+        "label": label or kind,
+        "description": description or "",
+        "params": params or {},
+        "model": None,
+    }
+    return node_block(node).strip()
+
+
 def render_agent_full(spec: Dict[str, Any], framework: str) -> tuple:
     """生成完整的 agent.py，并返回每个节点对应的代码块。
 

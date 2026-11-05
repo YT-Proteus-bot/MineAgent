@@ -76,15 +76,22 @@ class GraphRunner:
         if key in self.module_cache:
             return self.module_cache[key]
 
-        code = (node.get("code") or "").strip()
+        code = (node.get("preview_code") or node.get("code") or "").strip()
         if not code:
             raise ValueError(f"节点 {node.get('name')} 没有可用代码")
 
-        # 兼容旧项目：agent.json 没存代码时回退到 nodes/<file>
+        # 兼容旧项目：没有代码时回退到 nodes/<file>
         if not code.startswith(("from", "import", "def", "#", '"""', "'''")):
             path = NODES_DIR / node.get("file", f"{node['name']}.py")
             if path.exists():
                 code = path.read_text(encoding="utf-8")
+
+        # 拿到的是 agent.py 的原生块（没有 run(ctx)）时，说明缺降级代码
+        if "def run(" not in code:
+            raise ValueError(
+                f"节点 {node.get('name')} 的代码是框架原生块，零依赖预览跑不了。"
+                f"装上框架依赖后直接运行 agent.py 即可"
+            )
 
         module = types.ModuleType(f"ma_node_{node['id']}")
         module.__dict__["__file__"] = f"<node:{node['id']}>"

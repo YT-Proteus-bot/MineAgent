@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException
 
 from ..constraints import CUSTOM_RULE_TYPES, rule_catalog
 from ..framework_templates import FRAMEWORKS, FRAMEWORK_INDEX, build_graph
+from ..codegen.native import default_block
 from ..node_registry import AGENT_MODES, CATEGORIES, NODE_TYPES
 
 router = APIRouter(prefix="/api/meta", tags=["meta"])
@@ -12,10 +13,20 @@ router = APIRouter(prefix="/api/meta", tags=["meta"])
 
 @router.get("")
 def meta():
+    # 每个节点带上两份代码：
+    #   native_code —— agent.py 里的框架原生块（网页「代码逻辑」显示这个）
+    #   default_code —— run(ctx) 预览代码（没装框架时 runner 用它降级执行）
+    nodes = []
+    for n in NODE_TYPES:
+        params = {p.get("key"): p.get("default") for p in n.get("params", []) if p.get("key")}
+        item = dict(n)
+        item["native_code"] = default_block(
+            n["kind"], n.get("label", ""), n.get("description", ""), params,
+        )
+        nodes.append(item)
     return {
         "categories": CATEGORIES,
-        # 带上 default_code，前端新增节点时可直接生成默认代码
-        "nodes": NODE_TYPES,
+        "nodes": nodes,
         "frameworks": FRAMEWORKS,
         "agent_modes": AGENT_MODES,
         "constraint_rules": rule_catalog(),

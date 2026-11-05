@@ -759,7 +759,11 @@ export const useStore = create<AppState>((set, get) => ({
     if (!def) return
     const nodes = get().nodes
     const edges = get().edges
-    const existing = nodes.filter((n) => n.data.kind === kind).length + 1
+    // 名字要避开已有节点，否则后端去重会改名，导致代码里的函数名跟着变
+    const usedNames = new Set(nodes.map((n) => n.data.name))
+    let seq = nodes.filter((n) => n.data.kind === kind).length + 1
+    while (usedNames.has(`${kind}_${seq}`)) seq += 1
+    const existing = seq
     const params: Record<string, any> = {}
     def.params.forEach((p) => {
       params[p.key] = p.default
@@ -774,7 +778,10 @@ export const useStore = create<AppState>((set, get) => ({
         label: def.label,
         name: `${kind}_${existing}`,
         description: def.description,
-        code: (def as any).default_code || '',
+        // 新增节点直接用 agent.py 的原生块，和保存后保持一致
+        code: (def as any).native_code || (def as any).default_code || '',
+        // 预览跑的是 run(ctx) 版本（没装框架时降级用）
+        preview_code: (def as any).default_code || '',
         language: def.language,
         params,
         status: 'idle',

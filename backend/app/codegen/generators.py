@@ -104,6 +104,7 @@ def build_spec(name: str, slug: str, framework: str, graph: Dict[str, Any]) -> D
             # 平台内零依赖预览时执行的就是这段 run(ctx)；
             # agent.py 里则是同一节点的框架原生写法
             "code": data.get("code") or meta.get("default_code", ""),
+            "preview_code": data.get("preview_code") or meta.get("default_code", ""),
             "code_touched": bool(data.get("code_touched")),
             "position": node.get("position") or {"x": 0, "y": 0},
             "org": _node_org(data.get("org")),
@@ -430,12 +431,14 @@ def generate_project(name: str, slug: str, framework: str, graph: Dict[str, Any]
     # 网页上「代码逻辑」显示的就是这段，改的也是这段
     for node, src in zip(spec["nodes"], graph.get("nodes", [])):
         block = node_blocks.get(node["id"])
-        if not block:
-            continue
         data = src.setdefault("data", {})
-        data["code"] = block
+        if block:
+            data["code"] = block
         # 这是生成的版本，不是用户手改的，下次保存允许重新生成
         data["code_generated"] = True
+        # 降级预览用的 run(ctx)：老画布没有就按节点类型补一份
+        if not data.get("preview_code"):
+            data["preview_code"] = get_node_type(node["kind"]).get("default_code", "")
 
     # 模型配置（不含 key）
     cfg = {

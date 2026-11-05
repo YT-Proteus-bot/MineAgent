@@ -70,6 +70,8 @@ export type FlowNodeData = {
   code_touched?: boolean
   /** 这段代码是从 agent.py 同步回来的 */
   code_generated?: boolean
+  /** 零依赖预览用的 run(ctx) 代码（装框架前 runner 执行它） */
+  preview_code?: string
   language: string
   params: NodeParams
   status: NodeStatus
