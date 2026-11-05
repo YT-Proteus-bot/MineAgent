@@ -906,65 +906,134 @@ export const useStore = create<AppState>((set, get) => ({
     if (!nodes.length) return
 
     const ids = nodes.map((n) => n.id)
-    const indeg: Record<string, number> = {}
+    const byId = new Map(nodes.map((n) => [n.id, n]))
+    const kindOf = (id: string) => byId.get(id)?.data.kind || ''
+    // 用真实渲染尺寸（measured）优先，其次用户拖出来的显式尺寸，最后才用默认值
+    const widthOf = (id: string) =>
+      Number(byId.get(id)?.measured?.width) || Number(byId.get(id)?.width) || 216
+    const heightOf = (id: string) =>
+      Number(byId.get(id)?.measured?.height) || Number(byId.get(id)?.height) || 92
+
+    // ── 1. 分层：从 input 出发做 BFS，input 在最上、output 固定在最下 ──
+    // 用 BFS（最短路径）而不是最长路径：回边不会把层数越拉越多
+    const layer: Record<string, number> = {}
     const succ: Record<string, string[]> = {}
     ids.forEach((id) => {
-      indeg[id] = 0
       succ[id] = []
     })
     for (const e of edges) {
-      if (succ[e.source] && indeg[e.target] !== undefined) {
-        succ[e.source].push(e.target)
-        indeg[e.target] += 1
-      }
+      if (succ[e.source] && succ[e.target]) succ[e.source].push(e.target)
     }
 
-    const layer: Record<string, number> = {}
-    const roots = ids.filter((id) => indeg[id] === 0)
-    const seeds = roots.length ? roots : ids.slice(0, 1)
+    const inputIds = ids.filter((id) => kindOf(id) === 'input')
+    const seeds = inputIds.length
+      ? inputIds
+      : ids.filter((id) => !edges.some((e) => e.target === id))
     const queue: string[] = []
-    seeds.forEach((id) => {
+    ;(seeds.length ? seeds : [ids[0]]).forEach((id) => {
       layer[id] = 0
       queue.push(id)
     })
     while (queue.length) {
       const cur = queue.shift() as string
-      for (const nxt of succ[cur] || []) {
+      for (const nxt of succ[cur]) {
         if (layer[nxt] === undefined) {
           layer[nxt] = layer[cur] + 1
           queue.push(nxt)
         }
       }
     }
+    // 从 input 走不到的节点（孤立/只有入边在环里）先放 0，后面统一处理
     ids.forEach((id) => {
       if (layer[id] === undefined) layer[id] = 0
     })
-
-    const buckets: Record<number, string[]> = {}
+    // output 固定放最后一层
+    const maxNormal = Math.max(
+      ...ids.filter((id) => kindOf(id) !== 'output').map((id) => layer[id]),
+      0,
+    )
     ids.forEach((id) => {
-      const lv = layer[id]
-      buckets[lv] = buckets[lv] || []
-      buckets[lv].push(id)
+      if (kindOf(id) === 'output') layer[id] = maxNormal + 1
     })
-    const byId = new Map(nodes.map((n) => [n.id, n]))
-    const pos: Record<string, { x: number; y: number }> = {}
-    Object.keys(buckets)
-      .map(Number)
-      .sort((a, b) => a - b)
-      .forEach((lv) => {
-        const members = buckets[lv].sort(
-          (a, b) => (byId.get(a)?.position.y || 0) - (byId.get(b)?.position.y || 0),
-        )
-        members.forEach((id, i) => {
-          pos[id] = { x: 80 + lv * 320, y: 90 + i * 176 }
+
+    // 按层分组，层内先按原顺序（保持大致相对位置）
+    const maxLayer = Math.max(...ids.map((id) => layer[id]))
+    const layers: string[][] = Array.from({ length: maxLayer + 1 }, () => [])
+    ids.forEach((id) => {
+      layers[layer[id]].push(id)
+    })
+    layers.forEach((arr) =>
+      arr.sort((a, b) => (byId.get(a)?.position.x || 0) - (byId.get(b)?.position.x || 0)),
+    )
+
+    // ── 2. 重心排序：把每个节点挪到"它的上游节点平均位置"附近，减少交叉 ──
+    const indexIn = (id: string, arr: string[]) => arr.indexOf(id)
+    const barycenter = (id: string, refLayer: string[], down: boolean) => {
+      const neighbors = edges
+        .filter((e) => (down ? e.target === id : e.source === id))
+        .map((e) => (down ? e.source : e.target))
+        .filter((nid) => refLayer.includes(nid))
+      if (!neighbors.length) return null
+      const sum = neighbors.reduce((acc, nid) => acc + indexIn(nid, refLayer), 0)
+      return sum / neighbors.length
+    }
+
+    for (let round = 0; round < 4; round++) {
+      const down = round % 2 === 0
+      const order = down
+        ? layers.map((_, i) => i).slice(1)
+        : layers.map((_, i) => i).slice(0, -1).reverse()
+      for (const li of order) {
+        const arr = layers[li]
+        if (arr.length < 2) continue
+        const ref = layers[down ? li - 1 : li + 1]
+        if (!ref || !ref.length) continue
+        const score = new Map<string, number>()
+        arr.forEach((id, i) => {
+          const b = barycenter(id, ref, down)
+          score.set(id, b === null ? i : b)
         })
+        arr.sort((a, b) => (score.get(a) as number) - (score.get(b) as number))
+      }
+    }
+
+    // ── 3. 定位：横向分层（input 最左、output 最右），层间距给足 ──
+    // handle 在左右两侧，横向排布时线最短、最直，交叉也最少
+    // 间距按最宽/最高的节点自适应，避免被拉伸过的节点互相压住
+    const maxW = Math.max(...ids.map(widthOf), 216)
+    const maxH = Math.max(...ids.map(heightOf), 92)
+    const LAYER_GAP = Math.max(340, maxW + 140) // 上下游之间的距离，留给线上的分支名
+    const ROW_GAP = Math.max(140, maxH + 90) // 同一层上下之间的距离
+    const maxRowCount = Math.max(...layers.map((arr) => arr.length))
+    const canvasH =
+      maxRowCount * 92 + Math.max(maxRowCount - 1, 0) * ROW_GAP
+    const pos: Record<string, { x: number; y: number }> = {}
+    layers.forEach((arr, li) => {
+      const totalH =
+        arr.reduce((acc, id) => acc + heightOf(id), 0) + Math.max(arr.length - 1, 0) * ROW_GAP
+      let cursorY = (canvasH - totalH) / 2
+      arr.forEach((id) => {
+        pos[id] = { x: Math.round(li * LAYER_GAP), y: Math.round(cursorY) }
+        cursorY += heightOf(id) + ROW_GAP
       })
+    })
+
+    // 以原图中心为基准平移，避免整图跳到原点
+    const originX = Math.min(...nodes.map((n) => n.position.x))
+    const originY = Math.min(...nodes.map((n) => n.position.y))
+    const newMinX = Math.min(...Object.values(pos).map((p) => p.x))
+    const newMinY = Math.min(...Object.values(pos).map((p) => p.y))
+    const shiftX = originX - newMinX
+    const shiftY = originY - newMinY
 
     set({
-      nodes: nodes.map((n) => ({ ...n, position: pos[n.id] || n.position })),
+      nodes: nodes.map((n) => {
+        const p = pos[n.id]
+        return p ? { ...n, position: { x: p.x + shiftX, y: p.y + shiftY } } : n
+      }),
       dirty: true,
     })
-    get().toast('已按流程分层整理布局', 'ok')
+    get().toast('已按上下游重新排布：输入在左、输出在右', 'ok')
   },
 
   setViewport: (v) => {
