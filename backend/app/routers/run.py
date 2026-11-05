@@ -143,6 +143,7 @@ async def run_canvas(canvas_id: str, payload: RunRequest):
         final_output = ""
         status = "ok"
         errors: List[str] = []
+        got_run_end = False
 
         yield _sse({"event": "prepared", "run_id": run_id, "canvas_id": canvas_id,
                     "project_dir": project_dir, "slug": slug,
@@ -176,7 +177,7 @@ async def run_canvas(canvas_id: str, payload: RunRequest):
                 raw = await proc.stdout.readline()
                 if not raw:
                     break
-                line = raw.decode("utf-8", "replace").rstrip("\n")
+                line = raw.decode("utf-8", "replace").rstrip("\r\n")
                 if not line:
                     continue
                 if line.startswith(EVENT_PREFIX):
@@ -187,6 +188,7 @@ async def run_canvas(canvas_id: str, payload: RunRequest):
                     evt.setdefault("run_id", run_id)
                     collected.append(evt)
                     if evt.get("event") == "run_end":
+                        got_run_end = True
                         final_output = evt.get("output", "") or ""
                         status = evt.get("status", "ok")
                     if evt.get("event") == "error":
@@ -206,13 +208,14 @@ async def run_canvas(canvas_id: str, payload: RunRequest):
                 proc.kill()
 
         duration = int((time.time() - started) * 1000)
-        # 走 agent.py 时没有节点级事件，从普通输出里提取最终结果
-        if run_mode == "native" and not final_output:
-            final_output = _extract_final(log_lines)
-            if proc.returncode not in (0, None):
-                status = "error"
-                if not errors:
-                    errors.append(_extract_final(log_lines)[-500:] or "进程异常退出")
+        # 子进程没发 run_end（纯打印输出）时，从普通输出里提取最终结果兜底
+        if not got_run_end:
+            if run_mode == "native":
+                final_output = _extract_final(log_lines)
+                if proc.returncode not in (0, None):
+                    status = "error"
+                    if not errors:
+                        errors.append(_extract_final(log_lines)[-500:] or "进程异常退出")
             yield _sse({"event": "run_end", "status": status,
                         "output": final_output, "duration_ms": duration,
                         "run_mode": run_mode})
@@ -238,9 +241,9 @@ async def run_canvas(canvas_id: str, payload: RunRequest):
         except Exception:  # noqa: BLE001
             pass
 
-        yield _sse({"event": "run_end", "status": status, "output": final_output,
-                    "duration_ms": duration, "error": "; ".join(errors)[:2000],
-                    "run_id": run_id})
+        if got_run_end:
+            # 事件流里已经推过子进程的 run_end，这里只补最终状态（不再重复一条）
+            return
 
     return StreamingResponse(stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

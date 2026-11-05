@@ -5,9 +5,18 @@ import Modal from './Modal'
 import ModelNameField from './ModelNameField'
 import type { GlobalSettings, ModelConfig } from '../types'
 
+/** 默认服务商是 DeepSeek，其余按需切换 */
+export const DEFAULT_PROVIDER = { id: 'deepseek', base: 'https://api.deepseek.com/v1' }
+export const DEFAULT_MODEL = 'deepseek-chat'
+
 export const PRESETS = [
+  {
+    id: 'deepseek',
+    label: 'DeepSeek',
+    base: 'https://api.deepseek.com/v1',
+    models: ['deepseek-chat', 'deepseek-reasoner', 'deepseek-flash'],
+  },
   { id: 'openai', label: 'OpenAI', base: 'https://api.openai.com/v1', models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4.1-mini'] },
-  { id: 'deepseek', label: 'DeepSeek', base: 'https://api.deepseek.com/v1', models: ['deepseek-chat', 'deepseek-reasoner'] },
   {
     id: 'qwen',
     label: '通义千问',
@@ -106,7 +115,7 @@ export function UserCenterModal({ onClose }: { onClose: () => void }) {
         <span>Base URL</span>
         <input
           value={form.orchestrator_base_url}
-          placeholder="https://api.openai.com/v1"
+          placeholder={preset.base || 'https://api.deepseek.com/v1'}
           onChange={(e) => setForm({ ...form, orchestrator_base_url: e.target.value })}
         />
       </label>
@@ -117,7 +126,7 @@ export function UserCenterModal({ onClose }: { onClose: () => void }) {
         presets={preset.models}
         baseUrl={form.orchestrator_base_url}
         apiKey={key}
-        placeholder={preset.models[0] || 'gpt-4o-mini'}
+        placeholder={preset.models[0] || DEFAULT_MODEL}
       />
 
       <label className="field">

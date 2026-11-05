@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useStore } from '../store'
 import Modal from './Modal'
 import ModelNameField from './ModelNameField'
-import { PRESETS } from './SettingsModals'
+import { DEFAULT_PROVIDER, PRESETS } from './SettingsModals'
 
 /**
  * 给单个 agent 节点配置模型与 API Key。
@@ -21,7 +21,7 @@ export default function NodeModelModal({
 
   const saved = (node?.data.model || {}) as Record<string, any>
   const [form, setForm] = useState({
-    provider: saved.provider || 'openai',
+    provider: saved.provider || DEFAULT_PROVIDER.id,
     base_url: saved.base_url || '',
     model: saved.model || '',
     temperature: saved.temperature ?? 0.3,

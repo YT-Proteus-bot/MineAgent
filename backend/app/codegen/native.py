@@ -70,7 +70,7 @@ def _llm_decl(node: Dict[str, Any]) -> str:
         return ""
     m = node.get("model") or {}
     var = _llm_var(node)
-    model_expr = _q(m["model"]) if m.get("model") else 'CFG.get("model", "gpt-4o-mini")'
+    model_expr = _q(m["model"]) if m.get("model") else 'CFG.get("model", "deepseek-chat")'
     base_expr = (
         _q(m["base_url"]) if m.get("base_url")
         else 'os.environ.get("MINEAGENT_BASE_URL") or CFG.get("base_url")'
@@ -235,7 +235,8 @@ def _block_llm(node: Dict[str, Any]) -> str:
                        "输入只是寒暄、闲聊或没有可拆解目标时，原样返回输入，不要追问。",
             "observation": "把工具返回的结果压缩成 3 条以内的关键观察；没有工具结果时保留原始回答的要点。",
             "review_observation": "判断现有观察是否足够支撑结论，指出还缺什么。",
-            "formatter": "你是格式化工具：只做格式转换，不增删事实、不编造结构；内容不足时原样返回。",
+            "formatter": "你是格式化工具：把输入原样输出，最多调整 Markdown 结构；"
+                         "不得增删内容、不得添加解释或判断。",
             "format_observations": "把多轮观察归并成结构化上下文：只做合并与去重，不新增事实、不编造标题。",
             "summarize": "把内容压缩成要点，保留关键数字与结论。",
             "translate": "按要求翻译内容，保持原意与语气。",
@@ -271,13 +272,17 @@ def _block_agent(node: Dict[str, Any]) -> str:
     return (
         f"def {fn}(state: AgentState) -> dict:\n"
         f'    """{node.get("label") or "Agent"} —— 推理模式：{mode}，最多 {max_steps} 步。"""\n'
+        f'    task = state.get("data", "")\n'
+        f'    origin = state.get("user_input", "")\n'
+        f"    if origin and origin != task:\n"
+        f'        task = f"{{origin}}\\n\\n## 上一轮观察 / 反馈\\n{{task}}\\n\\n请结合原始问题作答。"\n'
         f"    agent = create_agent(\n"
         f"        model={_llm_var(node)},\n"
         f"        tools=TOOLS,\n"
         f"        system_prompt={_q(system)},\n"
         f"    )\n"
         f"    result = agent.invoke(\n"
-        f"        {{\"messages\": [{{\"role\": \"user\", \"content\": state.get(\"data\", \"\")}}]}},\n"
+        f'        {{"messages": [{{"role": "user", "content": task}}]}},\n'
         f"        config={{\"recursion_limit\": {max_steps * 2 + 2}}},\n"
         f"    )\n"
         f"    messages = result.get(\"messages\") or []\n"
@@ -296,6 +301,7 @@ def _block_router(node: Dict[str, Any]) -> str:
     max_loops = int(_num(p, "max_loops", 2))
     llm_var = _llm_var(node)
     name = _q(node["name"])
+    nid = _q(node["id"])
     return (
         f"def {fn}(state: AgentState) -> dict:\n"
         f'    """{node.get("label") or "分支"} —— 按判别问题决定走 true 还是 false。"""\n'
@@ -310,9 +316,9 @@ def _block_router(node: Dict[str, Any]) -> str:
         f"    max_loops = {max_loops}\n"
         f'    if branch == "false" and rounds > max_loops:\n'
         f'        branch = "true"\n'
-        f'        _emit({{"event": "log", "level": "warn", "node": {name}, "name": {name},\n'
+        f'        _emit({{"event": "log", "level": "warn", "node": {nid}, "name": {name},\n'
         f'               "message": f"已连续循环 {{rounds - 1}} 次，强制收敛到 true 出口"}})\n'
-        f'    _emit({{"event": "route", "node": {name}, "name": {name},\n'
+        f'    _emit({{"event": "route", "node": {nid}, "name": {name},\n'
         f'           "branch": branch, "reason": _brief(verdict, 120)}})\n'
         f'    return {{"data": text, "route": branch, "loop_count": rounds}}\n'
     )
@@ -425,7 +431,7 @@ CFG = json.loads((HERE / "config.json").read_text(encoding="utf-8"))
 
 # ── 模型：key 从环境变量或 .env 读，不写死在代码里 ──────────────
 llm = ChatOpenAI(
-    model=os.environ.get("MINEAGENT_MODEL") or CFG.get("model", "gpt-4o-mini"),
+    model=os.environ.get("MINEAGENT_MODEL") or CFG.get("model", "deepseek-chat"),
     base_url=os.environ.get("MINEAGENT_BASE_URL") or CFG.get("base_url"),
     api_key=os.environ.get("MINEAGENT_API_KEY") or "EMPTY",
     temperature=CFG.get("temperature", 0.3),
@@ -452,22 +458,24 @@ def _brief(value: Any, limit: int = 1500) -> Any:
         return str(value)[:limit]
 
 
-def _track(fn, name: str, label: str = "", kind: str = "llm"):
+def _track(fn, node_id: str, name: str = "", label: str = "", kind: str = "llm"):
     """包一层：把节点执行前后的状态推给运行面板，并累计执行轨迹 trace。"""
 
     def wrapped(state):
         started = time.time()
-        _emit({"event": "node_start", "node": name, "name": name,
+        _emit({"event": "node_start", "node": node_id, "name": name or node_id,
                "label": label, "kind": kind})
         try:
             out = fn(state)
         except Exception as exc:  # noqa: BLE001
-            _emit({"event": "error", "node": name, "name": name, "message": str(exc)})
+            _emit({"event": "error", "node": node_id, "name": name or node_id,
+                   "message": str(exc)})
             raise
         data = out.get("data", "") if isinstance(out, dict) else out
         trace = list(state.get("trace") or [])
-        trace.append({"node": name, "kind": kind, "output": _brief(data)})
-        _emit({"event": "node_end", "node": name, "name": name, "kind": kind,
+        trace.append({"node": name or node_id, "id": node_id, "kind": kind,
+                      "output": _brief(data)})
+        _emit({"event": "node_end", "node": node_id, "name": name or node_id, "kind": kind,
                "duration_ms": int((time.time() - started) * 1000),
                "output": _brief(data)})
         if isinstance(out, dict):
@@ -486,6 +494,7 @@ class AgentState(TypedDict, total=False):
     trace: list
     answer: Any
     loop_count: int
+    user_input: str
 
 
 '''
@@ -514,7 +523,7 @@ CFG = json.loads((HERE / "config.json").read_text(encoding="utf-8"))
 llm_config = {{
     "config_list": [
         {{
-            "model": os.environ.get("MINEAGENT_MODEL") or CFG.get("model", "gpt-4o-mini"),
+            "model": os.environ.get("MINEAGENT_MODEL") or CFG.get("model", "deepseek-chat"),
             "base_url": os.environ.get("MINEAGENT_BASE_URL") or CFG.get("base_url"),
             "api_key": os.environ.get("MINEAGENT_API_KEY") or "EMPTY",
         }}
@@ -558,7 +567,7 @@ HERE = Path(__file__).resolve().parent
 CFG = json.loads((HERE / "config.json").read_text(encoding="utf-8"))
 
 llm = ChatOpenAI(
-    model=os.environ.get("MINEAGENT_MODEL") or CFG.get("model", "gpt-4o-mini"),
+    model=os.environ.get("MINEAGENT_MODEL") or CFG.get("model", "deepseek-chat"),
     base_url=os.environ.get("MINEAGENT_BASE_URL") or CFG.get("base_url"),
     api_key=os.environ.get("MINEAGENT_API_KEY") or "EMPTY",
     temperature=CFG.get("temperature", 0.3),
@@ -648,8 +657,8 @@ def _graph_section(spec: Dict[str, Any], framework: str) -> str:
                 continue
             lines.append(
                 f"builder.add_node({_q(node['name'])}, "
-                f"_track({fn}, {_q(node['name'])}, {_q(node.get('label') or '')}, "
-                f"{_q(_kind_of(node))}))"
+                f"_track({fn}, {_q(node['id'])}, {_q(node['name'])}, "
+                f"{_q(node.get('label') or '')}, {_q(_kind_of(node))}))"
             )
         lines.append("")
 
@@ -756,7 +765,7 @@ def _main_section(spec: Dict[str, Any], framework: str) -> str:
 
     if framework == "langchain":
         body = (
-            f'    result = graph.invoke({{"data": user_input, "route": ""}})\n'
+            f'    result = graph.invoke({{"data": user_input, "user_input": user_input, "route": ""}})\n'
             f'    data = result.get("data", "")\n'
             f'    _emit({{"event": "final", "output": _brief(data)}})\n'
             f'    return data\n'

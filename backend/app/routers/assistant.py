@@ -54,15 +54,15 @@ SYSTEM_PROMPT = """你是 MineAgent 的内置助手，一个熟悉 LLM Agent 工
 
 def _runtime_cfg() -> Dict[str, Any]:
     return {
-        "provider": get_setting("orchestrator_provider", "openai"),
-        "base_url": get_setting("orchestrator_base_url", "") or "https://api.openai.com/v1",
-        "model": get_setting("orchestrator_model", "") or "gpt-4o-mini",
+        "provider": get_setting("orchestrator_provider", "deepseek"),
+        "base_url": get_setting("orchestrator_base_url", "") or "https://api.deepseek.com/v1",
+        "model": get_setting("orchestrator_model", "") or "deepseek-chat",
         "api_key": decrypt(get_setting("orchestrator_api_key_cipher", "")),
     }
 
 
 def _endpoint(base_url: str) -> str:
-    base = (base_url or "").strip().rstrip("/") or "https://api.openai.com/v1"
+    base = (base_url or "").strip().rstrip("/") or "https://api.deepseek.com/v1"
     if base.endswith("/chat/completions"):
         return base
     if not base.endswith("/v1") and "/v1" not in base:

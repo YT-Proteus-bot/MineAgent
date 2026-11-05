@@ -442,9 +442,9 @@ def generate_project(name: str, slug: str, framework: str, graph: Dict[str, Any]
 
     # 模型配置（不含 key）
     cfg = {
-        "provider": model_config.get("provider", "openai"),
-        "base_url": model_config.get("base_url") or "https://api.openai.com/v1",
-        "model": model_config.get("model") or "gpt-4o-mini",
+        "provider": model_config.get("provider", "deepseek"),
+        "base_url": model_config.get("base_url") or "https://api.deepseek.com/v1",
+        "model": model_config.get("model") or "deepseek-chat",
         "temperature": model_config.get("temperature", 0.3),
         "max_tokens": model_config.get("max_tokens", 2048),
         "api_key_env": "MINEAGENT_API_KEY",

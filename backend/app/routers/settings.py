@@ -18,9 +18,9 @@ router = APIRouter(prefix="/api/settings", tags=["settings"])
 def current_settings() -> GlobalSettings:
     cipher = get_setting("orchestrator_api_key_cipher", "")
     return GlobalSettings(
-        orchestrator_provider=get_setting("orchestrator_provider", "openai"),
-        orchestrator_base_url=get_setting("orchestrator_base_url", "https://api.openai.com/v1"),
-        orchestrator_model=get_setting("orchestrator_model", "gpt-4o-mini"),
+        orchestrator_provider=get_setting("orchestrator_provider", "deepseek"),
+        orchestrator_base_url=get_setting("orchestrator_base_url", "https://api.deepseek.com/v1"),
+        orchestrator_model=get_setting("orchestrator_model", "deepseek-chat"),
         orchestrator_api_key=None,
         orchestrator_api_key_mask=mask(decrypt(cipher)) if cipher else "",
     )
@@ -33,7 +33,7 @@ def read_settings():
 
 @router.put("", response_model=GlobalSettings)
 def write_settings(payload: GlobalSettings):
-    set_setting("orchestrator_provider", payload.orchestrator_provider or "openai")
+    set_setting("orchestrator_provider", payload.orchestrator_provider or "deepseek")
     set_setting("orchestrator_base_url", payload.orchestrator_base_url or "")
     set_setting("orchestrator_model", payload.orchestrator_model or "")
     if payload.orchestrator_api_key is not None:
@@ -43,7 +43,7 @@ def write_settings(payload: GlobalSettings):
 
 
 def _normalize_url(base_url: str) -> str:
-    base = (base_url or "").strip().rstrip("/") or "https://api.openai.com/v1"
+    base = (base_url or "").strip().rstrip("/") or "https://api.deepseek.com/v1"
     if base.endswith("/chat/completions"):
         return base
     if not base.endswith("/v1") and "/v1" not in base:
@@ -56,7 +56,7 @@ def test_connection(payload: Dict[str, Any]):
     """用给定（或已存）配置发一次最小请求，验证 key 与地址可用。"""
     api_key = payload.get("api_key") or decrypt(get_setting("orchestrator_api_key_cipher", ""))
     base_url = payload.get("base_url") or get_setting("orchestrator_base_url", "")
-    model = payload.get("model") or get_setting("orchestrator_model", "gpt-4o-mini")
+    model = payload.get("model") or get_setting("orchestrator_model", "deepseek-chat")
     if not api_key:
         return {"ok": False, "message": "还没有配置 API Key"}
     body = {
@@ -84,7 +84,7 @@ def test_connection(payload: Dict[str, Any]):
 
 
 def _models_url(base_url: str) -> str:
-    base = (base_url or "").strip().rstrip("/") or "https://api.openai.com/v1"
+    base = (base_url or "").strip().rstrip("/") or "https://api.deepseek.com/v1"
     for suffix in ("/chat/completions", "/completions", "/embeddings"):
         if base.endswith(suffix):
             base = base[: -len(suffix)]
@@ -101,7 +101,7 @@ def list_models(payload: Dict[str, Any]):
     if not api_key:
         api_key = decrypt(get_setting("orchestrator_api_key_cipher", ""))
     base_url = (payload.get("base_url") or "").strip() or get_setting(
-        "orchestrator_base_url", "") or "https://api.openai.com/v1"
+        "orchestrator_base_url", "") or "https://api.deepseek.com/v1"
     if not api_key:
         return {"ok": False, "models": [], "message": "还没有填写 API Key"}
 

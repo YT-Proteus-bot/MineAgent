@@ -66,7 +66,7 @@ class Graph(BaseModel):
 
 
 class ModelConfig(BaseModel):
-    provider: str = "openai"
+    provider: str = "deepseek"
     base_url: str = ""
     model: str = ""
     temperature: float = 0.3
@@ -146,7 +146,7 @@ class RunRequest(BaseModel):
 
 class GlobalSettings(BaseModel):
     # 全局「编排用」key：画布上未单独配置模型时回退到这里
-    orchestrator_provider: str = "openai"
+    orchestrator_provider: str = "deepseek"
     orchestrator_base_url: str = ""
     orchestrator_model: str = ""
     orchestrator_api_key: Optional[str] = None
@@ -170,7 +170,7 @@ class ProjectTreeEntry(BaseModel):
 class AgentNodeModel(BaseModel):
     """单个 agent 节点的模型配置。api_key 只在写入时出现。"""
 
-    provider: str = "openai"
+    provider: str = "deepseek"
     base_url: str = ""
     model: str = ""
     temperature: Optional[float] = None

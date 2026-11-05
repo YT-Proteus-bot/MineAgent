@@ -31,7 +31,7 @@ def _row_to_config(row) -> Dict[str, Any]:
         raw = {}
     cipher = raw.pop("api_key_cipher", "")
     return {
-        "provider": raw.get("provider", "openai"),
+        "provider": raw.get("provider", "deepseek"),
         "base_url": raw.get("base_url", ""),
         "model": raw.get("model", ""),
         "temperature": raw.get("temperature", 0.3),
@@ -122,7 +122,7 @@ def _fetch(conn, canvas_id: str):
 
 def _global_defaults() -> Dict[str, Any]:
     return {
-        "provider": get_setting("orchestrator_provider", "openai"),
+        "provider": get_setting("orchestrator_provider", "deepseek"),
         "base_url": get_setting("orchestrator_base_url", ""),
         "model": get_setting("orchestrator_model", ""),
     }
@@ -141,8 +141,8 @@ def resolve_runtime_model(canvas_row) -> Dict[str, Any]:
         api_key = decrypt(get_setting("orchestrator_api_key_cipher", ""))
     return {
         "provider": cfg["provider"] if cfg.get("model") else glob["provider"],
-        "base_url": cfg["base_url"] or glob["base_url"] or "https://api.openai.com/v1",
-        "model": cfg["model"] or glob["model"] or "gpt-4o-mini",
+        "base_url": cfg["base_url"] or glob["base_url"] or "https://api.deepseek.com/v1",
+        "model": cfg["model"] or glob["model"] or "deepseek-chat",
         "temperature": cfg["temperature"],
         "max_tokens": cfg["max_tokens"],
         "api_key": api_key,
@@ -193,7 +193,7 @@ def create_canvas(payload: CanvasCreate):
             "SELECT 1 FROM canvases WHERE slug = ?", (s,)).fetchone() is not None)
         ts = now_iso()
         default_model = {
-            "provider": get_setting("orchestrator_provider", "openai"),
+            "provider": get_setting("orchestrator_provider", "deepseek"),
             "base_url": get_setting("orchestrator_base_url", ""),
             "model": get_setting("orchestrator_model", ""),
             "temperature": 0.3,
