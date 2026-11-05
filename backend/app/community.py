@@ -247,7 +247,8 @@ def list_templates() -> List[Dict[str, Any]]:
             meta = _raw_json(owner, repo, conf["branch"], f"{conf['dir']}/{slug}/meta.json")
         except Exception:  # noqa: BLE001
             continue
-        meta.setdefault("slug", slug)
+        if not meta.get("slug"):
+            meta["slug"] = slug
         out.append(meta)
     out.sort(key=lambda m: str(m.get("created_at", "")), reverse=True)
     return out
@@ -321,6 +322,8 @@ def publish(canvas_row, graph: Dict[str, Any], meta: Dict[str, Any],
         head_prefix = f"{login}:"
 
     slug = _unique_slug(meta["name"], existing_slugs(token_str))
+    # 目录名就是 slug，必须写回 meta，否则社区列表里读不到（旧模板的兜底在 list_templates）
+    meta["slug"] = slug
     branch_name = f"template/{slug}-{int(time.time())}"
     ref = api("GET", f"/repos/{target}/git/ref/heads/{urllib.parse.quote(branch, safe='')}", token_str)
     base_sha = (ref.get("object") or {}).get("sha")

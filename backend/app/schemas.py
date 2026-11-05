@@ -52,14 +52,14 @@ class FlowEdge(BaseModel):
 
 
 class CanvasBackground(BaseModel):
-    """画布背景。默认全透明，只保留很淡的点阵网格作为编辑参考。"""
+    """画布背景。默认纸白，编辑参考线用浅灰点阵。"""
 
-    color: str = ""            # 空字符串 = 透明
+    color: str = "#f8fafc"      # 默认纸白；空字符串 = 透明
     image: str = ""            # 背景图文件名（存 backend/data/backgrounds/）
     image_fit: str = "cover"   # cover / contain / repeat / center
     image_opacity: float = 1.0
     grid: bool = True          # 是否显示点阵网格
-    grid_color: str = "#1d2740"
+    grid_color: str = "#c9d1de"
 
 
 class Graph(BaseModel):

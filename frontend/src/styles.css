@@ -899,6 +899,46 @@ input[type='range'] {
   line-height: 1.6;
 }
 
+/* ---------------- GitHub 账户 ---------------- */
+.gh-account {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-2);
+}
+.gh-account.on {
+  border-color: rgba(34, 211, 238, 0.4);
+  background: rgba(34, 211, 238, 0.06);
+}
+.gh-avatar {
+  width: 40px;
+  height: 40px;
+  flex: none;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 17px;
+  font-weight: 600;
+  color: #0b1220;
+  background: linear-gradient(135deg, #22d3ee, #6d8bff);
+}
+.gh-account:not(.on) .gh-avatar {
+  background: var(--border);
+  color: var(--muted);
+}
+.gh-name {
+  font-size: 13px;
+  color: var(--text);
+  font-weight: 600;
+}
+.badge.ok {
+  color: var(--ok);
+  border-color: rgba(34, 197, 94, 0.4);
+  background: rgba(34, 197, 94, 0.12);
+}
 .constraint-panel {
   position: absolute;
   top: 46px;

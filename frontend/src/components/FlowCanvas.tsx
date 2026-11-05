@@ -277,7 +277,7 @@ export default function FlowCanvas() {
             variant={BackgroundVariant.Dots}
             gap={22}
             size={1}
-            color={bg.grid_color || '#1d2740'}
+            color={bg.grid_color || '#c9d1de'}
           />
         )}
         <Controls showInteractive={false} />

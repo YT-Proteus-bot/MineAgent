@@ -4,6 +4,7 @@ import { useStore } from '../store'
 import Popover from './Popover'
 import PromptModal from './PromptModal'
 import CommunityModal from './CommunityModal'
+import GitHubAccountModal from './GitHubAccountModal'
 import UploadTemplateModal from './UploadTemplateModal'
 
 interface Props {
@@ -39,6 +40,7 @@ export default function TopBar({ onOpenUserCenter, onOpenCanvasModel }: Props) {
   const [prompt, setPrompt] = useState<null | 'new' | 'rename'>(null)
   const [uploadOpen, setUploadOpen] = useState(false)
   const [communityOpen, setCommunityOpen] = useState(false)
+  const [githubOpen, setGithubOpen] = useState(false)
   const refreshCanvases = useStore((s) => s.refreshCanvases)
 
   const currentFw = meta?.frameworks.find((f) => f.id === canvas?.framework)
@@ -359,9 +361,64 @@ export default function TopBar({ onOpenUserCenter, onOpenCanvasModel }: Props) {
       <button onClick={onOpenCanvasModel} title="配置这个画布用的大模型与 key">
         <span>⚙</span> 模型
       </button>
-      <button onClick={onOpenUserCenter} title="全局 API Key（编排用）">
-        <span>👤</span> 用户中心
-      </button>
+
+      <Popover
+        align="right"
+        width={230}
+        trigger={() => (
+          <button title="账户 / 模型配置 / 公共模板">
+            <span>👤</span> 用户中心
+            <span className="dim small">▾</span>
+          </button>
+        )}
+      >
+        {(close) => (
+          <>
+            <div className="group-title">账户与配置</div>
+            <div
+              className="menu-item"
+              onClick={() => {
+                setGithubOpen(true)
+                close()
+              }}
+            >
+              <span className="ico">🐙</span>
+              <div style={{ flex: 1 }}>
+                <div>GitHub 账户</div>
+                <div className="dim small">连接后可发布 / 加载公共模板</div>
+              </div>
+            </div>
+            <div
+              className="menu-item"
+              onClick={() => {
+                onOpenUserCenter()
+                close()
+              }}
+            >
+              <span className="ico">🔑</span>
+              <div style={{ flex: 1 }}>
+                <div>模型配置</div>
+                <div className="dim small">全局 API Key 与默认模型</div>
+              </div>
+            </div>
+            <div
+              className="menu-item"
+              onClick={() => {
+                setCommunityOpen(true)
+                close()
+              }}
+            >
+              <span className="ico">🧩</span>
+              <div style={{ flex: 1 }}>
+                <div>公共模板</div>
+                <div className="dim small">浏览社区画布，一键加载</div>
+              </div>
+            </div>
+          </>
+        )}
+      </Popover>
+
+      {githubOpen && <GitHubAccountModal onClose={() => setGithubOpen(false)} />}
 
       {uploadOpen && canvas && (
         <UploadTemplateModal

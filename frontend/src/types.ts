@@ -123,12 +123,12 @@ export interface CanvasBackground {
 }
 
 export const DEFAULT_BACKGROUND: CanvasBackground = {
-  color: '',
+  color: '#f8fafc',
   image: '',
   image_fit: 'cover',
   image_opacity: 1,
   grid: true,
-  grid_color: '#1d2740',
+  grid_color: '#c9d1de',
 }
 
 export interface CanvasSummary {
