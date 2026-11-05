@@ -43,6 +43,23 @@ export function isAgentKind(kind?: string): boolean {
   return !!kind && AGENT_KINDS.has(kind)
 }
 
+/**
+ * 这个节点会不会调用大模型。
+ * 只要会调用，就允许单独给它配模型 / Key（覆盖画布级和全局配置）。
+ */
+const LLM_NODE_KINDS = new Set([
+  ...AGENT_KINDS,
+  'planner', 'observation', 'review_observation', 'reflect', 'critique',
+  'formatter', 'format_observations', 'summarize', 'classify', 'extract',
+  'translate', 'rewrite', 'judge', 'evaluator', 'writer', 'researcher',
+  'llm', 'router', 'condition', 'judge_router', 'intent',
+  'rag', 'retriever', 'vector_retriever',
+])
+
+export function usesLLM(kind?: string): boolean {
+  return !!kind && LLM_NODE_KINDS.has(kind)
+}
+
 export type FlowNodeData = {
   kind: string
   label: string

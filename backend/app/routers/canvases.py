@@ -369,8 +369,36 @@ def set_node_model(canvas_id: str, node_id: str, payload: AgentNodeModel):
             " updated_at=excluded.updated_at",
             (canvas_id, node_id, json.dumps(cfg, ensure_ascii=False), cipher, now_iso()),
         )
+        # 同时把"非密钥部分"写回画布图，这样保存时生成 agent.py 能拿到节点级模型
+        _sync_node_model_into_graph(conn, canvas_id, node_id, cfg)
     key = decrypt(cipher) if cipher else ""
     return {**cfg, "api_key_mask": mask(key) if key else "", "has_key": bool(key)}
+
+
+def _sync_node_model_into_graph(conn, canvas_id: str, node_id: str,
+                                cfg: Dict[str, Any] | None) -> None:
+    """把节点级模型配置写进 canvases.graph 里对应节点的 data.model。"""
+    row = conn.execute("SELECT graph FROM canvases WHERE id = ?", (canvas_id,)).fetchone()
+    if not row:
+        return
+    try:
+        graph = json.loads(row["graph"] or "{}")
+    except Exception:  # noqa: BLE001
+        return
+    changed = False
+    for node in graph.get("nodes", []):
+        if node.get("id") != node_id:
+            continue
+        data = node.setdefault("data", {})
+        if cfg:
+            data["model"] = dict(cfg)
+        else:
+            data.pop("model", None)
+        changed = True
+        break
+    if changed:
+        conn.execute("UPDATE canvases SET graph = ? WHERE id = ?",
+                     (json.dumps(graph, ensure_ascii=False), canvas_id))
 
 
 @router.delete("/{canvas_id}/nodes/{node_id}/model")
@@ -379,6 +407,7 @@ def clear_node_model(canvas_id: str, node_id: str):
         _fetch(conn, canvas_id)
         conn.execute("DELETE FROM agent_models WHERE canvas_id = ? AND node_id = ?",
                      (canvas_id, node_id))
+        _sync_node_model_into_graph(conn, canvas_id, node_id, None)
     return {"ok": True}
 
 

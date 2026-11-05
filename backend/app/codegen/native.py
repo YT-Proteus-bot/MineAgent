@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 ROUTE_KINDS = {"router", "condition", "branch", "switch"}
 TOOL_KINDS = {
@@ -46,6 +46,47 @@ def _pyid(name: str) -> str:
 
 def _kind_of(node: Dict[str, Any]) -> str:
     return (node.get("kind") or "llm").lower()
+
+
+def _key_env(node_id: str) -> str:
+    """节点级 key 的环境变量名，必须和运行时注入的名字一致。"""
+    safe = "".join(ch if ch.isalnum() else "_" for ch in (node_id or "")).upper()[:40]
+    return f"MINEAGENT_KEY_{safe or 'NODE'}"
+
+
+def _has_own_model(node: Dict[str, Any]) -> bool:
+    m = node.get("model") or {}
+    return bool(m.get("model") or m.get("base_url"))
+
+
+def _llm_var(node: Dict[str, Any]) -> str:
+    """节点用到模型时用哪个变量：有独立模型就用节点的，否则用全局 llm。"""
+    return f"{_pyid(node['name']).upper()}_LLM" if _has_own_model(node) else "llm"
+
+
+def _llm_decl(node: Dict[str, Any]) -> str:
+    """节点配了独立模型时，生成它的 ChatOpenAI 实例。"""
+    if not _has_own_model(node):
+        return ""
+    m = node.get("model") or {}
+    var = _llm_var(node)
+    model_expr = _q(m["model"]) if m.get("model") else 'CFG.get("model", "gpt-4o-mini")'
+    base_expr = (
+        _q(m["base_url"]) if m.get("base_url")
+        else 'os.environ.get("MINEAGENT_BASE_URL") or CFG.get("base_url")'
+    )
+    env = _key_env(node["id"])
+    temp = m.get("temperature")
+    temp_expr = f"{float(temp)}" if isinstance(temp, (int, float)) else 'CFG.get("temperature", 0.3)'
+    return (
+        f"# ⚙ 这个节点在网页上配了独立模型\n"
+        f"{var} = ChatOpenAI(\n"
+        f"    model={model_expr},\n"
+        f"    base_url={base_expr},\n"
+        f'    api_key=os.environ.get("{env}") or os.environ.get("MINEAGENT_API_KEY") or "EMPTY",\n'
+        f"    temperature={temp_expr},\n"
+        f")\n"
+    )
 
 
 def _params(node: Dict[str, Any]) -> Dict[str, Any]:
@@ -197,7 +238,7 @@ def _block_llm(node: Dict[str, Any]) -> str:
         f"\n"
         f"def {fn}(state: AgentState) -> dict:\n"
         f'    """{node.get("label") or kind}"""\n'
-        f"    model = llm.bind(temperature={temperature})\n"
+        f"    model = {_llm_var(node)}.bind(temperature={temperature})\n"
         f"    msg = model.invoke({prompt_var}.format_messages(input=state.get(\"data\", \"\")))\n"
         f'    return {{"data": msg.content}}\n'
     )
@@ -216,7 +257,7 @@ def _block_agent(node: Dict[str, Any]) -> str:
         f"def {fn}(state: AgentState) -> dict:\n"
         f'    """{node.get("label") or "Agent"} —— 推理模式：{mode}，最多 {max_steps} 步。"""\n'
         f"    agent = create_agent(\n"
-        f"        model=llm,\n"
+        f"        model={_llm_var(node)},\n"
         f"        tools=TOOLS,\n"
         f"        system_prompt={_q(system)},\n"
         f"    )\n"
@@ -284,7 +325,7 @@ def _block_generic(node: Dict[str, Any]) -> str:
         f"def {fn}(state: AgentState) -> dict:\n"
         f'    """{desc}"""\n'
         f"    # 这个节点类型还没有专门的原生写法，先用一次模型调用占位\n"
-        f'    msg = llm.invoke(f"{desc}\\n\\n输入：{{state.get(\'data\', \'\')}}")\n'
+        f'    msg = {_llm_var(node)}.invoke(f"{desc}\\n\\n输入：{{state.get(\'data\', \'\')}}")\n'
         f'    return {{"data": msg.content}}\n'
     )
 
@@ -293,6 +334,7 @@ def node_block(node: Dict[str, Any]) -> str:
     """生成单个节点在 agent.py 里的代码块。"""
     kind = _kind_of(node)
     header = _block_header(node)
+    decl = _llm_decl(node)
 
     if kind == "input":
         body = _block_input(node)
@@ -313,7 +355,12 @@ def node_block(node: Dict[str, Any]) -> str:
         body = _block_llm(node)
     else:
         body = _block_generic(node)
-    return header + "\n" + body + "\n"
+
+    parts = [header, "\n"]
+    if decl:
+        parts.append(decl + "\n")
+    parts.append(body + "\n")
+    return "".join(parts)
 
 
 # --------------------------------------------------------------------------- #

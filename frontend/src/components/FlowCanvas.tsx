@@ -17,7 +17,7 @@ import ConstraintPanel from './ConstraintPanel'
 import NodeModelModal from './NodeModelModal'
 import { ContextMenu, NodePicker } from './ContextMenu'
 import { useStore } from '../store'
-import { DEFAULT_BACKGROUND, isAgentKind } from '../types'
+import { DEFAULT_BACKGROUND, isAgentKind, usesLLM } from '../types'
 
 const nodeTypes = { agent: AgentNode }
 const edgeTypes = { agent: AgentEdge }
@@ -68,9 +68,13 @@ export default function FlowCanvas() {
   const [modelNodeId, setModelNodeId] = useState<string | null>(null)
   const setInspectorTab = useStore((s) => s.setInspectorTab)
   const canvasId = canvas?.id
-  const menuNodeIsAgent =
-    menu?.kind === 'node' &&
-    isAgentKind(nodes.find((n) => n.id === menu.nodeId)?.data.kind)
+  const menuNodeKind =
+    menu?.kind === 'node'
+      ? nodes.find((n) => n.id === menu.nodeId)?.data.kind
+      : undefined
+  const menuNodeIsAgent = isAgentKind(menuNodeKind)
+  // 只要这个节点会调用大模型，就允许单独配模型
+  const menuNodeUsesLLM = usesLLM(menuNodeKind)
 
   const constraintPanelOpen = useStore((s) => s.constraintPanelOpen)
   const setConstraintPanelOpen = useStore((s) => s.setConstraintPanelOpen)
@@ -400,7 +404,7 @@ export default function FlowCanvas() {
           >
             <span className="ico">➜</span> 连线到其它节点…
           </div>
-          {menuNodeIsAgent && (
+          {menuNodeUsesLLM && (
             <div
               className="ctx-item"
               onClick={() => {
@@ -409,6 +413,7 @@ export default function FlowCanvas() {
               }}
             >
               <span className="ico">⚙</span> 配置模型 / API Key
+              {!menuNodeIsAgent && <span className="hint">覆盖画布配置</span>}
             </div>
           )}
           <div
