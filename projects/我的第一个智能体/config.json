@@ -1,0 +1,8 @@
+{
+  "provider": "openai",
+  "base_url": "https://api.openai.com/v1",
+  "model": "gpt-4o-mini",
+  "temperature": 0.3,
+  "max_tokens": 2048,
+  "api_key_env": "MINEAGENT_API_KEY"
+}

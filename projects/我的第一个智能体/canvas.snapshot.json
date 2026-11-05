@@ -1,0 +1,288 @@
+{
+  "nodes": [
+    {
+      "id": "n1",
+      "type": "agent",
+      "position": {
+        "x": 60.0,
+        "y": 60.0
+      },
+      "data": {
+        "kind": "input",
+        "label": "输入 Input",
+        "name": "input_1",
+        "description": "每个智能体必须有的入口方块，接收用户输入。",
+        "code": "from runtime_sdk import NodeContext\n\n\ndef run(ctx: NodeContext):\n    \"\"\"入口：把用户输入交给下游。\"\"\"\n    text = ctx.text.strip()\n    if not text:\n        raise ValueError(\"输入为空，请先在运行面板填写输入\")\n    ctx.log(f\"收到输入：{len(text)} 字\")\n    return text\n",
+        "language": "python",
+        "params": {},
+        "status": "idle"
+      }
+    },
+    {
+      "id": "n2",
+      "type": "agent",
+      "position": {
+        "x": 356.0,
+        "y": 60.0
+      },
+      "data": {
+        "kind": "planner",
+        "label": "任务规划",
+        "name": "planner_2",
+        "description": "把目标拆成有序执行计划。",
+        "code": "from runtime_sdk import NodeContext\n\n\ndef run(ctx: NodeContext):\n    \"\"\"任务规划：把目标拆成有序步骤。\"\"\"\n    return ctx.llm(\n        f\"目标：{ctx.text}\\n\\n请输出执行计划，每行一步，形如「1. ...」，只输出计划。\",\n        system=\"你是任务规划专家，计划必须可执行、有依赖顺序。\",\n    )\n",
+        "language": "python",
+        "params": {},
+        "status": "idle"
+      }
+    },
+    {
+      "id": "n3",
+      "type": "agent",
+      "position": {
+        "x": 2132.0,
+        "y": 60.0
+      },
+      "data": {
+        "kind": "agent",
+        "label": "Agent（ReAct）",
+        "name": "agent_3",
+        "description": "带工具的自主 Agent（ReAct 循环）。画布中连到它的 tool 子图会自动注入工具。",
+        "code": "from runtime_sdk import NodeContext\n\n\ndef run(ctx: NodeContext):\n    \"\"\"带工具循环的 Agent（ReAct）。\n\n    画布中「连到本节点输入」的 tool 子图会自动注入 ctx.tools。\n    \"\"\"\n    system = ctx.params.get(\"system\") or \"你是一个能自主使用工具的智能体。\"\n    return ctx.agent(\n        task=ctx.text,\n        tools=ctx.tools,\n        system=system,\n        max_steps=ctx.params.get(\"max_steps\", 6),\n    )\n",
+        "language": "python",
+        "params": {
+          "max_steps": 6
+        },
+        "status": "idle"
+      }
+    },
+    {
+      "id": "n4",
+      "type": "agent",
+      "position": {
+        "x": 948.0,
+        "y": 60.0
+      },
+      "data": {
+        "kind": "tool",
+        "label": "工具：search",
+        "name": "search_tool",
+        "description": "工具的通用节点，被 Agent 调用或直接执行。",
+        "code": "from runtime_sdk import NodeContext\n\n\ndef run(ctx: NodeContext, **kwargs):\n    \"\"\"工具节点：被 agent 节点调用时 kwargs 为模型给出的参数。\n\n    直接连在流程中时也会作为普通节点执行一次。\n    \"\"\"\n    query = kwargs.get(\"query\") or ctx.params.get(\"query\") or ctx.text\n    ctx.log(f\"tool 执行：{query}\")\n    # TODO: 在这里写真正的工具逻辑\n    return {\"tool\": ctx.params.get(\"name\", \"tool\"), \"query\": query, \"result\": \"\"}\n",
+        "language": "python",
+        "params": {
+          "name": "search",
+          "query": ""
+        },
+        "status": "idle"
+      }
+    },
+    {
+      "id": "n5",
+      "type": "agent",
+      "position": {
+        "x": 1244.0,
+        "y": 60.0
+      },
+      "data": {
+        "kind": "observation",
+        "label": "观察 Observation",
+        "name": "observation_5",
+        "description": "记录本轮动作的真实结果，是 Agent 循环的反馈入口。",
+        "code": "from runtime_sdk import NodeContext\n\n\ndef run(ctx: NodeContext):\n    \"\"\"观察：记录本轮动作的真实结果（工具返回 / 环境反馈）。\"\"\"\n    obs = {\n        \"node\": ctx.node_name,\n        \"input\": ctx.input,\n        \"summary\": ctx.llm(\n            f\"把工具返回结果压缩成 3 条以内的观察要点：\\n{ctx.text}\",\n            system=\"只陈述事实，不推断。\",\n        ),\n        \"raw\": ctx.text,\n    }\n    ctx.state.setdefault(\"observations\", []).append(obs)\n    ctx.emit(\"observation\", {\"summary\": obs[\"summary\"]})\n    return obs\n",
+        "language": "python",
+        "params": {},
+        "status": "idle"
+      }
+    },
+    {
+      "id": "n6",
+      "type": "agent",
+      "position": {
+        "x": 1540.0,
+        "y": 60.0
+      },
+      "data": {
+        "kind": "review_observation",
+        "label": "观察复核 Review",
+        "name": "review_observation_6",
+        "description": "判断观察是否充分可信，决定继续/重试/重规划。",
+        "code": "from runtime_sdk import NodeContext\n\n\ndef run(ctx: NodeContext):\n    \"\"\"观察复核：判断观察是否充分、可信，是否需要再执行一次。\"\"\"\n    data = ctx.json_prompt(\n        \"复核下面的观察结果：是否足够支撑决策？是否与目标相关？是否可信？\",\n        schema={\"sufficient\": True, \"reliable\": True, \"missing\": [\"...\"],\n                \"next_action\": \"continue|retry|replan\", \"reason\": \"\"},\n        context=ctx.input,\n    )\n    ctx.state[\"review\"] = data\n    ctx.emit(\"review_observation\", data)\n    return data\n",
+        "language": "python",
+        "params": {},
+        "status": "idle"
+      }
+    },
+    {
+      "id": "n7",
+      "type": "agent",
+      "position": {
+        "x": 1836.0,
+        "y": 60.0
+      },
+      "data": {
+        "kind": "router",
+        "label": "继续 or 收敛",
+        "name": "router_7",
+        "description": "判断后走 true / false 两条出边，是分支与循环的枢纽。",
+        "code": "from runtime_sdk import NodeContext\n\n\ndef run(ctx: NodeContext):\n    \"\"\"条件路由：返回 \"true\" 或 \"false\" 决定走哪条出边。\"\"\"\n    question = ctx.params.get(\"question\") or \"该请求是否需要调用工具？\"\n    verdict = ctx.llm(\n        f\"判别问题：{question}\\n待判内容：{ctx.text}\\n只回答 true 或 false。\",\n        system=\"你只输出 true 或 false，不要解释。\",\n    ).strip().lower()\n    branch = \"true\" if verdict.startswith(\"true\") else \"false\"\n    ctx.emit(\"route\", {\"branch\": branch})\n    return branch\n",
+        "language": "python",
+        "params": {
+          "question": "观察是否已足够回答用户问题？"
+        },
+        "status": "idle"
+      }
+    },
+    {
+      "id": "n8",
+      "type": "agent",
+      "position": {
+        "x": 2132.0,
+        "y": 238.0
+      },
+      "data": {
+        "kind": "format_observations",
+        "label": "观察格式化",
+        "name": "format_observations_8",
+        "description": "把多轮观察整理成结构化上下文。",
+        "code": "from runtime_sdk import NodeContext\n\n\ndef run(ctx: NodeContext):\n    \"\"\"观察格式化：把多轮观察整理成结构化上下文。\"\"\"\n    obs = ctx.state.get(\"observations\", [])\n    if not obs and isinstance(ctx.input, list):\n        obs = ctx.input\n    lines = []\n    for i, item in enumerate(obs, 1):\n        summary = item.get(\"summary\") if isinstance(item, dict) else str(item)\n        lines.append(f\"{i}. {summary}\")\n    text = ctx.params.get(\"header\", \"## 已有观察\\n\") + \"\\n\".join(lines)\n    return {\"formatted\": text, \"count\": len(lines), \"raw\": obs}\n",
+        "language": "python",
+        "params": {},
+        "status": "idle"
+      }
+    },
+    {
+      "id": "n9",
+      "type": "agent",
+      "position": {
+        "x": 2428.0,
+        "y": 60.0
+      },
+      "data": {
+        "kind": "formatter",
+        "label": "格式化输出",
+        "name": "formatter_9",
+        "description": "整理成 markdown / json / 表格。",
+        "code": "from runtime_sdk import NodeContext\n\n\ndef run(ctx: NodeContext):\n    \"\"\"格式化：把结果整理成指定格式（markdown / json / table）。\"\"\"\n    fmt = ctx.params.get(\"format\", \"markdown\")\n    return ctx.llm(\n        f\"把下面内容转成 {fmt} 格式，只输出结果本身：\\n{ctx.text}\",\n        system=\"你是格式化工具，不做内容增删。\",\n    )\n",
+        "language": "python",
+        "params": {},
+        "status": "idle"
+      }
+    },
+    {
+      "id": "n10",
+      "type": "agent",
+      "position": {
+        "x": 2724.0,
+        "y": 60.0
+      },
+      "data": {
+        "kind": "output",
+        "label": "输出 Output",
+        "name": "output_10",
+        "description": "每个智能体必须有的出口方块，返回最终答案。",
+        "code": "from runtime_sdk import NodeContext\n\n\ndef run(ctx: NodeContext):\n    \"\"\"出口：终止流程并返回最终答案给用户。\"\"\"\n    answer = ctx.text\n    ctx.emit(\"final\", {\"answer\": answer})\n    return answer\n",
+        "language": "python",
+        "params": {},
+        "status": "idle"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "en1__n2",
+      "source": "n1",
+      "target": "n2",
+      "sourceHandle": null,
+      "targetHandle": "in",
+      "label": null,
+      "data": {}
+    },
+    {
+      "id": "en2__n3",
+      "source": "n2",
+      "target": "n3",
+      "sourceHandle": null,
+      "targetHandle": "in",
+      "label": null,
+      "data": {}
+    },
+    {
+      "id": "en3__n4",
+      "source": "n3",
+      "target": "n4",
+      "sourceHandle": null,
+      "targetHandle": "in",
+      "label": "调用工具",
+      "data": {}
+    },
+    {
+      "id": "en4__n5",
+      "source": "n4",
+      "target": "n5",
+      "sourceHandle": null,
+      "targetHandle": "in",
+      "label": null,
+      "data": {}
+    },
+    {
+      "id": "en5__n6",
+      "source": "n5",
+      "target": "n6",
+      "sourceHandle": null,
+      "targetHandle": "in",
+      "label": null,
+      "data": {}
+    },
+    {
+      "id": "en6__n7",
+      "source": "n6",
+      "target": "n7",
+      "sourceHandle": null,
+      "targetHandle": "in",
+      "label": null,
+      "data": {}
+    },
+    {
+      "id": "en7__n3__true",
+      "source": "n7",
+      "target": "n3",
+      "sourceHandle": "true",
+      "targetHandle": "in",
+      "label": "继续循环",
+      "data": {}
+    },
+    {
+      "id": "en7__n8__false",
+      "source": "n7",
+      "target": "n8",
+      "sourceHandle": "false",
+      "targetHandle": "in",
+      "label": "已收敛",
+      "data": {}
+    },
+    {
+      "id": "en8__n9",
+      "source": "n8",
+      "target": "n9",
+      "sourceHandle": null,
+      "targetHandle": "in",
+      "label": null,
+      "data": {}
+    },
+    {
+      "id": "en9__n10",
+      "source": "n9",
+      "target": "n10",
+      "sourceHandle": null,
+      "targetHandle": "in",
+      "label": null,
+      "data": {}
+    }
+  ],
+  "viewport": {
+    "x": 0,
+    "y": 0,
+    "zoom": 0.85
+  }
+}

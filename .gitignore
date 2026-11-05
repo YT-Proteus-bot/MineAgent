@@ -1,0 +1,19 @@
+# 依赖与构建产物
+.venv/
+node_modules/
+frontend/dist/
+frontend/tsconfig.tsbuildinfo
+__pycache__/
+*.pyc
+backend/data/
+backend/**/__pycache__/
+
+# 生成的项目（用户数据，按需可提交）
+projects/*/.store.db
+projects/*/outputs/*
+projects/*/.env
+
+# 编辑器
+.vscode/
+.idea/
+*.log

@@ -1,0 +1,4 @@
+.env
+.store.db
+outputs/*
+__pycache__/
