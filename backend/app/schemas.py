@@ -14,6 +14,10 @@ class FlowNodeData(BaseModel):
     name: str = ""
     description: str = ""
     code: str = ""
+    # 用户手动改过这段代码：保存时保留他的版本，不重新生成
+    code_touched: bool = False
+    # 这段代码是从 agent.py 同步回来的
+    code_generated: bool = False
     language: str = "python"
     params: Dict[str, Any] = Field(default_factory=dict)
     status: str = "idle"

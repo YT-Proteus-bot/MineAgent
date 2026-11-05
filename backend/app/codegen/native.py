@@ -210,41 +210,23 @@ def _block_agent(node: Dict[str, Any]) -> str:
     max_steps = int(_num(p, "max_steps", 6))
     system = _text(p, "system_prompt") or (
         "你是一个能调用工具的智能体。回答前先想清楚需要哪些信息，"
-        "必要时调用工具，最后用一句话给出最终答案。"
+        "必要时调用工具，最后给出最终答案。"
     )
-    react_prompt = (
-        "你可以使用以下工具：\n\n{tools}\n\n"
-        "可用工具名：{tool_names}\n\n"
-        "按下面的格式回答：\n"
-        "Question: 需要回答的问题\n"
-        "Thought: 思考下一步做什么\n"
-        "Action: 工具名，必须是 [{tool_names}] 之一\n"
-        "Action Input: 工具的输入\n"
-        "Observation: 工具返回的结果\n"
-        "...（Thought/Action/Action Input/Observation 可以重复多次）\n"
-        "Thought: 我已经知道最终答案了\n"
-        "Final Answer: 给用户的最终答案\n\n"
-        "Question: {input}\n"
-        "Thought:{agent_scratchpad}"
-    )
-    prompt_var = f"{fn.upper()}_PROMPT"
     return (
-        f"{prompt_var} = PromptTemplate.from_template(\n"
-        f'    """{react_prompt}"""\n'
-        f")\n"
-        f"\n"
         f"def {fn}(state: AgentState) -> dict:\n"
         f'    """{node.get("label") or "Agent"} —— 推理模式：{mode}，最多 {max_steps} 步。"""\n'
-        f"    agent = create_react_agent(llm, TOOLS, {prompt_var})\n"
-        f"    executor = AgentExecutor(\n"
-        f"        agent=agent,\n"
+        f"    agent = create_agent(\n"
+        f"        model=llm,\n"
         f"        tools=TOOLS,\n"
-        f"        max_iterations={max_steps},\n"
-        f"        handle_parsing_errors=True,\n"
-        f"        verbose=False,\n"
+        f"        system_prompt={_q(system)},\n"
         f"    )\n"
-        f"    result = executor.invoke({{\"input\": state.get(\"data\", \"\")}})\n"
-        f'    return {{"data": result.get("output", "")}}\n'
+        f"    result = agent.invoke(\n"
+        f"        {{\"messages\": [{{\"role\": \"user\", \"content\": state.get(\"data\", \"\")}}]}},\n"
+        f"        config={{\"recursion_limit\": {max_steps * 2 + 2}}},\n"
+        f"    )\n"
+        f"    messages = result.get(\"messages\") or []\n"
+        f"    answer = str(getattr(messages[-1], \"content\", \"\")) if messages else \"\"\n"
+        f'    return {{"data": answer}}\n'
     )
 
 
@@ -285,13 +267,13 @@ def _block_retriever(node: Dict[str, Any]) -> str:
 
 def _block_memory(node: Dict[str, Any]) -> str:
     fn = _pyid(node["name"])
+    limit = int(_num(_params(node), "window", 10))
     return (
-        f"{fn.upper()}_MEMORY = ConversationBufferMemory(memory_key=\"history\", return_messages=True)\n"
-        f"\n"
         f"def {fn}(state: AgentState) -> dict:\n"
-        f'    """{node.get("label") or "记忆"} —— 读写对话历史。"""\n'
-        f'    history = {fn.upper()}_MEMORY.load_memory_variables({{}}).get("history", [])\n'
-        f'    return {{"data": state.get("data", ""), "history": history}}\n'
+        f'    """{node.get("label") or "记忆"} —— 保留最近 {limit} 轮对话。"""\n'
+        f'    history = list(state.get("history") or [])\n'
+        f'    history.append(str(state.get("data", "")))\n'
+        f'    return {{"data": state.get("data", ""), "history": history[-{limit}:]}}\n'
     )
 
 
@@ -354,8 +336,7 @@ import os
 from pathlib import Path
 from typing import Any, TypedDict
 
-from langchain.agents import AgentExecutor, create_react_agent
-from langchain.memory import ConversationBufferMemory
+from langchain.agents import create_agent
 from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
@@ -473,10 +454,54 @@ HEADERS = {
 }
 
 
+def _tool_ids(spec: Dict[str, Any]) -> set:
+    return {n["id"] for n in spec["nodes"] if _kind_of(n) in TOOL_KINDS}
+
+
+def _edge_into_graph(spec: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """把 tool 节点从图里"压缩"掉。
+
+    tool 不是图里的执行步骤，而是被 agent 调用的函数。所以
+    agent -> tool -> observation 要变成 agent -> observation。
+    """
+    tool_ids = _tool_ids(spec)
+    edges = spec["edges"]
+    by_source: Dict[str, List[Dict[str, Any]]] = {}
+    for e in edges:
+        by_source.setdefault(e["source"], []).append(e)
+
+    def resolve(target: str, depth: int = 0) -> str | None:
+        if target not in tool_ids:
+            return target
+        if depth > 8:
+            return None
+        for e in by_source.get(target, []):
+            got = resolve(e["target"], depth + 1)
+            if got:
+                return got
+        return None
+
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for e in edges:
+        if e["source"] in tool_ids:
+            continue  # 从 tool 出的边不参与构图
+        target = resolve(e["target"])
+        if not target:
+            continue
+        key = (e["source"], target, e.get("sourceHandle") or "out")
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({**e, "target": target})
+    return out
+
+
 def _graph_section(spec: Dict[str, Any], framework: str) -> str:
     """图组装：节点、普通边、分支条件边、入口出口。"""
     nodes = {n["id"]: n for n in spec["nodes"]}
     order = topo_order(spec)
+    graph_edges = _edge_into_graph(spec)
     lines: List[str] = []
 
     tool_names = [_pyid(nodes[i]["name"]) for i in order if _kind_of(nodes[i]) in TOOL_KINDS]
@@ -499,9 +524,9 @@ def _graph_section(spec: Dict[str, Any], framework: str) -> str:
             lines.append(f"builder.add_node({_q(node['name'])}, {fn})")
         lines.append("")
 
-        # 普通边 / 条件边
+        # 普通边 / 条件边（tool 节点已被压缩掉）
         by_source: Dict[str, List[Dict[str, Any]]] = {}
-        for e in spec["edges"]:
+        for e in graph_edges:
             by_source.setdefault(e["source"], []).append(e)
 
         entry = next((i for i in order if _kind_of(nodes[i]) == "input"), order[0] if order else None)
@@ -636,8 +661,12 @@ def _main_section(spec: Dict[str, Any], framework: str) -> str:
     )
 
 
-def render_agent_py(spec: Dict[str, Any], framework: str) -> str:
-    """生成完整的 agent.py（框架原生代码）。"""
+def render_agent_full(spec: Dict[str, Any], framework: str) -> tuple:
+    """生成完整的 agent.py，并返回每个节点对应的代码块。
+
+    返回 (agent.py 全文, {node_id: 该节点的代码块})。
+    节点块会被写回画布数据，网页上「代码逻辑」显示的就是这段。
+    """
     header = HEADERS.get(framework, _HEADER_LANGCHAIN).format(
         name=spec["name"],
         framework_label=spec.get("framework_label", framework),
@@ -646,14 +675,17 @@ def render_agent_py(spec: Dict[str, Any], framework: str) -> str:
     nodes = {n["id"]: n for n in spec["nodes"]}
 
     blocks: List[str] = []
+    blocks_by_id: Dict[str, str] = {}
     for nid in order:
         node = nodes[nid]
-        # agent.json 里如果存了用户改过的代码，就用用户的
         custom = (node.get("code") or "").strip()
-        if custom and custom.startswith("#"):
-            blocks.append(custom + "\n")
+        # 用户手动改过（code_touched）并且是原生块格式 -> 保留他的版本
+        if custom.startswith("#") and node.get("code_touched"):
+            block = custom + "\n"
         else:
-            blocks.append(node_block(node))
+            block = node_block(node)
+        blocks.append(block)
+        blocks_by_id[nid] = block.strip()
 
     graph_section = _graph_section(spec, framework)
     main_section = _main_section(spec, framework)
@@ -674,4 +706,9 @@ def render_agent_py(spec: Dict[str, Any], framework: str) -> str:
         "# ═══════════════════════════════════════════════════════════════\n"
         + main_section,
     ]
-    return "".join(parts)
+    return "".join(parts), blocks_by_id
+
+
+def render_agent_py(spec: Dict[str, Any], framework: str) -> str:
+    """生成完整的 agent.py（框架原生代码）。"""
+    return render_agent_full(spec, framework)[0]

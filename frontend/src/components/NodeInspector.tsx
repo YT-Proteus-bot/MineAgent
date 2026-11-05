@@ -381,20 +381,28 @@ export default function NodeInspector() {
         ) : (
           <>
             <div className="hint-box" style={{ marginBottom: 10 }}>
-              这段 <code className="mono">run(ctx)</code> 是平台内**零依赖预览**用的执行代码；
+              这段就是 <code className="mono">projects/{canvas?.slug}/agent.py</code> 里
+              「{data.label}」对应的代码块——改这里，保存后项目里的同段代码会跟着改。
               <br />
-              保存后项目里的 <code className="mono">agent.py</code> 会把这个节点写成框架原生代码
-              （例如 <code className="mono">@tool</code> / <code className="mono">create_react_agent</code>）。
+              保存时会保留你的修改，只有节点参数变化时才会重新生成。
             </div>
             <div className="row" style={{ marginBottom: 8 }}>
               <span className="badge">{data.language === 'markdown' ? 'Markdown / Skill' : 'Python'}</span>
+              {data.code_touched && (
+                <span className="badge" style={{ color: 'var(--warn)' }}>
+                  已手改
+                </span>
+              )}
               <div style={{ flex: 1 }} />
               <button
                 className="sm"
                 onClick={() =>
-                  updateNode(node.id, { code: (def as any)?.default_code || '' })
+                  updateNode(node.id, {
+                    code: (def as any)?.default_code || '',
+                    code_touched: false,
+                  })
                 }
-                title="用该节点类型的默认模板覆盖当前代码"
+                title="丢弃手改，用该节点类型的默认模板重新生成"
               >
                 恢复默认模板
               </button>
@@ -403,10 +411,11 @@ export default function NodeInspector() {
               value={data.code}
               language={data.language}
               height={430}
-              onChange={(v) => updateNode(node.id, { code: v })}
+              onChange={(v) => updateNode(node.id, { code: v, code_touched: true })}
             />
             <div className="hint-box">
-              这段代码就是运行时的真实逻辑，签名固定为 <code className="mono">run(ctx)</code>。
+              保存后会原样写进 <code className="mono">agent.py</code>，直接
+              <code className="mono"> python agent.py</code> 就能跑。
               ctx 提供 llm / agent / tool / http / search / skill / remember / retrieve 等能力，
               详见项目里的 <code className="mono">runtime_sdk.py</code>。
             </div>

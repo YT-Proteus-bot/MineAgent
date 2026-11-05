@@ -276,32 +276,63 @@ requirements.txt    # 该框架需要的依赖
 # 节点：Agent（ReAct）  (agent_3)  类型：agent
 # ═══════════════════════════════════════════════════════════════
 
-AGENT_3_PROMPT = PromptTemplate.from_template("""你可以使用以下工具：...""")
-
 def agent_3(state: AgentState) -> dict:
     """Agent（ReAct） —— 推理模式：react，最多 6 步。"""
-    agent = create_react_agent(llm, TOOLS, AGENT_3_PROMPT)
-    executor = AgentExecutor(agent=agent, tools=TOOLS, max_iterations=6,
-                             handle_parsing_errors=True)
-    result = executor.invoke({"input": state.get("data", "")})
-    return {"data": result.get("output", "")}
+    agent = create_agent(
+        model=llm,
+        tools=TOOLS,
+        system_prompt="你是一个能调用工具的智能体……",
+    )
+    result = agent.invoke(
+        {"messages": [{"role": "user", "content": state.get("data", "")}]},
+        config={"recursion_limit": 14},
+    )
+    messages = result.get("messages") or []
+    answer = str(getattr(messages[-1], "content", "")) if messages else ""
+    return {"data": answer}
 ```
+
+**网页上节点的「代码逻辑」显示的就是这一段**——改那里，保存后 `agent.py` 里同一段跟着改。
 
 不同类型节点对应不同的原生写法：
 
 | 节点类型 | `agent.py` 里的写法 |
 | --- | --- |
 | `tool` / `web_search` | `@tool def xxx(query: str)`，自动汇总进 `TOOLS` |
-| `agent` | `create_react_agent(llm, TOOLS, PROMPT)` + `AgentExecutor` |
+| `agent` | `create_agent(model=llm, tools=TOOLS, system_prompt=...)` + `invoke` |
 | `planner` / `observation` / `formatter` | `ChatPromptTemplate` + `llm.invoke(...)` |
 | `router` | 返回 `{"route": "true"/"false"}`，图里接 `add_conditional_edges` |
 | `retriever` | `vectorstore.as_retriever(...)` 的骨架代码 |
-| `memory` | `ConversationBufferMemory` |
+| `memory` | 简单的对话历史窗口 |
 | `input` / `output` | 图的首尾函数 |
 
 图本身用 **LangGraph 的 `StateGraph`** 组装：`builder.add_node(...)`、
-`add_edge(...)`、`add_conditional_edges(...)`、`builder.compile()`——
+`builder.add_edge(...)`、`add_conditional_edges(...)`、`builder.compile()`——
 和你手写一个 LangGraph 项目没有区别。
+
+`tool` 节点不会作为图里的一步：它的边会被"穿透"（`agent → tool → observation`
+在代码里变成 `agent → observation`），工具函数由 agent 内部调用，这才是 ReAct 的正常用法。
+
+### 代码和画布怎么保持同步
+
+保存时会做这几件事，是**真正的增量修改**而不是每次推倒重写：
+
+- **新增节点** → `agent.py` 里多一个带 `═══` 标记的函数块，图里多一行 `add_node` / `add_edge`
+- **删除节点** → 对应的代码块和图里的 `add_node` / `add_edge` 一起被移除
+- **改节点参数** → 只重新生成那一个块
+- **手动改过代码** → 该节点标记为「已手改」，之后保存**保留你的版本**，不会被覆盖；
+  点「恢复默认模板」可以丢弃手改重新生成
+- 生成完会把每个块**写回画布数据**，所以网页上看到的就是 `agent.py` 里的真实代码
+
+### 运行时跑的是真代码
+
+点「运行」时：
+
+1. 检查这张画布对应框架的依赖（`langchain` / `langchain-openai` / `langgraph`）是否就绪
+2. **就绪 → 直接执行项目里的 `agent.py`**，跑的就是你在文件里看到的代码
+3. 缺失 → 自动降级到零依赖的 `runner.py` 预览，运行面板上会标明「零依赖预览」
+
+运行面板会显示当前是「真实运行 agent.py」还是「零依赖预览」。
 
 AutoGen / CrewAI 两个框架同理：会生成 `AssistantAgent` + `GroupChat`、
 `Agent` + `Task` + `Crew` 的原生写法。

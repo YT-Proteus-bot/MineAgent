@@ -111,6 +111,11 @@ export default function RunPanel() {
             <span className="tag">准备</span>
             <span className="msg">
               {e.framework} · {e.model || '未配置模型'} · {e.has_api_key ? '已配置 key' : '未配置 key'}
+              {e.run_mode === 'native' ? (
+                <b style={{ color: 'var(--ok)' }}> · 真实运行 {e.entry || 'agent.py'}</b>
+              ) : (
+                <span style={{ color: 'var(--warn)' }}> · 零依赖预览（装框架依赖后会跑 agent.py）</span>
+              )}
             </span>
           </div>
         )

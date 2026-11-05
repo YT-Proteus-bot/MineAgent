@@ -23,7 +23,7 @@ router = APIRouter(prefix="/api/canvases", tags=["run"])
 
 EVENT_PREFIX = "@@EVENT@@"
 DEPENDENCY_HINTS = {
-    "langchain": ["langgraph", "langchain_openai"],
+    "langchain": ["langchain", "langchain_openai", "langgraph"],
     "autogen": ["autogen_agentchat", "autogen_ext"],
     "crewai": ["crewai"],
 }
@@ -120,6 +120,22 @@ async def run_canvas(canvas_id: str, payload: RunRequest):
             node_keys += 1
 
     runner_path = os.path.join(project_dir, "runner.py")
+    # 依赖齐全就跑项目里的 agent.py（真实框架代码）；
+    # 缺依赖时降级到零依赖预览执行器 runner.py
+    deps_ready = all(_deps_status(row["framework"]).values())
+    agent_path = os.path.join(project_dir, "agent.py")
+    entry_path = agent_path if deps_ready else runner_path
+    run_mode = "native" if deps_ready else "preview"
+
+    def _extract_final(lines: List[str]) -> str:
+        text = "\n".join(lines).strip()
+        marker = "最终结果"
+        idx = text.rfind(marker)
+        if idx >= 0:
+            tail = text[idx:]
+            parts = tail.split("\n", 1)
+            return (parts[1] if len(parts) > 1 else tail).strip()
+        return text
 
     async def stream() -> AsyncIterator[str]:
         started = time.time()
@@ -131,11 +147,13 @@ async def run_canvas(canvas_id: str, payload: RunRequest):
         yield _sse({"event": "prepared", "run_id": run_id, "canvas_id": canvas_id,
                     "project_dir": project_dir, "slug": slug,
                     "has_api_key": bool(cfg.get("api_key")),
-                    "model": cfg.get("model"), "framework": row["framework"]})
+                    "model": cfg.get("model"), "framework": row["framework"],
+                    "run_mode": run_mode,
+                    "entry": os.path.basename(entry_path)})
 
         try:
             proc = await asyncio.create_subprocess_exec(
-                sys.executable, runner_path, "--input", payload.input or "",
+                sys.executable, entry_path, "--input", payload.input or "",
                 cwd=project_dir, env=env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
@@ -188,6 +206,16 @@ async def run_canvas(canvas_id: str, payload: RunRequest):
                 proc.kill()
 
         duration = int((time.time() - started) * 1000)
+        # 走 agent.py 时没有节点级事件，从普通输出里提取最终结果
+        if run_mode == "native" and not final_output:
+            final_output = _extract_final(log_lines)
+            if proc.returncode not in (0, None):
+                status = "error"
+                if not errors:
+                    errors.append(_extract_final(log_lines)[-500:] or "进程异常退出")
+            yield _sse({"event": "run_end", "status": status,
+                        "output": final_output, "duration_ms": duration,
+                        "run_mode": run_mode})
         if status == "ok" and not final_output and collected:
             for evt in reversed(collected):
                 if evt.get("event") == "run_end":

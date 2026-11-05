@@ -49,6 +49,10 @@ export type FlowNodeData = {
   name: string
   description: string
   code: string
+  /** 用户手动改过这段代码：保存时保留他的版本，不重新生成 */
+  code_touched?: boolean
+  /** 这段代码是从 agent.py 同步回来的 */
+  code_generated?: boolean
   language: string
   params: NodeParams
   status: NodeStatus

@@ -300,16 +300,18 @@ def save_canvas_endpoint(canvas_id: str, graph: Graph, force: bool = False):
         graph_dict = graph.model_dump()
         # 保存不拦人（可能只是编辑中间态），但把违规项一并返回，前端据此提示
         report = validate_graph(graph_dict, rules)
+        # 先生成代码：过程中会把每个节点在 agent.py 里的代码块写回 graph_dict，
+        # 所以必须再落库，否则网页上看到的还是旧代码
+        try:
+            result = _persist(conn, canvas_id, graph_dict, touch=False)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(500, f"落盘失败：{exc}") from exc
         conn.execute(
             "UPDATE canvases SET graph = ?, background = ?, updated_at = ? WHERE id = ?",
             (json.dumps(graph_dict, ensure_ascii=False),
              json.dumps(graph.background.model_dump(), ensure_ascii=False),
              now_iso(), canvas_id),
         )
-        try:
-            result = _persist(conn, canvas_id, graph_dict, touch=False)
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(500, f"落盘失败：{exc}") from exc
         row = _fetch(conn, canvas_id)
     return SaveResult(ok=True, canvas=_detail(row),
                       project_dir=result["project_dir"], written_files=result["files"],

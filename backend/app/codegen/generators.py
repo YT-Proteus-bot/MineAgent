@@ -10,12 +10,13 @@ from typing import Any, Dict, List, Tuple
 from ..config import PROJECTS_DIR
 from ..framework_templates import FRAMEWORK_INDEX
 from ..node_registry import get_node_type
-from .native import render_agent_py
+from .native import render_agent_full
 
 RUNTIME_DIR = Path(__file__).resolve().parents[1] / "runtime"
 
 REQUIREMENTS = {
-    "langchain": "langgraph>=0.2.0\nlangchain-core>=0.3.0\nlangchain-openai>=0.2.0\n",
+    # langchain 1.x：旧的 AgentExecutor / create_react_agent 已移除，改用 create_agent
+    "langchain": "langchain>=1.0\nlanggraph>=1.0\nlangchain-openai>=1.0\nlangchain-core>=1.0\n",
     "autogen": "autogen-agentchat>=0.4.0\nautogen-ext[openai]>=0.4.0\n",
     "crewai": "crewai>=0.60.0\n",
 }
@@ -103,6 +104,7 @@ def build_spec(name: str, slug: str, framework: str, graph: Dict[str, Any]) -> D
             # 平台内零依赖预览时执行的就是这段 run(ctx)；
             # agent.py 里则是同一节点的框架原生写法
             "code": data.get("code") or meta.get("default_code", ""),
+            "code_touched": bool(data.get("code_touched")),
             "position": node.get("position") or {"x": 0, "y": 0},
             "org": _node_org(data.get("org")),
             "model": _node_model(data.get("model")),
@@ -421,7 +423,19 @@ def generate_project(name: str, slug: str, framework: str, graph: Dict[str, Any]
         written.append(fname)
 
     # 框架入口：一整个 agent.py，就是这份画布的框架原生代码
-    write("agent.py", render_agent_py(spec, framework))
+    agent_code, node_blocks = render_agent_full(spec, framework)
+    write("agent.py", agent_code)
+
+    # 把每个节点在 agent.py 里的代码块写回画布数据：
+    # 网页上「代码逻辑」显示的就是这段，改的也是这段
+    for node, src in zip(spec["nodes"], graph.get("nodes", [])):
+        block = node_blocks.get(node["id"])
+        if not block:
+            continue
+        data = src.setdefault("data", {})
+        data["code"] = block
+        # 这是生成的版本，不是用户手改的，下次保存允许重新生成
+        data["code_generated"] = True
 
     # 模型配置（不含 key）
     cfg = {
