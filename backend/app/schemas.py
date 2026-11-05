@@ -17,6 +17,10 @@ class FlowNodeData(BaseModel):
     language: str = "python"
     params: Dict[str, Any] = Field(default_factory=dict)
     status: str = "idle"
+    # 多 agent 组织关系：{"superior": nodeId, "subordinates": [nodeId], "peers": [nodeId]}
+    org: Dict[str, Any] = Field(default_factory=dict)
+    # 节点级模型（不含明文 key，key 单独加密存在 agent_models 表）
+    model: Optional[Dict[str, Any]] = None
 
 
 class FlowNode(BaseModel):
@@ -126,3 +130,17 @@ class ProjectTreeEntry(BaseModel):
     path: str
     size: int
     language: str
+
+
+class AgentNodeModel(BaseModel):
+    """单个 agent 节点的模型配置。api_key 只在写入时出现。"""
+
+    provider: str = "openai"
+    base_url: str = ""
+    model: str = ""
+    temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
+    api_key: Optional[str] = None
+    api_key_mask: str = ""
+    api_key_env: str = ""
+    inherit: bool = True  # True = 跟随画布/全局配置

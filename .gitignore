@@ -8,10 +8,9 @@ __pycache__/
 backend/data/
 backend/**/__pycache__/
 
-# 生成的项目（用户数据，按需可提交）
-projects/*/.store.db
-projects/*/outputs/*
-projects/*/.env
+# 画布生成的项目是运行时数据：每画一次、存一次都会变，不跟着仓库走
+projects/*
+!projects/.gitkeep
 
 # 编辑器
 .vscode/

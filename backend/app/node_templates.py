@@ -54,15 +54,18 @@ T["agent"] = '''from runtime_sdk import NodeContext
 
 
 def run(ctx: NodeContext):
-    """带工具循环的 Agent（ReAct）。
+    """自主 Agent：按节点属性里选定的推理模式执行。
 
+    模式：react / plan_execute / goal / reflexion / tool_call / simple。
     画布中「连到本节点输入」的 tool 子图会自动注入 ctx.tools。
+    如果这个 agent 配了下级，可以用 ctx.delegate(名字, 任务) 把活派出去。
     """
     system = ctx.params.get("system") or "你是一个能自主使用工具的智能体。"
     return ctx.agent(
         task=ctx.text,
         tools=ctx.tools,
         system=system,
+        mode=ctx.params.get("mode", "react"),
         max_steps=ctx.params.get("max_steps", 6),
     )
 '''
@@ -576,13 +579,24 @@ T["supervisor"] = '''from runtime_sdk import NodeContext
 
 
 def run(ctx: NodeContext):
-    """主管：把任务分派给下游 worker 并汇总。"""
-    workers = ctx.params.get("workers", ["worker_a", "worker_b"])
-    return {
-        "task": ctx.text,
-        "delegations": [{"worker": w, "subtask": ctx.text} for w in workers],
-        "strategy": "sequential",
-    }
+    """主管：按画布上配置的组织关系，把任务分派给下级 agent，再汇总结果。
+
+    下级来自节点属性里的「下级 agent」；没配就回退到 params.workers。
+    """
+    names = ctx.subordinates or ctx.params.get("workers", [])
+    if not names:
+        return ctx.agent(task=ctx.text, tools=ctx.tools,
+                         mode=ctx.params.get("mode", "react"),
+                         max_steps=ctx.params.get("max_steps", 6))
+    results = {}
+    for name in names:
+        ctx.log(f"分派给下级：{name}")
+        results[name] = ctx.delegate(name, ctx.text)
+    summary = "\\n\\n".join(f"### {k}\\n{v}" for k, v in results.items())
+    return ctx.llm(
+        f"原始任务：{ctx.text}\\n\\n各下级的结果：\\n{summary}\\n\\n请汇总输出最终答案。",
+        system="你是主管，只输出整合后的结论。",
+    )
 '''
 
 T["worker"] = '''from runtime_sdk import NodeContext
@@ -592,7 +606,14 @@ def run(ctx: NodeContext):
     """工作者：执行被分派的子任务。"""
     role = ctx.params.get("role", "通用执行者")
     task = ctx.input.get("subtask") if isinstance(ctx.input, dict) else ctx.text
-    return ctx.llm(f"你的角色：{role}\\n任务：{task}", system="只完成分配给你的子任务。")
+    system = f"你的角色：{role}。只完成分配给你的子任务，结论要具体。"
+    return ctx.agent(
+        task=task,
+        tools=ctx.tools,
+        system=system,
+        mode=ctx.params.get("mode", "react"),
+        max_steps=ctx.params.get("max_steps", 4),
+    )
 '''
 
 T["group_chat"] = '''from runtime_sdk import NodeContext

@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 
 from ..framework_templates import FRAMEWORKS, FRAMEWORK_INDEX, build_graph
-from ..node_registry import CATEGORIES, NODE_TYPES
+from ..node_registry import AGENT_MODES, CATEGORIES, NODE_TYPES
 
 router = APIRouter(prefix="/api/meta", tags=["meta"])
 
@@ -16,6 +16,7 @@ def meta():
         # 带上 default_code，前端新增节点时可直接生成默认代码
         "nodes": NODE_TYPES,
         "frameworks": FRAMEWORKS,
+        "agent_modes": AGENT_MODES,
         "version": "1.0.0",
     }
 

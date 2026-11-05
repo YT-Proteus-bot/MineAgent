@@ -1,6 +1,6 @@
 import { Handle, Position, type NodeProps } from '@xyflow/react'
 import { useStore } from '../store'
-import type { AgentNode as AgentNodeType } from '../types'
+import { isAgentKind, type AgentNode as AgentNodeType, type AgentOrg } from '../types'
 
 const BRANCH_LABEL: Record<string, string> = {
   out: '输出',
@@ -14,6 +14,15 @@ const BRANCH_LABEL: Record<string, string> = {
   reject: '拒绝',
 }
 
+const MODE_LABEL: Record<string, string> = {
+  react: 'ReAct',
+  plan_execute: 'Plan',
+  goal: 'Goal',
+  reflexion: 'Reflexion',
+  tool_call: 'ToolCall',
+  simple: 'Simple',
+}
+
 export default function AgentNode({ id, data, selected }: NodeProps<AgentNodeType>) {
   const meta = useStore((s) => s.meta)
   const setSelected = useStore((s) => s.setSelected)
@@ -23,6 +32,15 @@ export default function AgentNode({ id, data, selected }: NodeProps<AgentNodeTyp
   const color = def?.color ?? '#8b5cf6'
   const icon = def?.icon ?? '◆'
   const status = (data.status || 'idle') as string
+  const isAgent = isAgentKind(data.kind)
+  const mode = ((data.params || {}).mode as string) || 'react'
+  const rawOrg = (data.org || {}) as Partial<AgentOrg>
+  const org: AgentOrg = {
+    superior: rawOrg.superior || '',
+    subordinates: rawOrg.subordinates || [],
+    peers: rawOrg.peers || [],
+  }
+  const nodeModel = (data.model || {}) as Record<string, any>
 
   return (
     <div
@@ -47,6 +65,33 @@ export default function AgentNode({ id, data, selected }: NodeProps<AgentNodeTyp
           {data.name}
         </div>
         <div className="node-desc">{data.description}</div>
+        {isAgent && (
+          <div className="row" style={{ gap: 4, marginTop: 2, flexWrap: 'wrap' }}>
+            <span className="node-mode" title="推理模式">
+              {MODE_LABEL[mode] || mode}
+            </span>
+            {org.subordinates.length > 0 && (
+              <span className="node-org" title="下级 agent 数">
+                ↓{org.subordinates.length}
+              </span>
+            )}
+            {org.peers.length > 0 && (
+              <span className="node-org" title="平级 agent 数">
+                ↕{org.peers.length}
+              </span>
+            )}
+            {org.superior && (
+              <span className="node-org" title="有上级 agent">
+                ↑
+              </span>
+            )}
+            {nodeModel.has_key && (
+              <span className="node-key" title="使用独立 API Key">
+                KEY
+              </span>
+            )}
+          </div>
+        )}
         {outputs.length > 1 && (
           <div className="row" style={{ gap: 4, marginTop: 2 }}>
             {outputs.map((o) => (

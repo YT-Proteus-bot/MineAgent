@@ -4,7 +4,7 @@ import { useStore } from '../store'
 import Modal from './Modal'
 import type { GlobalSettings, ModelConfig } from '../types'
 
-const PRESETS = [
+export const PRESETS = [
   { id: 'openai', label: 'OpenAI', base: 'https://api.openai.com/v1', models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4.1-mini'] },
   { id: 'deepseek', label: 'DeepSeek', base: 'https://api.deepseek.com/v1', models: ['deepseek-chat', 'deepseek-reasoner'] },
   {

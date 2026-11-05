@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from typing import Any, Dict, List, Optional
 
@@ -11,8 +12,9 @@ from ..codegen import generate_project, unique_slug
 from ..config import BACKGROUND_DIR, PROJECTS_DIR
 from ..db import get_conn, get_setting, now_iso, set_setting
 from ..framework_templates import FRAMEWORK_INDEX, build_graph
-from ..schemas import (CanvasBackground, CanvasCreate, CanvasDetail, CanvasSummary,
-                       CanvasUpdate, GlobalSettings, Graph, ModelConfig, SaveResult)
+from ..schemas import (AgentNodeModel, CanvasBackground, CanvasCreate, CanvasDetail,
+                       CanvasSummary, CanvasUpdate, GlobalSettings, Graph, ModelConfig,
+                       SaveResult)
 from ..security import decrypt, encrypt, mask
 
 router = APIRouter(prefix="/api/canvases", tags=["canvases"])
@@ -48,6 +50,33 @@ def _row_to_background(row) -> Dict[str, Any]:
     return base
 
 
+def _node_key_env(node_id: str) -> str:
+    """节点级 api key 的环境变量名（运行时注入，不落盘）。"""
+    safe = re.sub(r"[^A-Za-z0-9]", "_", node_id or "").upper()[:40]
+    return f"MINEAGENT_KEY_{safe or 'NODE'}"
+
+
+def load_node_models(canvas_id: str) -> Dict[str, Dict[str, Any]]:
+    """读这个画布所有节点级模型配置（key 只回显掩码）。"""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT node_id, config, api_key_cipher FROM agent_models WHERE canvas_id = ?",
+            (canvas_id,),
+        ).fetchall()
+    out: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        try:
+            cfg = json.loads(row["config"] or "{}")
+        except Exception:
+            cfg = {}
+        key = decrypt(row["api_key_cipher"]) if row["api_key_cipher"] else ""
+        cfg["api_key_env"] = _node_key_env(row["node_id"])
+        cfg["api_key_mask"] = mask(key) if key else ""
+        cfg["has_key"] = bool(key)
+        out[row["node_id"]] = cfg
+    return out
+
+
 def _summary(row) -> CanvasSummary:
     graph = json.loads(row["graph"] or "{}")
     return CanvasSummary(
@@ -59,6 +88,12 @@ def _summary(row) -> CanvasSummary:
 
 def _detail(row) -> CanvasDetail:
     graph = json.loads(row["graph"] or "{}")
+    models = load_node_models(row["id"])
+    if models:
+        for node in graph.get("nodes", []):
+            cfg = models.get(node.get("id"))
+            if cfg:
+                node.setdefault("data", {})["model"] = cfg
     return CanvasDetail(
         **_summary(row).model_dump(),
         graph=Graph(**graph),
@@ -264,12 +299,51 @@ def save_canvas_endpoint(canvas_id: str, graph: Graph):
                       project_dir=result["project_dir"], written_files=result["files"])
 
 
+@router.put("/{canvas_id}/nodes/{node_id}/model")
+def set_node_model(canvas_id: str, node_id: str, payload: AgentNodeModel):
+    """给单个 agent 节点配置模型与 key（key 加密入库，永不进画布 JSON）。"""
+    with get_conn() as conn:
+        _fetch(conn, canvas_id)
+        existing = conn.execute(
+            "SELECT * FROM agent_models WHERE canvas_id = ? AND node_id = ?",
+            (canvas_id, node_id),
+        ).fetchone()
+        cipher = existing["api_key_cipher"] if existing else ""
+        cfg = payload.model_dump()
+        api_key = cfg.pop("api_key", None)
+        cfg.pop("api_key_mask", None)
+        cfg.pop("has_key", None)
+        cfg["api_key_env"] = _node_key_env(node_id)
+        if api_key is not None:
+            cipher = encrypt(api_key.strip()) if api_key.strip() else ""
+        conn.execute(
+            "INSERT INTO agent_models(canvas_id,node_id,config,api_key_cipher,updated_at)"
+            " VALUES(?,?,?,?,?)"
+            " ON CONFLICT(canvas_id,node_id) DO UPDATE SET"
+            " config=excluded.config, api_key_cipher=excluded.api_key_cipher,"
+            " updated_at=excluded.updated_at",
+            (canvas_id, node_id, json.dumps(cfg, ensure_ascii=False), cipher, now_iso()),
+        )
+    key = decrypt(cipher) if cipher else ""
+    return {**cfg, "api_key_mask": mask(key) if key else "", "has_key": bool(key)}
+
+
+@router.delete("/{canvas_id}/nodes/{node_id}/model")
+def clear_node_model(canvas_id: str, node_id: str):
+    with get_conn() as conn:
+        _fetch(conn, canvas_id)
+        conn.execute("DELETE FROM agent_models WHERE canvas_id = ? AND node_id = ?",
+                     (canvas_id, node_id))
+    return {"ok": True}
+
+
 @router.delete("/{canvas_id}")
 def delete_canvas(canvas_id: str):
     with get_conn() as conn:
         row = _fetch(conn, canvas_id)
         conn.execute("DELETE FROM canvases WHERE id = ?", (canvas_id,))
         conn.execute("DELETE FROM runs WHERE canvas_id = ?", (canvas_id,))
+        conn.execute("DELETE FROM agent_models WHERE canvas_id = ?", (canvas_id,))
     target = (PROJECTS_DIR / row["slug"]).resolve()
     if target.parent == PROJECTS_DIR.resolve() and target.exists():
         shutil.rmtree(target, ignore_errors=True)

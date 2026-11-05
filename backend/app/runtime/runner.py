@@ -41,6 +41,7 @@ TOOL_KINDS = {
 }
 AGENT_KINDS = {"agent", "autogen_tool_agent", "group_chat", "supervisor", "worker"}
 ROUTE_SIGNALS = {"true", "false", "loop", "exit", "yes", "no", "approve", "reject"}
+_MISSING = object()
 
 
 def log_stderr(msg: str) -> None:
@@ -64,6 +65,7 @@ class GraphRunner:
         self.max_visits = int(spec.get("max_visits", 8))
         self.module_cache: Dict[str, Any] = {}
         self.final_output: Any = None
+        self._delegate_stack: set = set()
 
     # ---------------- 模块加载 ----------------
     def load_module(self, node: Dict[str, Any]):
@@ -115,6 +117,52 @@ class GraphRunner:
             ))
         return specs
 
+    # ---------------- 组织关系 ----------------
+    def _org_for(self, node: Dict[str, Any]) -> Dict[str, Any]:
+        org = node.get("org") or {}
+
+        def name_of(nid: Any) -> str:
+            target = self.nodes.get(str(nid)) if nid else None
+            return (target.get("name") or "") if target else ""
+
+        return {
+            "superior_id": org.get("superior") or "",
+            "superior_name": name_of(org.get("superior")),
+            "subordinate_ids": list(org.get("subordinates") or []),
+            "subordinate_names": [n for n in (name_of(x) for x in (org.get("subordinates") or [])) if n],
+            "peer_ids": list(org.get("peers") or []),
+            "peer_names": [n for n in (name_of(x) for x in (org.get("peers") or [])) if n],
+        }
+
+    def delegate_to(self, name: str, task: Any) -> Any:
+        """把一个任务交给指定 agent 节点执行（供 ctx.delegate 调用）。"""
+        key = str(name or "").strip()
+        if not key:
+            raise ValueError("delegate 需要指定 agent 名称")
+        if key in self._delegate_stack:
+            raise RuntimeError(f"检测到循环委派：{' → '.join([*self._delegate_stack, key])}")
+        target = next(
+            (n for n in self.nodes.values()
+             if (n.get("name") == key) or (n.get("label") == key)),
+            None,
+        )
+        if target is None:
+            raise ValueError(f"画布上找不到 agent：{key}")
+        saved = self.outputs.get(target["id"], _MISSING)
+        self._delegate_stack.add(key)
+        try:
+            result = self.execute_node(target["id"], task, nested=True)
+        finally:
+            self._delegate_stack.discard(key)
+            # 被委派节点的产出不参与主流程的连线推进
+            if saved is _MISSING:
+                self.outputs.pop(target["id"], None)
+            else:
+                self.outputs[target["id"]] = saved
+        emit_event({"event": "delegate_done", "node": target["id"],
+                    "name": target.get("name"), "output": _short(result, 600)})
+        return result
+
     # ---------------- 单节点执行 ----------------
     def execute_node(self, node_id: str, payload: Any, nested: bool = False) -> Any:
         node = self.nodes[node_id]
@@ -126,7 +174,10 @@ class GraphRunner:
                         "visit": self.visits[node_id]})
         ctx = NodeContext(node_id=node_id, node_name=node.get("name") or node_id,
                           kind=node.get("kind", "llm"), params=node.get("params") or {},
-                          payload=payload, state=self.state, run_id=self.run_id)
+                          payload=payload, state=self.state, run_id=self.run_id,
+                          org=self._org_for(node),
+                          model_override=node.get("model") or None,
+                          delegate_fn=self.delegate_to)
         ctx.tools = self.tools_for(node_id)
         if self.visits[node_id] > self.max_visits:
             raise RuntimeError(f"节点 {node.get('name')} 执行次数超过上限 {self.max_visits}，疑似死循环")

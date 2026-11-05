@@ -12,9 +12,10 @@ import {
 import '@xyflow/react/dist/style.css'
 import AgentNode from './AgentNode'
 import BackgroundPanel from './BackgroundPanel'
+import NodeModelModal from './NodeModelModal'
 import { ContextMenu, NodePicker } from './ContextMenu'
 import { useStore } from '../store'
-import { DEFAULT_BACKGROUND } from '../types'
+import { DEFAULT_BACKGROUND, isAgentKind } from '../types'
 
 const nodeTypes = { agent: AgentNode }
 
@@ -41,8 +42,12 @@ export default function FlowCanvas() {
   const { screenToFlowPosition, fitView } = useReactFlow()
   const [menu, setMenu] = useState<MenuState>(null)
   const [bgPanelOpen, setBgPanelOpen] = useState(false)
+  const [modelNodeId, setModelNodeId] = useState<string | null>(null)
   const setInspectorTab = useStore((s) => s.setInspectorTab)
   const canvasId = canvas?.id
+  const menuNodeIsAgent =
+    menu?.kind === 'node' &&
+    isAgentKind(nodes.find((n) => n.id === menu.nodeId)?.data.kind)
 
   // 切换画布后自动把整张图放进视野
   useEffect(() => {
@@ -265,6 +270,17 @@ export default function FlowCanvas() {
           >
             <span className="ico">⧉</span> 复制节点
           </div>
+          {menuNodeIsAgent && (
+            <div
+              className="ctx-item"
+              onClick={() => {
+                setModelNodeId(menu.nodeId)
+                setMenu(null)
+              }}
+            >
+              <span className="ico">⚙</span> 配置模型 / API Key
+            </div>
+          )}
           <div className="menu-sep" />
           <div
             className="ctx-item"
@@ -277,6 +293,10 @@ export default function FlowCanvas() {
             <span className="ico">🗑</span> 删除节点
           </div>
         </ContextMenu>
+      )}
+
+      {modelNodeId && (
+        <NodeModelModal nodeId={modelNodeId} onClose={() => setModelNodeId(null)} />
       )}
     </div>
   )

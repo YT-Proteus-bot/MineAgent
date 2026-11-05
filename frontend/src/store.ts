@@ -11,6 +11,7 @@ import {
 import { api, runCanvas, type RunHandle } from './api'
 import type {
   AgentNode,
+  AgentOrg,
   CanvasBackground,
   CanvasDetail,
   CanvasSummary,
@@ -63,6 +64,9 @@ interface AppState {
   setInspectorTab: (tab: 'props' | 'code') => void
   addNode: (kind: string, position: { x: number; y: number }) => void
   updateNode: (id: string, patch: Partial<FlowNodeData>) => void
+  updateNodeOrg: (nodeId: string, patch: Partial<AgentOrg>) => void
+  setNodeModel: (nodeId: string, cfg: Record<string, any>) => Promise<void>
+  clearNodeModel: (nodeId: string) => Promise<void>
   removeNode: (id: string) => void
   duplicateNode: (id: string) => void
   setViewport: (v: { x: number; y: number; zoom: number }) => void
@@ -80,6 +84,92 @@ interface AppState {
 let runHandle: RunHandle | null = null
 let toastSeq = 1
 let initStarted = false
+
+/** 组织关系双向同步：改一处，相关的另一端自动跟着改。 */
+export function reconcileOrg(
+  nodes: AgentNode[],
+  nodeId: string,
+  patch: Partial<AgentOrg>,
+): AgentNode[] {
+  const map = new Map<string, AgentNode>(
+    nodes.map((n) => [n.id, { ...n, data: { ...n.data, org: { ...((n.data.org as AgentOrg) || {}) } } }]),
+  )
+  const getOrg = (id: string): AgentOrg => {
+    const n = map.get(id)
+    const org = (n?.data.org as AgentOrg) || {}
+    return {
+      superior: org.superior || '',
+      subordinates: [...(org.subordinates || [])],
+      peers: [...(org.peers || [])],
+    }
+  }
+  const setOrg = (id: string, org: AgentOrg) => {
+    const n = map.get(id)
+    if (!n) return
+    n.data = {
+      ...n.data,
+      org: {
+        superior: org.superior || '',
+        subordinates: [...new Set(org.subordinates || [])].filter((x) => x !== id),
+        peers: [...new Set(org.peers || [])].filter((x) => x !== id),
+      },
+    }
+  }
+
+  const mine = getOrg(nodeId)
+
+  // 上级（单向：我认他当上级，他把我加进下级）
+  if (patch.superior !== undefined) {
+    if (mine.superior && map.has(mine.superior)) {
+      const old = getOrg(mine.superior)
+      setOrg(mine.superior, { ...old, subordinates: old.subordinates.filter((x) => x !== nodeId) })
+    }
+    mine.superior = patch.superior || ''
+    if (mine.superior && map.has(mine.superior)) {
+      const sup = getOrg(mine.superior)
+      setOrg(mine.superior, { ...sup, subordinates: [...sup.subordinates, nodeId] })
+    }
+  }
+
+  // 下级（全量替换：被移除的下级清空上级，新增的下级改认我当上级）
+  if (patch.subordinates !== undefined) {
+    const next = patch.subordinates.filter((id) => id !== nodeId && map.has(id))
+    for (const id of mine.subordinates) {
+      if (!next.includes(id) && map.has(id)) {
+        const o = getOrg(id)
+        if (o.superior === nodeId) setOrg(id, { ...o, superior: '' })
+      }
+    }
+    for (const id of next) {
+      const o = getOrg(id)
+      if (o.superior && o.superior !== nodeId && map.has(o.superior)) {
+        const old = getOrg(o.superior)
+        setOrg(o.superior, { ...old, subordinates: old.subordinates.filter((x) => x !== id) })
+      }
+      setOrg(id, { ...o, superior: nodeId })
+    }
+    mine.subordinates = next
+  }
+
+  // 平级（双向）
+  if (patch.peers !== undefined) {
+    const next = patch.peers.filter((id) => id !== nodeId && map.has(id))
+    for (const id of mine.peers) {
+      if (!next.includes(id) && map.has(id)) {
+        const o = getOrg(id)
+        setOrg(id, { ...o, peers: o.peers.filter((x) => x !== nodeId) })
+      }
+    }
+    for (const id of next) {
+      const o = getOrg(id)
+      setOrg(id, { ...o, peers: [...o.peers.filter((x) => x !== nodeId), nodeId] })
+    }
+    mine.peers = next
+  }
+
+  setOrg(nodeId, mine)
+  return nodes.map((n) => map.get(n.id) || n)
+}
 
 function normalize(nodes: AgentNode[]): AgentNode[] {
   return nodes.map((n) => ({ ...n, data: { ...n.data, status: (n.data.status || 'idle') as NodeStatus } }))
@@ -328,9 +418,61 @@ export const useStore = create<AppState>((set, get) => ({
     })
   },
 
+  updateNodeOrg: (nodeId, patch) => {
+    set({ nodes: reconcileOrg(get().nodes, nodeId, patch), dirty: true })
+  },
+
+  setNodeModel: async (nodeId, cfg) => {
+    const canvas = get().canvas
+    if (!canvas) return
+    try {
+      const res = await api.setNodeModel(canvas.id, nodeId, cfg)
+      set({
+        nodes: get().nodes.map((n) =>
+          n.id === nodeId
+            ? { ...n, data: { ...n.data, model: { ...(n.data.model || {}), ...res } } }
+            : n,
+        ),
+        dirty: true,
+      })
+      get().toast('模型配置已保存，点「保存」后才会写进项目', 'ok')
+    } catch (err: any) {
+      get().toast(`模型配置保存失败：${err.message || err}`, 'err')
+    }
+  },
+
+  clearNodeModel: async (nodeId) => {
+    const canvas = get().canvas
+    if (!canvas) return
+    try {
+      await api.clearNodeModel(canvas.id, nodeId)
+      set({
+        nodes: get().nodes.map((n) =>
+          n.id === nodeId ? { ...n, data: { ...n.data, model: null } } : n,
+        ),
+        dirty: true,
+      })
+      get().toast('已恢复为跟随画布 / 全局模型', 'ok')
+    } catch (err: any) {
+      get().toast(`清除失败：${err.message || err}`, 'err')
+    }
+  },
+
   removeNode: (id) => {
+    // 删掉节点时，顺手把它从别人的组织关系里摘掉，避免留下悬空引用
+    const rest = get()
+      .nodes.filter((n) => n.id !== id)
+      .map((n) => {
+        const org = (n.data.org as AgentOrg) || ({} as AgentOrg)
+        const next: AgentOrg = {
+          superior: org.superior === id ? '' : org.superior || '',
+          subordinates: (org.subordinates || []).filter((x) => x !== id),
+          peers: (org.peers || []).filter((x) => x !== id),
+        }
+        return { ...n, data: { ...n.data, org: next } }
+      })
     set({
-      nodes: get().nodes.filter((n) => n.id !== id),
+      nodes: rest,
       edges: get().edges.filter((e) => e.source !== id && e.target !== id),
       selectedNodeId: get().selectedNodeId === id ? null : get().selectedNodeId,
       dirty: true,

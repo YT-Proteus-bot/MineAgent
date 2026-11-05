@@ -72,6 +72,9 @@
 | 拖动节点本身 | 调整位置（吸附 16px 网格） |
 | 选中后按 Delete | 删除节点或连线 |
 | 双击节点 | 直接打开代码编辑器 |
+| 节点属性「推理模式」 | 每个 agent 单独选 ReAct / Plan-and-Execute / Goal / Reflexion / ToolCall / Simple |
+| 节点属性「组织关系」 | 指定上级、下级、平级 agent，改一边另一端自动同步 |
+| 右键 agent →「配置模型」 | 给单个 agent 配独立模型与 API Key（key 加密入库，不写进项目文件） |
 | 画布左上「🎨 背景」 | 底色（含透明）、上传背景图、填充方式与透明度、点阵网格 |
 
 画布支持缩放、平移、框选、MiniMap 导航。每个智能体强制要求一个 `input` 和一个 `output` 方块，
@@ -89,6 +92,41 @@
 - **点阵网格**：可开关、可换颜色，只在编辑时做对齐参考
 - 背景是「即改即存」的显示设置，改完立刻生效，不占用「未保存」标记；
   图片存在本机 `backend/data/backgrounds/`，不进 git，删除画布时一并清理
+
+### Agent 推理模式与多 Agent 协作
+
+**推理模式**：每个 agent 类节点（`agent` / `worker` / `supervisor` / AutoGen Tool Agent）
+都能在属性面板里单独选推理策略，保存后写进 `agent.json` 的 `params.mode`：
+
+| 模式 | 行为 |
+| --- | --- |
+| `react` | 思考 → 调工具 → 观察，循环直到能给出答案 |
+| `plan_execute` | 先让模型列执行计划，再逐步执行，最后汇总 |
+| `goal` | 围绕目标反复推进，每轮自评达成度，未达成就继续 |
+| `reflexion` | 先出一版，自我批判后重写，适合对质量要求高的产出 |
+| `tool_call` | 只做一轮工具调用，快、便宜 |
+| `simple` | 单次推理，不循环不用工具 |
+
+**组织关系**：在 agent 节点的属性面板里指定「上级」「下级」「平级」。
+改一边另一边会自动同步——给 A 勾了 B 当上级，B 的下级列表里就会出现 A。
+关系只表达组织与调度，不改变画布上的数据连线。
+
+运行时这些关系会注入到节点上下文，代码里可以直接用：
+
+```python
+ctx.superior          # 我的上级 agent 名字
+ctx.subordinates      # 我的下级 agent 名字列表
+ctx.peers             # 平级 agent 名字列表
+ctx.delegate("名字", 任务)   # 把活派给某个 agent，等它返回结果
+```
+
+`supervisor` 节点的默认模板就是「遍历 `ctx.subordinates` 逐个 delegate，再汇总」，
+所以画一张 supervisor + 若干 worker、勾好上下级，就能直接跑出一套分层协作。
+
+**节点级模型**：右键 agent 节点 →「配置模型 / API Key」，可以给这个 agent 单独指定
+服务商、Base URL、模型名和 Key。它优先于画布配置，画布配置又优先于用户中心的全局配置。
+Key 加密存在本机 `agent_models` 表，运行时通过环境变量 `MINEAGENT_KEY_<节点ID>` 注入子进程，
+不会出现在 `agent.json` 或任何项目文件里。
 
 ---
 
@@ -217,14 +255,16 @@ python runner.py --input "..."      # 不依赖框架的执行器
 
 ## 配置模型
 
-三种方式，优先级从高到低：
+四种方式，优先级从高到低：
 
-1. **画布级**：右上角「模型」→ 填 Base URL / 模型名 / API Key（只影响这个画布）；
-2. **全局**：右上角「用户中心」→ 配置整个项目默认使用的 key（兜底）；
-3. **项目文件**：在 `projects/<画布>/.env` 里写 `MINEAGENT_API_KEY=sk-xxx`（脱离网页独立运行时用）。
+1. **节点级**：右键 agent 节点 →「配置模型 / API Key」（只影响这个 agent）；
+2. **画布级**：右上角「模型」→ 填 Base URL / 模型名 / API Key（只影响这个画布）；
+3. **全局**：右上角「用户中心」→ 配置整个项目默认使用的 key（兜底）；
+4. **项目文件**：在 `projects/<画布>/.env` 里写 `MINEAGENT_API_KEY=sk-xxx`（脱离网页独立运行时用）。
 
 填好可点「测试连接」立即验证。Key 加密存在本机 `backend/data/mineagent.db`，
 接口只回显 `sk-****abcd` 形式的掩码，不返回明文。
+节点级的 key 存在 `agent_models` 表，运行时只以 `MINEAGENT_KEY_<节点ID>` 环境变量的形式注入子进程。
 
 常见服务商的 Base URL 内置在预设里（OpenAI、DeepSeek、通义千问、智谱、月之暗面、Ollama 本地、自定义兼容地址）。
 
@@ -240,7 +280,11 @@ ctx.state                   # 跨节点共享的可变字典
 ctx.params                  # 节点面板里配置的参数
 ctx.llm(prompt, system=)    # 调大模型
 ctx.llm_stream(...)         # 流式调大模型（token 会实时推到画布）
-ctx.agent(task, tools)      # 内置 ReAct 工具循环
+ctx.agent(task, tools, mode=)  # 内置 agent，mode 可选 react/plan_execute/goal/reflexion/tool_call/simple
+ctx.superior                # 我的上级 agent 名字
+ctx.subordinates            # 下级 agent 名字列表
+ctx.peers                   # 平级 agent 名字列表
+ctx.delegate(名字, 任务)     # 把任务派给某个 agent 并取回结果
 ctx.json_prompt(...)        # 结构化输出
 ctx.http(...) / ctx.search() / ctx.fetch_text() / ctx.mcp_call(...)
 ctx.skill(name, inline)     # 读 skills/*.md 或直接用内联的 skill.md 内容

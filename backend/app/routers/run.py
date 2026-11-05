@@ -15,7 +15,8 @@ from fastapi.responses import StreamingResponse
 from ..config import PROJECTS_DIR, RUN_LOG_DIR, RUN_TIMEOUT
 from ..db import get_conn, now_iso
 from ..schemas import RunRequest
-from .canvases import _fetch, resolve_runtime_model, save_canvas
+from ..security import decrypt
+from .canvases import _fetch, _node_key_env, resolve_runtime_model, save_canvas
 
 router = APIRouter(prefix="/api/canvases", tags=["run"])
 
@@ -76,6 +77,11 @@ async def run_canvas(canvas_id: str, payload: RunRequest):
         graph_dict = json.loads(row["graph"] or "{}")
         cfg = resolve_runtime_model(row)
         slug = row["slug"]
+        # 节点级 key：从 agent_models 表读出，只通过环境变量注入子进程
+        node_models = conn.execute(
+            "SELECT node_id, api_key_cipher FROM agent_models WHERE canvas_id = ?",
+            (canvas_id,),
+        ).fetchall()
         try:
             project_dir, _files = save_canvas(row, graph_dict)
         except Exception as exc:  # noqa: BLE001
@@ -92,6 +98,12 @@ async def run_canvas(canvas_id: str, payload: RunRequest):
         env["MINEAGENT_BASE_URL"] = cfg["base_url"]
     if cfg.get("model"):
         env["MINEAGENT_MODEL"] = cfg["model"]
+    node_keys = 0
+    for nm in node_models:
+        key = decrypt(nm["api_key_cipher"]) if nm["api_key_cipher"] else ""
+        if key:
+            env[_node_key_env(nm["node_id"])] = key
+            node_keys += 1
 
     runner_path = os.path.join(project_dir, "runner.py")
 

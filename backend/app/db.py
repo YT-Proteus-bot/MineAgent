@@ -39,6 +39,15 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_runs_canvas ON runs(canvas_id, started_at DESC);
+
+CREATE TABLE IF NOT EXISTS agent_models (
+    canvas_id      TEXT NOT NULL,
+    node_id        TEXT NOT NULL,
+    config         TEXT NOT NULL DEFAULT '{}',
+    api_key_cipher TEXT NOT NULL DEFAULT '',
+    updated_at     TEXT NOT NULL,
+    PRIMARY KEY (canvas_id, node_id)
+);
 """
 
 

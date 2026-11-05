@@ -1,16 +1,45 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { useStore } from '../store'
+import { isAgentKind, type AgentOrg } from '../types'
 import CodeEditor from './CodeEditor'
+import NodeModelModal from './NodeModelModal'
 
 function ParamField({
   def,
   value,
   onChange,
 }: {
-  def: { key: string; label: string; default: any; placeholder: string }
+  def: {
+    key: string
+    label: string
+    default: any
+    placeholder: string
+    options?: { value: string; label: string }[]
+    help?: string
+  }
   value: any
   onChange: (v: any) => void
 }) {
+  if (def.options && def.options.length) {
+    return (
+      <label className="field">
+        <span>{def.label}</span>
+        <select value={value ?? def.default ?? ''} onChange={(e) => onChange(e.target.value)}>
+          {def.options.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+        {def.help && (
+          <div className="dim small" style={{ marginTop: 4, lineHeight: 1.5 }}>
+            {def.help}
+          </div>
+        )}
+      </label>
+    )
+  }
+
   const kind = Array.isArray(def.default)
     ? 'array'
     : typeof def.default === 'boolean'
@@ -91,14 +120,17 @@ function ParamField({
 
 export default function NodeInspector() {
   const node = useStore((s) => s.nodes.find((n) => n.id === s.selectedNodeId) || null)
+  const allNodes = useStore((s) => s.nodes)
   const meta = useStore((s) => s.meta)
   const canvas = useStore((s) => s.canvas)
   const updateNode = useStore((s) => s.updateNode)
+  const updateNodeOrg = useStore((s) => s.updateNodeOrg)
   const removeNode = useStore((s) => s.removeNode)
   const duplicateNode = useStore((s) => s.duplicateNode)
   const setSelected = useStore((s) => s.setSelected)
   const tab = useStore((s) => s.inspectorTab)
   const setTab = useStore((s) => s.setInspectorTab)
+  const [showModel, setShowModel] = useState(false)
 
   const def = useMemo(
     () => meta?.nodes.find((n) => n.kind === node?.data.kind),
@@ -136,6 +168,15 @@ export default function NodeInspector() {
   }
 
   const data = node.data
+  const isAgent = isAgentKind(data.kind)
+  const rawOrg = (data.org || {}) as Partial<AgentOrg>
+  const org: AgentOrg = {
+    superior: rawOrg.superior || '',
+    subordinates: rawOrg.subordinates || [],
+    peers: rawOrg.peers || [],
+  }
+  const agentCandidates = allNodes.filter((n) => n.id !== node.id && isAgentKind(n.data.kind))
+  const nodeModel = (data.model || {}) as Record<string, any>
 
   return (
     <aside className="inspector">
@@ -188,6 +229,102 @@ export default function NodeInspector() {
                 onChange={(e) => updateNode(node.id, { description: e.target.value })}
               />
             </label>
+
+            {isAgent && (
+              <>
+                <div className="dim small" style={{ margin: '14px 0 8px', letterSpacing: 0.4 }}>
+                  模型
+                </div>
+                <div className="row">
+                  <button className="sm" onClick={() => setShowModel(true)}>
+                    ⚙ 配置这个 agent 的模型 / Key
+                  </button>
+                  {nodeModel.has_key ? (
+                    <span className="badge ok">独立 Key</span>
+                  ) : (
+                    <span className="dim small">跟随画布 / 全局</span>
+                  )}
+                  <div style={{ flex: 1 }} />
+                  {nodeModel.model && <span className="dim small mono">{nodeModel.model}</span>}
+                </div>
+
+                <div className="dim small" style={{ margin: '16px 0 8px', letterSpacing: 0.4 }}>
+                  组织关系
+                </div>
+                <label className="field">
+                  <span>上级 agent</span>
+                  <select
+                    value={org.superior}
+                    onChange={(e) => updateNodeOrg(node.id, { superior: e.target.value })}
+                  >
+                    <option value="">（无，我是顶层）</option>
+                    {agentCandidates.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.data.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <div className="field">
+                  <span>下级 agent（可以被我分派任务）</span>
+                  <div className="org-list">
+                    {agentCandidates.length === 0 && (
+                      <div className="dim small">画布上还没有其它 agent 节点</div>
+                    )}
+                    {agentCandidates.map((c) => (
+                      <label key={c.id} className="org-item">
+                        <input
+                          type="checkbox"
+                          checked={org.subordinates.includes(c.id)}
+                          onChange={(e) =>
+                            updateNodeOrg(node.id, {
+                              subordinates: e.target.checked
+                                ? [...org.subordinates, c.id]
+                                : org.subordinates.filter((x) => x !== c.id),
+                            })
+                          }
+                        />
+                        <span className="org-name">{c.data.label}</span>
+                        <span className="dim mono small">{c.data.name}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="field">
+                  <span>平级 agent（同级协作 / 上下文互通）</span>
+                  <div className="org-list">
+                    {agentCandidates.map((c) => (
+                      <label key={c.id} className="org-item">
+                        <input
+                          type="checkbox"
+                          checked={org.peers.includes(c.id)}
+                          onChange={(e) =>
+                            updateNodeOrg(node.id, {
+                              peers: e.target.checked
+                                ? [...org.peers, c.id]
+                                : org.peers.filter((x) => x !== c.id),
+                            })
+                          }
+                        />
+                        <span className="org-name">{c.data.label}</span>
+                        <span className="dim mono small">{c.data.name}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+
+                {(!!org.superior || org.subordinates.length > 0 || org.peers.length > 0) && (
+                  <div className="hint-box">
+                    在代码里可以用 <code className="mono">ctx.superior</code> /
+                    <code className="mono"> ctx.subordinates</code> /
+                    <code className="mono"> ctx.peers</code> 拿到这些关系，
+                    用 <code className="mono">ctx.delegate(名字, 任务)</code> 把活派给下级。
+                  </div>
+                )}
+              </>
+            )}
 
             <div className="dim small" style={{ margin: '14px 0 8px', letterSpacing: 0.4 }}>
               节点参数
@@ -254,6 +391,8 @@ export default function NodeInspector() {
         <div style={{ flex: 1 }} />
         <span className="dim small">改动会在点「保存」后落盘</span>
       </div>
+
+      {showModel && <NodeModelModal nodeId={node.id} onClose={() => setShowModel(false)} />}
     </aside>
   )
 }

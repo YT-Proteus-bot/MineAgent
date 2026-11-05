@@ -2,6 +2,47 @@ import type { Edge, Node } from '@xyflow/react'
 
 export type NodeParams = Record<string, any>
 
+/** 多 agent 组织关系：全部用节点 id 引用，重命名不受影响 */
+export interface AgentOrg {
+  superior: string
+  subordinates: string[]
+  peers: string[]
+}
+
+export const EMPTY_ORG: AgentOrg = { superior: '', subordinates: [], peers: [] }
+
+/** 节点级模型配置（api_key 只在写入时出现） */
+export interface NodeModelConfig {
+  provider?: string
+  base_url?: string
+  model?: string
+  temperature?: number | null
+  max_tokens?: number | null
+  api_key?: string | null
+  api_key_mask?: string
+  api_key_env?: string
+  has_key?: boolean
+  inherit?: boolean
+}
+
+/** 这些 kind 属于「自主 agent」，可以选推理模式、配组织关系、单独配模型 */
+export const AGENT_KINDS = new Set([
+  'agent',
+  'worker',
+  'supervisor',
+  'autogen_assistant',
+  'autogen_tool_agent',
+  'autogen_group_chat',
+  'crewai_agent',
+  'crewai_crew',
+  'group_chat',
+  'debate',
+])
+
+export function isAgentKind(kind?: string): boolean {
+  return !!kind && AGENT_KINDS.has(kind)
+}
+
 export type FlowNodeData = {
   kind: string
   label: string
@@ -12,6 +53,8 @@ export type FlowNodeData = {
   params: NodeParams
   status: NodeStatus
   durationMs?: number
+  org?: AgentOrg
+  model?: NodeModelConfig | null
 } & Record<string, unknown>
 
 export type NodeStatus = 'idle' | 'running' | 'done' | 'error' | 'skipped'
@@ -84,6 +127,8 @@ export interface NodeParamDef {
   label: string
   default: any
   placeholder: string
+  options?: { value: string; label: string }[]
+  help?: string
 }
 
 export interface NodeTypeDef {
@@ -96,6 +141,12 @@ export interface NodeTypeDef {
   outputs: string[]
   params: NodeParamDef[]
   language: string
+}
+
+export interface AgentModeDef {
+  value: string
+  label: string
+  desc: string
 }
 
 export interface FrameworkDef {
@@ -112,6 +163,7 @@ export interface Meta {
   categories: Category[]
   nodes: NodeTypeDef[]
   frameworks: FrameworkDef[]
+  agent_modes: AgentModeDef[]
   version: string
 }
 

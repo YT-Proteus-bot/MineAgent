@@ -557,6 +557,78 @@ input[type='range'] {
   white-space: nowrap;
 }
 
+/* 节点上的模式 / 组织徽章 */
+.node-mode {
+  font-size: 9.5px;
+  line-height: 1.4;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: rgba(109, 139, 255, 0.16);
+  color: #a9bcff;
+  border: 1px solid #2f4272;
+  white-space: nowrap;
+}
+.node-org {
+  font-size: 9.5px;
+  line-height: 1.4;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: rgba(236, 72, 153, 0.14);
+  color: #f0a6c8;
+  border: 1px solid #59304a;
+  white-space: nowrap;
+}
+.node-key {
+  font-size: 9px;
+  line-height: 1.4;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: rgba(52, 211, 153, 0.14);
+  color: #6ee7b7;
+  border: 1px solid #1d4b3b;
+  letter-spacing: 0.4px;
+  white-space: nowrap;
+}
+
+/* 组织关系勾选列表 */
+.org-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 168px;
+  overflow-y: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  padding: 6px 8px;
+  background: var(--bg-soft);
+}
+.org-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 4px;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.org-item:hover {
+  background: var(--panel-2);
+}
+.org-item input[type='checkbox'] {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+.org-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.org-item .mono {
+  margin-left: auto;
+  font-size: 10px;
+}
+
 .react-flow__handle {
   width: 10px;
   height: 10px;

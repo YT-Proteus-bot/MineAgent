@@ -24,9 +24,37 @@ CATEGORIES: List[Dict[str, str]] = [
 
 _CAT_COLOR = {c["id"]: c["color"] for c in CATEGORIES}
 
-P = lambda key, label, default=None, placeholder="": {  # noqa: E731
-    "key": key, "label": label, "default": default, "placeholder": placeholder
-}
+
+def P(key: str, label: str, default=None, placeholder: str = "",
+      options=None, help_text: str = "") -> Dict[str, Any]:
+    """参数定义。带 options 的会渲染成下拉框。"""
+    item: Dict[str, Any] = {
+        "key": key, "label": label, "default": default, "placeholder": placeholder,
+    }
+    if options:
+        item["options"] = options
+    if help_text:
+        item["help"] = help_text
+    return item
+
+
+# Agent 的推理模式：每个 agent 节点可以单独选
+AGENT_MODES: List[Dict[str, str]] = [
+    {"value": "react", "label": "ReAct 循环",
+     "desc": "思考 → 调工具 → 观察，反复循环直到能给出答案"},
+    {"value": "plan_execute", "label": "Plan-and-Execute",
+     "desc": "先让模型列一份执行计划，再逐步执行，适合多步任务"},
+    {"value": "goal", "label": "Goal-driven 目标驱动",
+     "desc": "围绕一个明确目标反复推进，自评达成度，未达成就继续"},
+    {"value": "reflexion", "label": "Reflexion 反思重试",
+     "desc": "先执行一版，再自我批判并重写，适合对质量要求高的产出"},
+    {"value": "tool_call", "label": "Tool Calling 单轮调用",
+     "desc": "只做一轮工具调用，快、便宜，适合确定性任务"},
+    {"value": "simple", "label": "Simple 单次推理",
+     "desc": "不循环、不用工具，直接一次大模型调用"},
+]
+
+_MODE_OPTIONS = [{"value": m["value"], "label": m["label"]} for m in AGENT_MODES]
 
 # (kind, label, category, icon, description, outputs, params, language)
 _DEFS: List[tuple] = [
@@ -36,8 +64,9 @@ _DEFS: List[tuple] = [
 
     # ---------------- 推理与决策 ----------------
     ("llm", "LLM 推理", "llm", "✦", "一次大模型调用，最基础的推理单元。", ["out"], [P("system", "系统提示", "")], "python"),
-    ("agent", "Agent 主体", "llm", "◈", "带工具的自主 Agent（ReAct 循环）。画布中连到它的 tool 子图会自动注入工具。", ["out"],
-     [P("system", "系统提示", ""), P("max_steps", "最大步数", 6)], "python"),
+    ("agent", "Agent 主体", "llm", "◈", "自主 Agent，可选 ReAct / Plan / Goal 等推理模式；连到它的 tool 子图会自动注入工具。", ["out"],
+     [P("mode", "推理模式", "react", options=_MODE_OPTIONS),
+      P("system", "系统提示", ""), P("max_steps", "最大步数", 6)], "python"),
     ("prompt", "提示词模板", "llm", "❝", "把上游内容套进模板，做提示词工程。", ["out"], [P("requirement", "额外要求", "")], "python"),
     ("system_prompt", "系统提示词", "llm", "☰", "注入角色设定，供下游 agent/llm 复用。", ["out"], [P("persona", "角色设定", "")], "python"),
     ("planner", "任务规划", "llm", "◇", "把目标拆成有序执行计划。", ["out"], [], "python"),
@@ -102,9 +131,11 @@ _DEFS: List[tuple] = [
      [P("message", "兜底文案", "")], "python"),
 
     # ---------------- 多智能体协作 ----------------
-    ("supervisor", "主管 Supervisor", "collab", "♔", "把任务分派给下游 worker 并汇总。", ["out"],
-     [P("workers", "下游 worker", ["worker_a"])], "python"),
-    ("worker", "工作者 Worker", "collab", "♟", "执行被分派的子任务。", ["out"], [P("role", "角色", "")], "python"),
+    ("supervisor", "主管 Supervisor", "collab", "♔", "按组织关系把任务分派给下级 agent，并汇总它们的结果。", ["out"],
+     [P("mode", "协作模式", "react", options=_MODE_OPTIONS),
+      P("workers", "指定下级（名称，逗号分隔）", ["worker_a"])], "python"),
+    ("worker", "工作者 Worker", "collab", "♟", "执行被分派的子任务。", ["out"],
+     [P("mode", "推理模式", "react", options=_MODE_OPTIONS), P("role", "角色", "")], "python"),
     ("group_chat", "群聊 GroupChat", "collab", "◍◍", "多角色轮流发言，主持人汇总共识。", ["out"], [P("rounds", "轮数", 2)], "python"),
     ("handoff", "转交 Handoff", "collab", "⇥", "把上下文交给下游专用 agent。", ["out"],
      [P("target", "目标角色", ""), P("reason", "原因", "")], "python"),
@@ -133,7 +164,7 @@ _DEFS: List[tuple] = [
     ("autogen_group_chat", "AutoGen GroupChat", "fw", "▢▢", "多 agent 轮询讨论。", ["out"],
      [P("agents", "成员", ["planner", "coder", "reviewer"]), P("max_round", "最大轮数", 6)], "python"),
     ("autogen_tool_agent", "AutoGen Tool Agent", "fw", "⚒", "带工具集的 AutoGen Agent。", ["out"],
-     [P("max_steps", "最大步数", 6)], "python"),
+     [P("mode", "推理模式", "react", options=_MODE_OPTIONS), P("max_steps", "最大步数", 6)], "python"),
     ("crewai_agent", "CrewAI Agent", "fw", "▢", "CrewAI Agent 定义。", ["out"],
      [P("role", "角色", "研究员"), P("goal", "目标", ""), P("backstory", "背景", "")], "python"),
     ("crewai_task", "CrewAI Task", "fw", "☑", "CrewAI Task 定义。", ["out"],

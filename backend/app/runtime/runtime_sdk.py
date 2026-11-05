@@ -270,7 +270,10 @@ class NodeContext:
     """节点函数拿到的全部能力都在这里。"""
 
     def __init__(self, node_id: str, node_name: str, kind: str, params: Dict[str, Any],
-                 payload: Any, state: Dict[str, Any], run_id: str = ""):
+                 payload: Any, state: Dict[str, Any], run_id: str = "",
+                 org: Optional[Dict[str, Any]] = None,
+                 model_override: Optional[Dict[str, Any]] = None,
+                 delegate_fn: Optional[Callable[[str, Any], Any]] = None):
         self.node_id = node_id
         self.node_name = node_name
         self.kind = kind
@@ -280,6 +283,50 @@ class NodeContext:
         self.run_id = run_id
         self.tools: List[ToolSpec] = []
         self.config = load_config()
+        self.org = org or {}
+        self._model_override = model_override or {}
+        self._delegate_fn = delegate_fn
+        self.cfg = self._effective_config()
+
+    def _effective_config(self) -> Dict[str, Any]:
+        """节点级模型配置优先于项目 config.json。"""
+        if not self._model_override:
+            return self.config
+        cfg = dict(self.config)
+        for key in ("provider", "base_url", "model", "temperature", "max_tokens"):
+            val = self._model_override.get(key)
+            if val not in (None, ""):
+                cfg[key] = val
+        env_name = self._model_override.get("api_key_env")
+        if env_name:
+            key = os.environ.get(env_name)
+            if key:
+                cfg["api_key"] = key
+        return cfg
+
+    # ---- 组织关系（上下级 / 平级） ----
+    @property
+    def superior(self) -> str:
+        """我的上级 agent 名字（没配就是空串）。"""
+        return str(self.org.get("superior_name") or "")
+
+    @property
+    def subordinates(self) -> List[str]:
+        """我的下级 agent 名字列表。"""
+        return list(self.org.get("subordinate_names") or [])
+
+    @property
+    def peers(self) -> List[str]:
+        """和我平级的 agent 名字列表。"""
+        return list(self.org.get("peer_names") or [])
+
+    def delegate(self, name: str, task: Any) -> Any:
+        """把任务交给某个下级（或平级）agent 执行，返回它的输出。"""
+        if self._delegate_fn is None:
+            raise RuntimeError("当前运行环境不支持委派（runner 未注入 delegate）")
+        emit_event({"event": "delegate", "node": self.node_id, "from": self.node_name,
+                    "to": name, "task": str(task)[:600]})
+        return self._delegate_fn(name, task)
 
     # ---- 输入 ----
     @property
@@ -315,7 +362,7 @@ class NodeContext:
         if sys_prompt:
             messages.append({"role": "system", "content": sys_prompt})
         messages.append({"role": "user", "content": str(prompt)})
-        return chat_completion(messages, self.config, model=model, temperature=temperature,
+        return chat_completion(messages, self.cfg, model=model, temperature=temperature,
                                max_tokens=max_tokens)
 
     def llm_stream(self, prompt: str, system: Optional[str] = None, model: Optional[str] = None) -> str:
@@ -323,7 +370,7 @@ class NodeContext:
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": str(prompt)})
-        return chat_stream(messages, self.config, model=model,
+        return chat_stream(messages, self.cfg, model=model,
                            on_token=lambda t: emit_event({"event": "token", "node": self.node_id,
                                                           "name": self.node_name, "text": t}))
 
@@ -336,16 +383,70 @@ class NodeContext:
         data = _extract_json(raw)
         return schema if data is None else data
 
+    # ---- Agent 推理模式 ----
     def agent(self, task: str, tools: Optional[List[ToolSpec]] = None,
-              system: Optional[str] = None, max_steps: int = 6) -> str:
+              system: Optional[str] = None, mode: str = "react",
+              max_steps: int = 6) -> str:
+        """按推理模式跑一个 agent。
+
+        mode:
+          react        思考-行动-观察循环（默认）
+          plan_execute 先规划，再逐步执行，最后汇总
+          goal         围绕目标反复推进，自评达成度直到达标
+          reflexion    先出稿，再自我批判并重写
+          tool_call    只做一轮工具调用
+          simple       单次推理，不循环、不用工具
+        """
         tools = tools if tools is not None else self.tools
+        mode = (mode or "react").strip().lower()
         base_system = system or "你是一个能自主使用工具的智能体。"
-        tool_desc = "\n".join(f"- {t.name}: {t.description}" for t in tools) or "（无可用工具）"
+        emit_event({"event": "agent_mode", "node": self.node_id,
+                    "name": self.node_name, "mode": mode})
+
+        if mode == "simple":
+            return self.llm(task, system=base_system)
+        if mode == "tool_call":
+            return self._agent_tool_call(task, tools, base_system)
+        if mode == "plan_execute":
+            return self._agent_plan_execute(task, tools, base_system, max_steps)
+        if mode == "goal":
+            return self._agent_goal(task, tools, base_system, max_steps)
+        if mode == "reflexion":
+            return self._agent_reflexion(task, tools, base_system, max_steps)
+        return self._agent_react(task, tools, base_system, max_steps)
+
+    def _tool_desc(self, tools: List[ToolSpec]) -> str:
+        return "\n".join(f"- {t.name}: {t.description}" for t in tools) or "（无可用工具）"
+
+    def _call_tool(self, tools: List[ToolSpec], action: Any, args: Any, step: int,
+                   transcript: List[str]) -> str:
+        tool = next((t for t in tools if re.sub(r"[^\w]", "_", t.name) ==
+                     re.sub(r"[^\w]", "_", str(action))), None)
+        if tool is None:
+            transcript.append(f"第{step}步：调用未知工具 {action}，跳过")
+            return ""
+        if not isinstance(args, dict):
+            args = {"query": str(args)}
+        try:
+            result = tool(**args)
+        except Exception as exc:  # noqa: BLE001
+            result = f"工具执行失败：{exc}"
+        text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
+        transcript.append(f"第{step}步：{tool.name}({json.dumps(args, ensure_ascii=False)}) -> {text[:600]}")
+        emit_event({"event": "tool_call", "node": self.node_id, "tool": tool.name,
+                    "args": args, "result": text[:2000]})
+        self.state.setdefault("observations", []).append(
+            {"node": self.node_name, "summary": text[:400], "raw": text})
+        return text
+
+    def _agent_react(self, task: str, tools: List[ToolSpec], base_system: str,
+                     max_steps: int) -> str:
+        tool_desc = self._tool_desc(tools)
         transcript: List[str] = []
         scratch = task
         for step in range(1, max_steps + 1):
             emit_event({"event": "agent_step", "node": self.node_id, "step": step,
-                        "max_steps": max_steps})
+                        "max_steps": max_steps, "mode": "react"})
             prompt = (
                 f"{scratch}\n\n## 可用工具\n{tool_desc}\n\n"
                 f"## 已执行步骤\n{chr(10).join(transcript) or '（暂无）'}\n\n"
@@ -359,30 +460,111 @@ class NodeContext:
                 return raw
             if decision.get("final_answer"):
                 return str(decision["final_answer"])
-            action = decision.get("action")
-            args = decision.get("action_input") or {}
-            tool = next((t for t in tools if re.sub(r"[^\w]", "_", t.name) ==
-                         re.sub(r"[^\w]", "_", str(action))), None)
-            if tool is None:
-                transcript.append(f"第{step}步：调用未知工具 {action}，跳过")
+            text = self._call_tool(tools, decision.get("action"),
+                                   decision.get("action_input") or {}, step, transcript)
+            if not text:
                 continue
-            if not isinstance(args, dict):
-                args = {"query": str(args)}
-            try:
-                result = tool(**args)
-            except Exception as exc:  # noqa: BLE001
-                result = f"工具执行失败：{exc}"
-            text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
-            transcript.append(f"第{step}步：{tool.name}({json.dumps(args, ensure_ascii=False)}) -> {text[:600]}")
-            emit_event({"event": "tool_call", "node": self.node_id, "tool": tool.name,
-                        "args": args, "result": text[:2000]})
-            self.state.setdefault("observations", []).append(
-                {"node": self.node_name, "summary": text[:400], "raw": text})
             scratch = f"{task}\n\n（上一轮工具结果：{text[:800]}）"
         return self.llm(
             f"{task}\n\n## 执行记录\n{chr(10).join(transcript)}\n\n请给出最终答案。",
             system=base_system,
         )
+
+    def _agent_tool_call(self, task: str, tools: List[ToolSpec], base_system: str) -> str:
+        if not tools:
+            return self.llm(task, system=base_system)
+        prompt = (
+            f"{task}\n\n## 可用工具\n{self._tool_desc(tools)}\n\n"
+            "只决定一次工具调用，输出 JSON：\n"
+            '{"action": "工具名", "action_input": {"query": "..."}}\n'
+            '如果不需要工具，输出：{"action": "", "final_answer": "..."}'
+        )
+        raw = self.llm(prompt, system=base_system)
+        decision = _extract_json(raw) or {}
+        if not isinstance(decision, dict):
+            return raw
+        if decision.get("final_answer"):
+            return str(decision["final_answer"])
+        transcript: List[str] = []
+        text = self._call_tool(tools, decision.get("action"),
+                               decision.get("action_input") or {}, 1, transcript)
+        if not text:
+            return raw
+        return self.llm(
+            f"{task}\n\n工具返回：{text[:1500]}\n\n请据此给出最终答案。",
+            system=base_system)
+
+    def _agent_plan_execute(self, task: str, tools: List[ToolSpec], base_system: str,
+                            max_steps: int) -> str:
+        plan = self.llm(
+            f"任务：{task}\n\n请拆成 2-5 个执行步骤，每行一步，只输出步骤本身。",
+            system="你是任务规划专家，只输出步骤清单，不要额外解释。")
+        emit_event({"event": "agent_step", "node": self.node_id, "step": 0,
+                    "max_steps": max_steps, "mode": "plan_execute", "plan": plan[:1500]})
+        steps = [s.strip(" -•·\t") for s in plan.splitlines() if s.strip()][:5]
+        if not steps:
+            return self._agent_react(task, tools, base_system, max_steps)
+        results: List[str] = []
+        for idx, step_desc in enumerate(steps, 1):
+            if idx > max_steps:
+                break
+            emit_event({"event": "agent_step", "node": self.node_id, "step": idx,
+                        "max_steps": max_steps, "mode": "plan_execute",
+                        "subtask": step_desc[:200]})
+            out = self._agent_react(
+                f"总任务：{task}\n当前步骤（{idx}/{len(steps)}）：{step_desc}\n"
+                f"已完成部分：{chr(10).join(results) or '（暂无）'}",
+                tools, base_system, max(2, min(3, max_steps)))
+            results.append(f"步骤{idx}（{step_desc}）：{out}")
+        return self.llm(
+            f"总任务：{task}\n\n## 各步骤结果\n{chr(10).join(results)}\n\n请汇总输出最终答案。",
+            system=base_system)
+
+    def _agent_goal(self, task: str, tools: List[ToolSpec], base_system: str,
+                    max_steps: int) -> str:
+        history: List[str] = []
+        last = ""
+        for round_no in range(1, max_steps + 1):
+            emit_event({"event": "agent_step", "node": self.node_id, "step": round_no,
+                        "max_steps": max_steps, "mode": "goal"})
+            last = self._agent_react(
+                f"目标：{task}\n\n## 已完成的尝试\n{chr(10).join(history) or '（暂无）'}\n\n"
+                "请继续推进；如果已经能完整达成目标，直接给出最终答案。",
+                tools, base_system, max(2, max_steps // 2 or 2))
+            check = self.json_prompt(
+                "判断当前答案是否已经达成目标，并指出还差什么。",
+                schema={"achieved": False, "score": 0, "missing": ["..."]},
+                context=f"目标：{task}\n\n当前答案：\n{last}")
+            if not isinstance(check, dict):
+                break
+            try:
+                score = int(check.get("score") or 0)
+            except (TypeError, ValueError):
+                score = 0
+            self.emit("goal_check", {"round": round_no, "score": score,
+                                     "achieved": bool(check.get("achieved")),
+                                     "missing": check.get("missing")})
+            if check.get("achieved") or score >= 85:
+                break
+            history.append(f"第{round_no}轮（{score} 分，未达成）：{last[:400]}")
+        return last
+
+    def _agent_reflexion(self, task: str, tools: List[ToolSpec], base_system: str,
+                         max_steps: int) -> str:
+        draft = self._agent_react(task, tools, base_system, max(2, max_steps // 2 or 2))
+        rounds = max(1, min(3, max(1, max_steps // 2)))
+        for i in range(rounds):
+            emit_event({"event": "agent_step", "node": self.node_id, "step": i + 1,
+                        "max_steps": rounds, "mode": "reflexion"})
+            critique = self.llm(
+                f"任务：{task}\n\n当前产出：\n{draft}\n\n"
+                "请指出事实错误、遗漏与表达问题，越具体越好。",
+                system="你是严格的评审者，只输出问题清单。")
+            draft = self.llm(
+                f"任务：{task}\n\n上一版产出：\n{draft}\n\n评审意见：\n{critique}\n\n"
+                "请据此重写，只输出改进后的完整结果。",
+                system=base_system)
+        return draft
 
     # ---- 外部能力 ----
     def http(self, method: str, url: str, headers: Optional[Dict[str, str]] = None,
@@ -605,8 +787,8 @@ class NodeContext:
             import asyncio
 
             client = OpenAIChatCompletionClient(
-                model=self.config["model"], base_url=self.config.get("base_url"),
-                api_key=self.config["api_key"],
+                model=self.cfg["model"], base_url=self.cfg.get("base_url"),
+                api_key=self.cfg["api_key"],
                 model_info={"vision": False, "function_calling": True, "json_output": True,
                             "family": "unknown", "structured_output": False},
             )
@@ -635,8 +817,8 @@ class NodeContext:
             import asyncio
 
             client = OpenAIChatCompletionClient(
-                model=self.config["model"], base_url=self.config.get("base_url"),
-                api_key=self.config["api_key"],
+                model=self.cfg["model"], base_url=self.cfg.get("base_url"),
+                api_key=self.cfg["api_key"],
                 model_info={"vision": False, "function_calling": True, "json_output": True,
                             "family": "unknown", "structured_output": False},
             )

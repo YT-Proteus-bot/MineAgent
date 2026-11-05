@@ -96,6 +96,13 @@ export const api = {
       `/api/canvases/${id}/background-image`,
       { method: 'DELETE' },
     ),
+  setNodeModel: (id: string, nodeId: string, cfg: Record<string, any>) =>
+    request<Record<string, any>>(`/api/canvases/${id}/nodes/${nodeId}/model`, {
+      method: 'PUT',
+      body: JSON.stringify(cfg),
+    }),
+  clearNodeModel: (id: string, nodeId: string) =>
+    request<{ ok: boolean }>(`/api/canvases/${id}/nodes/${nodeId}/model`, { method: 'DELETE' }),
 
   env: (id: string) => request<Record<string, any>>(`/api/canvases/${id}/env`),
   listFiles: (id: string) =>

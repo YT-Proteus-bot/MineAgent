@@ -51,6 +51,37 @@ def _py_name(name: str, used: set, fallback: str) -> str:
 # --------------------------------------------------------------------------- #
 # 生成 agent.json
 # --------------------------------------------------------------------------- #
+def _node_org(raw: Any) -> Dict[str, Any]:
+    """组织关系：上级 nodeId、下级与平级 nodeId 列表。"""
+    if not isinstance(raw, dict):
+        return {}
+
+    def _ids(value: Any) -> List[str]:
+        if isinstance(value, str):
+            return [value] if value else []
+        if isinstance(value, (list, tuple)):
+            return [str(v) for v in value if v]
+        return []
+
+    return {
+        "superior": str(raw.get("superior") or ""),
+        "subordinates": _ids(raw.get("subordinates")),
+        "peers": _ids(raw.get("peers")),
+    }
+
+
+def _node_model(raw: Any) -> Optional[Dict[str, Any]]:
+    """节点级模型：只留连接信息，api key 用环境变量名引用，绝不写明文。"""
+    if not isinstance(raw, dict):
+        return None
+    cfg = {k: raw[k] for k in ("provider", "base_url", "model", "temperature", "max_tokens")
+           if raw.get(k) not in (None, "")}
+    env = raw.get("api_key_env")
+    if env:
+        cfg["api_key_env"] = env
+    return cfg or None
+
+
 def build_spec(name: str, slug: str, framework: str, graph: Dict[str, Any]) -> Dict[str, Any]:
     used: set = set()
     nodes = []
@@ -68,6 +99,8 @@ def build_spec(name: str, slug: str, framework: str, graph: Dict[str, Any]) -> D
             "outputs": meta["outputs"],
             "params": data.get("params") or {},
             "position": node.get("position") or {"x": 0, "y": 0},
+            "org": _node_org(data.get("org")),
+            "model": _node_model(data.get("model")),
         })
     edges = []
     for e in graph.get("edges", []):
