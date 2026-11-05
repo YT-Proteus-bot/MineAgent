@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS canvases (
     model_config  TEXT NOT NULL DEFAULT '{}',
     background    TEXT NOT NULL DEFAULT '{}',
     rules         TEXT NOT NULL DEFAULT '[]',
+    mode          TEXT NOT NULL DEFAULT '',
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL
 );
@@ -86,6 +87,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE canvases ADD COLUMN background TEXT NOT NULL DEFAULT '{}'")
     if "rules" not in cols:
         conn.execute("ALTER TABLE canvases ADD COLUMN rules TEXT NOT NULL DEFAULT '[]'")
+    if "mode" not in cols:
+        conn.execute("ALTER TABLE canvases ADD COLUMN mode TEXT NOT NULL DEFAULT ''")
 
 
 def get_setting(key: str, default: str = "") -> str:

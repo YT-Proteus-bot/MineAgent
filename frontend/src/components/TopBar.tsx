@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { api } from '../api'
 import { useStore } from '../store'
 import Popover from './Popover'
@@ -37,6 +37,29 @@ export default function TopBar({ onOpenUserCenter, onOpenCanvasModel }: Props) {
   const [prompt, setPrompt] = useState<null | 'new' | 'rename'>(null)
 
   const currentFw = meta?.frameworks.find((f) => f.id === canvas?.framework)
+  // 当前框架支持的模式；没选过就用默认的第一个
+  const metaModes = useMemo(() => {
+    const fw = canvas?.framework || 'langchain'
+    const values = (meta?.framework_modes || {})[fw] || []
+    const all = meta?.all_modes || []
+    const picked = values.map((v) => all.find((m) => m.value === v)).filter(Boolean)
+    return picked.length ? (picked as typeof all) : all
+  }, [meta, canvas?.framework])
+
+  const defaultMode = metaModes[0]?.value || 'react'
+  const activeMode = canvas?.mode || defaultMode
+  const currentMode = metaModes.find((m) => m.value === activeMode)
+
+  const setCanvasMode = async (mode: string) => {
+    if (!canvas) return
+    try {
+      await api.updateCanvas(canvas.id, { mode } as any)
+      useStore.setState({ canvas: { ...canvas, mode } })
+      toast(`画布默认模式已设为「${metaModes.find((m) => m.value === mode)?.label || mode}」，新建 agent 节点会用它`, 'ok')
+    } catch (e: any) {
+      toast(`设置失败：${e.message || e}`, 'err')
+    }
+  }
 
   const handleRun = () => {
     setRunPanelOpen(true)
@@ -196,6 +219,46 @@ export default function TopBar({ onOpenUserCenter, onOpenCanvasModel }: Props) {
       <div className="spacer" />
 
       {dirty && <span className="badge warn">未保存</span>}
+
+      <Popover
+        align="right"
+        width={340}
+        trigger={() => (
+          <button title="选择这个画布的默认推理模式（新建 agent 节点会用它）">
+            <span style={{ opacity: 0.7 }}>⚙</span>
+            {currentMode?.label || '选择模式'}
+            <span className="dim small">▾</span>
+          </button>
+        )}
+      >
+        {(close) => (
+          <>
+            <div className="group-title">
+              {currentFw?.label || '当前框架'} 支持的模式
+            </div>
+            {(metaModes || []).map((m) => (
+              <div
+                key={m.value}
+                className={`menu-item${m.value === activeMode ? ' active' : ''}`}
+                onClick={() => {
+                  setCanvasMode(m.value)
+                  close()
+                }}
+              >
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: 'flex', gap: 6, alignItems: 'baseline' }}>
+                    <span>{m.label}</span>
+                    <span className="dim small">{m.group}</span>
+                  </div>
+                  <div className="dim small" style={{ whiteSpace: 'normal', lineHeight: 1.5 }}>
+                    {m.desc}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </>
+        )}
+      </Popover>
 
       <Popover
         align="right"

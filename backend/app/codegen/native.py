@@ -231,7 +231,8 @@ def _block_llm(node: Dict[str, Any]) -> str:
     system = _text(p, "system_prompt") or _text(p, "system")
     if not system:
         defaults = {
-            "planner": "你是一个任务规划专家。把目标拆成有序、可执行的步骤，每行一步。",
+            "planner": "你是一个任务规划专家。把目标拆成有序、可执行的步骤，每行一步；"
+                       "输入只是寒暄、闲聊或没有可拆解目标时，原样返回输入，不要追问。",
             "observation": "把工具返回的结果压缩成 3 条以内的关键观察；没有工具结果时保留原始回答的要点。",
             "review_observation": "判断现有观察是否足够支撑结论，指出还缺什么。",
             "formatter": "你是格式化工具：只做格式转换，不增删事实、不编造结构；内容不足时原样返回。",
@@ -292,6 +293,7 @@ def _block_router(node: Dict[str, Any]) -> str:
         _text(p, "expression") or _text(p, "condition") or _text(p, "rule")
         or _text(p, "question") or "该请求是否需要调用工具？"
     )
+    max_loops = int(_num(p, "max_loops", 2))
     llm_var = _llm_var(node)
     name = _q(node["name"])
     return (
@@ -304,9 +306,15 @@ def _block_router(node: Dict[str, Any]) -> str:
         f'        {{"role": "user", "content": f"判别问题：{{question}}\\n\\n待判内容：\\n{{text}}\\n\\n只回答 true 或 false。"}},\n'
         f"    ]).content.strip().lower()\n"
         f'    branch = "true" if verdict.startswith("true") else "false"\n'
+        f'    rounds = int(state.get("loop_count") or 0) + 1\n'
+        f"    max_loops = {max_loops}\n"
+        f'    if branch == "false" and rounds > max_loops:\n'
+        f'        branch = "true"\n'
+        f'        _emit({{"event": "log", "level": "warn", "node": {name}, "name": {name},\n'
+        f'               "message": f"已连续循环 {{rounds - 1}} 次，强制收敛到 true 出口"}})\n'
         f'    _emit({{"event": "route", "node": {name}, "name": {name},\n'
         f'           "branch": branch, "reason": _brief(verdict, 120)}})\n'
-        f'    return {{"data": text, "route": branch}}\n'
+        f'    return {{"data": text, "route": branch, "loop_count": rounds}}\n'
     )
 
 
@@ -477,6 +485,7 @@ class AgentState(TypedDict, total=False):
     history: list
     trace: list
     answer: Any
+    loop_count: int
 
 
 '''

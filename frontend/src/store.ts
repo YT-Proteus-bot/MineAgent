@@ -24,7 +24,12 @@ import type {
   NodeTypeDef,
   RunEvent,
 } from './types'
-import { DEFAULT_BACKGROUND } from './types'
+import { DEFAULT_BACKGROUND, isAgentKind } from './types'
+
+/** 会跑 Agent 循环的节点类型（新增时需要带上画布默认模式） */
+function isAgentLike(kind: string): boolean {
+  return isAgentKind(kind)
+}
 
 export type Toast = { id: number; text: string; kind: 'ok' | 'err' | 'info' }
 
@@ -786,6 +791,11 @@ export const useStore = create<AppState>((set, get) => ({
         params,
         status: 'idle',
       },
+    }
+    // agent 节点默认用画布选的模式
+    const canvasMode = get().canvas?.mode
+    if (canvasMode && isAgentLike(kind)) {
+      node.data.params = { ...node.data.params, mode: canvasMode }
     }
 
     const auto = suggestLinks({

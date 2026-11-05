@@ -144,6 +144,8 @@ export interface CanvasDetail extends CanvasSummary {
   llm_config: ModelConfig
   background: CanvasBackground
   rules: CustomRule[]
+  /** 画布级默认推理模式，空表示用框架默认 */
+  mode?: string
 }
 
 export interface Category {
@@ -189,6 +191,7 @@ export interface AgentModeDef {
   value: string
   label: string
   desc: string
+  group?: string
 }
 
 /* ---------------- 编排约束 ---------------- */
@@ -256,6 +259,10 @@ export interface Meta {
   nodes: NodeTypeDef[]
   frameworks: FrameworkDef[]
   agent_modes: AgentModeDef[]
+  /** 每个框架支持哪些模式（值是 AgentModeDef.value） */
+  framework_modes?: Record<string, string[]>
+  /** 全量模式清单 */
+  all_modes?: AgentModeDef[]
   constraint_rules: ConstraintRuleDef[]
   custom_rule_types: CustomRuleType[]
   version: string

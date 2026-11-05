@@ -87,6 +87,7 @@ class CanvasUpdate(BaseModel):
     llm_config: Optional[ModelConfig] = None
     background: Optional[CanvasBackground] = None
     rules: Optional[List[Dict[str, Any]]] = None
+    mode: Optional[str] = None
 
 
 class CanvasSummary(BaseModel):
@@ -104,6 +105,8 @@ class CanvasDetail(CanvasSummary):
     llm_config: ModelConfig
     background: CanvasBackground = Field(default_factory=CanvasBackground)
     rules: List[Dict[str, Any]] = Field(default_factory=list)
+    # 画布级默认推理模式（react / plan_execute / cot …），空表示用框架默认
+    mode: str = ""
 
 
 class ConstraintViolation(BaseModel):

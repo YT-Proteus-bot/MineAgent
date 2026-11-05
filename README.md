@@ -65,6 +65,7 @@
 | 顶部「↶ / ↷」 | 撤销 / 重做画布改动（`Ctrl+Z` / `Ctrl+Shift+Z` 或 `Ctrl+Y`），连续拖动合并成一步 |
 | 顶部「⚠ 约束」 | 编排约束面板：内置规则 + 自定义规则，违规节点在画布上标红 |
 | 顶部「运行」 | 编译并真实执行当前画布，执行过程流式回显到节点和运行面板 |
+| 右上角「选择模式」 | 框架**左边**的下拉，列出该框架支持的推理模式（ReAct / CoT / Plan-and-Execute / 群聊…），选中后作为画布默认，新建 agent 节点会用它 |
 | 右上角下拉 | 选择 Agent 框架（LangChain/LangGraph、AutoGen、CrewAI…），切换后重建架构图 |
 | 右上角「模型」 | 配置**这个画布**用的大模型与 API Key |
 | 右上角「用户中心」 | 配置**整个项目**的全局 API Key（画布没单独配置时回退到这里） |
@@ -430,13 +431,31 @@ python agent.py --input "..."
 ---
 
 ## 支持的框架
-
 | 框架 | 状态 | 说明 |
 | --- | --- | --- |
 | LangChain / LangGraph | ✅ 可运行 | 画布 1:1 映射为 `StateGraph`，条件边对应多端口节点 |
 | AutoGen | ✅ 可运行 | 节点映射为 `AssistantAgent` + `RoundRobinGroupChat` |
 | CrewAI | ✅ 可运行 | 节点映射为 `Agent` / `Task` / `Crew` |
 | MetaGPT、Agno、SmolAgents、Semantic Kernel、OpenAI Agents SDK、Dify Workflow | 🎨 架构图 | 选中后生成对应风格的架构图与代码骨架，暂不接原生执行 |
+
+### 各框架支持的推理 / 协作模式
+
+顶部「选择模式」下拉会按当前框架列出可选模式，33 个模式按框架的能力挑配：
+
+| 框架 | 模式（个数） |
+| --- | --- |
+| LangChain / LangGraph | 单次调用、CoT、函数调用、ReAct、Plan-and-Execute、ReWOO、反思、目标驱动、自洽投票、Tree-of-Thoughts、主管调度、分治汇总（12） |
+| AutoGen | 单次调用、函数调用、双人对话、群聊、顺序接力、嵌套对话、辩论、反思、代码行动、移交、群体交接、护栏校验（12） |
+| CrewAI | 单次调用、顺序接力、层级分派、并行处理、共识投票、辩论、分治汇总（7） |
+| MetaGPT | 标准作业流程、顺序接力、辩论、Plan-and-Execute、反思（5） |
+| Agno | 单次调用、函数调用、ReAct、显式推理、意图路由、主管调度、并行、节点工作流、护栏校验（9） |
+| SmolAgents | 代码行动、函数调用、ReAct、受管执行、Plan-and-Execute（5） |
+| Semantic Kernel | 单次调用、函数调用、Plan-and-Execute、群聊、移交、意图路由（6） |
+| OpenAI Agents SDK | 单次调用、函数调用、移交、护栏校验、结构化输出、主管调度、并行（7） |
+| Dify | 对话流、节点工作流、函数调用、CoT、检索增强（5） |
+| 自定义 | 单次调用、CoT、函数调用、ReAct、Plan-and-Execute、目标驱动、反思、顺序接力、层级分派、辩论、移交（11） |
+
+模式分五组：基础 / 推理 / 循环 / 规划 / 多智能体 / 框架专有，下拉里会标出来。
 
 三个「可运行」框架的项目都会生成 `agent.py` 原生入口；
 如果本机没装该框架，`agent.py` 会自动提示并回退到内置 `runner.py`，保证流程任何时候都能跑。

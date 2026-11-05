@@ -109,6 +109,7 @@ def _detail(row) -> CanvasDetail:
         llm_config=ModelConfig(**_row_to_config(row)),
         background=CanvasBackground(**_row_to_background(row)),
         rules=_row_to_rules(row),
+        mode=(row["mode"] if "mode" in row.keys() else "") or "",
     )
 
 
@@ -268,6 +269,9 @@ def update_canvas(canvas_id: str, payload: CanvasUpdate):
 
         if payload.rules is not None:
             fields["rules"] = json.dumps(payload.rules, ensure_ascii=False)
+
+        if payload.mode is not None:
+            fields["mode"] = payload.mode.strip()
 
         if not fields:
             return _detail(row)

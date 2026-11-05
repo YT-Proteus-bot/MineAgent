@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException
 from ..constraints import CUSTOM_RULE_TYPES, rule_catalog
 from ..framework_templates import FRAMEWORKS, FRAMEWORK_INDEX, build_graph
 from ..codegen.native import default_block
+from ..framework_modes import FRAMEWORK_MODES, all_modes
 from ..node_docs import node_doc
 from ..node_registry import AGENT_MODES, CATEGORIES, NODE_TYPES
 
@@ -32,6 +33,9 @@ def meta():
         "nodes": nodes,
         "frameworks": FRAMEWORKS,
         "agent_modes": AGENT_MODES,
+        # 每个框架支持的模式 + 全量模式清单
+        "framework_modes": FRAMEWORK_MODES,
+        "all_modes": all_modes(),
         "constraint_rules": rule_catalog(),
         "custom_rule_types": CUSTOM_RULE_TYPES,
         "version": "1.0.0",
