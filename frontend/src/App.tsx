@@ -17,6 +17,8 @@ export default function App() {
   const dirty = useStore((s) => s.dirty)
   const rightTab = useStore((s) => s.rightTab)
   const setRightTab = useStore((s) => s.setRightTab)
+  const undo = useStore((s) => s.undo)
+  const redo = useStore((s) => s.redo)
 
   const [userCenterOpen, setUserCenterOpen] = useState(false)
   const [canvasModelOpen, setCanvasModelOpen] = useState(false)
@@ -27,14 +29,31 @@ export default function App() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+      if (!(e.ctrlKey || e.metaKey)) return
+      const key = e.key.toLowerCase()
+      const el = e.target as HTMLElement | null
+      const typing =
+        !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)
+
+      if (key === 's') {
         e.preventDefault()
         if (dirty) save()
+        return
+      }
+      // 在输入框里按 Ctrl+Z 交给浏览器自己处理（撤销打字），不动画布
+      if (typing) return
+      if (key === 'z') {
+        e.preventDefault()
+        if (e.shiftKey) redo()
+        else undo()
+      } else if (key === 'y') {
+        e.preventDefault()
+        redo()
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [dirty, save])
+  }, [dirty, save, undo, redo])
 
   useEffect(() => {
     const onBeforeUnload = (e: BeforeUnloadEvent) => {

@@ -29,6 +29,10 @@ export default function TopBar({ onOpenUserCenter, onOpenCanvasModel }: Props) {
   const toast = useStore((s) => s.toast)
   const report = useStore((s) => s.constraintReport)
   const setConstraintPanelOpen = useStore((s) => s.setConstraintPanelOpen)
+  const historyPast = useStore((s) => s.historyPast)
+  const historyFuture = useStore((s) => s.historyFuture)
+  const undo = useStore((s) => s.undo)
+  const redo = useStore((s) => s.redo)
 
   const [prompt, setPrompt] = useState<null | 'new' | 'rename'>(null)
 
@@ -140,6 +144,23 @@ export default function TopBar({ onOpenUserCenter, onOpenCanvasModel }: Props) {
           </>
         )}
       </Popover>
+
+      <button
+        onClick={undo}
+        disabled={historyPast.length === 0}
+        title={`撤销（Ctrl+Z）${historyPast.length ? `，可退 ${historyPast.length} 步` : ''}`}
+        className="icon"
+      >
+        ↶
+      </button>
+      <button
+        onClick={redo}
+        disabled={historyFuture.length === 0}
+        title="重做（Ctrl+Shift+Z / Ctrl+Y）"
+        className="icon"
+      >
+        ↷
+      </button>
 
       <button
         onClick={() => save()}

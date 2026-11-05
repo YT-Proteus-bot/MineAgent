@@ -176,6 +176,7 @@ export default function NodeInspector() {
             <br />· 拖动节点右侧圆点连到另一个节点：编排流程
             <br />· 拖动节点本身：调整位置
             <br />· 选中节点或连线后按 Delete：删除
+            <br />· Ctrl/Cmd + Z：撤销，加 Shift 重做
             <br />· Ctrl/Cmd + S：保存并落盘
           </div>
           <div className="hint-box">

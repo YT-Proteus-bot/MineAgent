@@ -28,6 +28,26 @@ import { DEFAULT_BACKGROUND } from './types'
 
 export type Toast = { id: number; text: string; kind: 'ok' | 'err' | 'info' }
 
+/** 撤销 / 重做用的画布快照 */
+export type CanvasSnapshot = { nodes: AgentNode[]; edges: FlowEdge[] }
+
+const HISTORY_LIMIT = 60
+
+let snapshotTimer: ReturnType<typeof setTimeout> | null = null
+let currentSnapshot: CanvasSnapshot | null = null
+let suspendHistory = false
+
+function snapshotKey(s: CanvasSnapshot): string {
+  return JSON.stringify({
+    n: s.nodes.map((n) => [n.id, n.position.x, n.position.y, n.width, n.height, n.data]),
+    e: s.edges.map((e) => [e.id, e.source, e.target, e.sourceHandle]),
+  })
+}
+
+function takeSnapshot(state: { nodes: AgentNode[]; edges: FlowEdge[] }): CanvasSnapshot {
+  return { nodes: state.nodes, edges: state.edges }
+}
+
 interface AppState {
   meta: Meta | null
   canvases: CanvasSummary[]
@@ -51,6 +71,9 @@ interface AppState {
   constraintReport: ConstraintReport | null
   violatedNodeIds: string[]
   constraintPanelOpen: boolean
+  historyPast: CanvasSnapshot[]
+  historyFuture: CanvasSnapshot[]
+  savedSnapshotKey: string
 
   init: () => Promise<void>
   loadCanvas: (id: string) => Promise<void>
@@ -63,6 +86,9 @@ interface AppState {
   uploadBackground: (file: File) => Promise<void>
   removeBackgroundImage: () => Promise<void>
   validateNow: () => Promise<void>
+  undo: () => void
+  redo: () => void
+  resetHistory: () => void
   setConstraintPanelOpen: (v: boolean) => void
   addRule: (rule: CustomRule) => Promise<void>
   removeRule: (ruleId: string) => Promise<void>
@@ -218,6 +244,9 @@ export const useStore = create<AppState>((set, get) => ({
   constraintReport: null,
   violatedNodeIds: [],
   constraintPanelOpen: false,
+  historyPast: [],
+  historyFuture: [],
+  savedSnapshotKey: '',
 
   init: async () => {
     if (initStarted) return
@@ -254,6 +283,7 @@ export const useStore = create<AppState>((set, get) => ({
         constraintReport: null,
         violatedNodeIds: [],
       })
+      get().resetHistory()
       get().validateNow()
     } catch (err: any) {
       get().toast(`打开画布失败：${err.message || err}`, 'err')
@@ -277,6 +307,7 @@ export const useStore = create<AppState>((set, get) => ({
         violatedNodeIds: [],
       })
       get().toast(`已创建画布「${detail.name}」`, 'ok')
+      get().resetHistory()
       get().validateNow()
     } catch (err: any) {
       get().toast(`创建失败：${err.message || err}`, 'err')
@@ -392,6 +423,64 @@ export const useStore = create<AppState>((set, get) => ({
     } catch {
       /* 校验失败不影响画布编辑 */
     }
+  },
+
+  undo: () => {
+    const past = get().historyPast
+    if (!past.length) return
+    const prev = past[past.length - 1]
+    const cur = takeSnapshot(get())
+    suspendHistory = true
+    if (snapshotTimer) clearTimeout(snapshotTimer)
+    set({
+      nodes: prev.nodes,
+      edges: prev.edges,
+      historyPast: past.slice(0, -1),
+      historyFuture: [cur, ...get().historyFuture].slice(0, HISTORY_LIMIT),
+      selectedNodeId: null,
+      dirty: snapshotKey(prev) !== get().savedSnapshotKey,
+    })
+    currentSnapshot = prev
+    setTimeout(() => {
+      suspendHistory = false
+    }, 60)
+    get().toast('已撤销', 'info')
+  },
+
+  redo: () => {
+    const future = get().historyFuture
+    if (!future.length) return
+    const next = future[0]
+    const cur = takeSnapshot(get())
+    suspendHistory = true
+    if (snapshotTimer) clearTimeout(snapshotTimer)
+    set({
+      nodes: next.nodes,
+      edges: next.edges,
+      historyPast: [...get().historyPast, cur].slice(-HISTORY_LIMIT),
+      historyFuture: future.slice(1),
+      selectedNodeId: null,
+      dirty: snapshotKey(next) !== get().savedSnapshotKey,
+    })
+    currentSnapshot = next
+    setTimeout(() => {
+      suspendHistory = false
+    }, 60)
+    get().toast('已重做', 'info')
+  },
+
+  resetHistory: () => {
+    suspendHistory = true
+    if (snapshotTimer) clearTimeout(snapshotTimer)
+    currentSnapshot = takeSnapshot(get())
+    set({
+      historyPast: [],
+      historyFuture: [],
+      savedSnapshotKey: currentSnapshot ? snapshotKey(currentSnapshot) : '',
+    })
+    setTimeout(() => {
+      suspendHistory = false
+    }, 60)
   },
 
   setConstraintPanelOpen: (v) => set({ constraintPanelOpen: v }),
@@ -705,6 +794,10 @@ export const useStore = create<AppState>((set, get) => ({
         lastSaved: new Date().toLocaleTimeString('zh-CN'),
         constraintReport: res.constraints ?? get().constraintReport,
         violatedNodeIds: res.constraints?.node_ids ?? get().violatedNodeIds,
+        savedSnapshotKey: snapshotKey({
+          nodes: normalize(res.canvas.graph.nodes),
+          edges: res.canvas.graph.edges,
+        }),
       })
       await get().refreshCanvases()
       get().toast(`已保存：${res.written_files.length} 个文件写入 ${res.project_dir.split(/[\\/]/).pop()}`, 'ok')
@@ -843,3 +936,27 @@ export const useStore = create<AppState>((set, get) => ({
 
   dismissToast: (id) => set({ toasts: get().toasts.filter((t) => t.id !== id) }),
 }))
+
+// --------------------------------------------------------------------------- //
+// 撤销 / 重做：监听画布内容变化，停顿 450ms 后记一步
+// 连续拖动、连续输入会被合并成一步，不会产生一长串没意义的中间状态
+// --------------------------------------------------------------------------- //
+useStore.subscribe((state, prev) => {
+  if (suspendHistory) return
+  if (!state.canvas) return
+  if (state.nodes === prev.nodes && state.edges === prev.edges) return
+
+  if (snapshotTimer) clearTimeout(snapshotTimer)
+  snapshotTimer = setTimeout(() => {
+    if (suspendHistory) return
+    const snap = takeSnapshot(useStore.getState())
+    if (!currentSnapshot) {
+      currentSnapshot = snap
+      return
+    }
+    if (snapshotKey(snap) === snapshotKey(currentSnapshot)) return
+    const past = [...useStore.getState().historyPast, currentSnapshot].slice(-HISTORY_LIMIT)
+    currentSnapshot = snap
+    useStore.setState({ historyPast: past, historyFuture: [] })
+  }, 450)
+})
