@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useStore } from '../store'
 import Modal from './Modal'
+import ModelNameField from './ModelNameField'
 import { PRESETS } from './SettingsModals'
 
 /**
@@ -108,20 +109,14 @@ export default function NodeModelModal({
         />
       </label>
 
-      <label className="field">
-        <span>模型名</span>
-        <input
-          list="node-model-presets"
-          value={form.model}
-          placeholder={preset.models[0] || '留空则跟随画布配置'}
-          onChange={(e) => setForm({ ...form, model: e.target.value })}
-        />
-        <datalist id="node-model-presets">
-          {preset.models.map((m) => (
-            <option key={m} value={m} />
-          ))}
-        </datalist>
-      </label>
+      <ModelNameField
+        value={form.model}
+        onChange={(v) => setForm({ ...form, model: v })}
+        presets={preset.models}
+        baseUrl={form.base_url}
+        apiKey={key}
+        placeholder={preset.models[0] || '留空则跟随画布配置'}
+      />
 
       <div className="row">
         <label className="field" style={{ flex: 1 }}>

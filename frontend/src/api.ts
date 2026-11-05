@@ -142,6 +142,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+  listModels: (payload: { base_url?: string; api_key?: string }) =>
+    request<{ ok: boolean; models: string[]; count?: number; message: string }>(
+      '/api/settings/models',
+      { method: 'POST', body: JSON.stringify(payload) },
+    ),
 
   assistantStatus: () =>
     request<{ ready: boolean; model: string; base_url: string; hint: string }>(

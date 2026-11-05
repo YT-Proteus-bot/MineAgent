@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { api } from '../api'
 import { useStore } from '../store'
 import Modal from './Modal'
+import ModelNameField from './ModelNameField'
 import type { GlobalSettings, ModelConfig } from '../types'
 
 export const PRESETS = [
@@ -113,20 +114,14 @@ export function UserCenterModal({ onClose }: { onClose: () => void }) {
         />
       </label>
 
-      <label className="field">
-        <span>模型名</span>
-        <input
-          list="model-presets"
-          value={form.orchestrator_model}
-          placeholder={preset.models[0] || 'gpt-4o-mini'}
-          onChange={(e) => setForm({ ...form, orchestrator_model: e.target.value })}
-        />
-        <datalist id="model-presets">
-          {preset.models.map((m) => (
-            <option key={m} value={m} />
-          ))}
-        </datalist>
-      </label>
+      <ModelNameField
+        value={form.orchestrator_model}
+        onChange={(v) => setForm({ ...form, orchestrator_model: v })}
+        presets={preset.models}
+        baseUrl={form.orchestrator_base_url}
+        apiKey={key}
+        placeholder={preset.models[0] || 'gpt-4o-mini'}
+      />
 
       <label className="field">
         <span>API Key</span>
@@ -219,20 +214,14 @@ export function CanvasModelModal({ onClose }: { onClose: () => void }) {
           onChange={(e) => setForm({ ...form, base_url: e.target.value })}
         />
       </label>
-      <label className="field">
-        <span>模型名</span>
-        <input
-          list="canvas-model-presets"
-          value={form.model}
-          placeholder="留空则使用全局配置"
-          onChange={(e) => setForm({ ...form, model: e.target.value })}
-        />
-        <datalist id="canvas-model-presets">
-          {preset.models.map((m) => (
-            <option key={m} value={m} />
-          ))}
-        </datalist>
-      </label>
+      <ModelNameField
+        value={form.model}
+        onChange={(v) => setForm({ ...form, model: v })}
+        presets={preset.models}
+        baseUrl={form.base_url}
+        apiKey={key}
+        placeholder="留空则使用全局配置"
+      />
       <div className="row">
         <label className="field" style={{ flex: 1 }}>
           <span>Temperature</span>

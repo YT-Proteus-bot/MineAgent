@@ -81,3 +81,71 @@ def test_connection(payload: Dict[str, Any]):
         return {"ok": False, "message": f"HTTP {exc.code}：{detail}"}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "message": f"连接失败：{exc}"}
+
+
+def _models_url(base_url: str) -> str:
+    base = (base_url or "").strip().rstrip("/") or "https://api.openai.com/v1"
+    for suffix in ("/chat/completions", "/completions", "/embeddings"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+            break
+    if not base.endswith("/v1") and "/v1" not in base:
+        base += "/v1"
+    return base + "/models"
+
+
+@router.post("/models")
+def list_models(payload: Dict[str, Any]):
+    """按当前 Base URL + API Key 拉取服务商支持的模型列表。"""
+    api_key = (payload.get("api_key") or "").strip()
+    if not api_key:
+        api_key = decrypt(get_setting("orchestrator_api_key_cipher", ""))
+    base_url = (payload.get("base_url") or "").strip() or get_setting(
+        "orchestrator_base_url", "") or "https://api.openai.com/v1"
+    if not api_key:
+        return {"ok": False, "models": [], "message": "还没有填写 API Key"}
+
+    url = _models_url(base_url)
+    req = urllib.request.Request(
+        url,
+        headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json",
+                 "User-Agent": "MineAgent/1.0"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=25) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", "replace")[:200]
+        except Exception:  # noqa: BLE001
+            pass
+        hint = ""
+        if exc.code in (404, 405):
+            hint = "（该服务商可能不提供 /models 接口，直接手填模型名即可）"
+        return {"ok": False, "models": [],
+                "message": f"HTTP {exc.code} {hint}{detail}".strip()}
+    except urllib.error.URLError as exc:
+        return {"ok": False, "models": [], "message": f"连不上 {url}：{exc.reason}"}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "models": [], "message": f"拉取失败：{exc}"}
+
+    raw = data.get("data") if isinstance(data, dict) else None
+    if raw is None and isinstance(data, dict):
+        raw = data.get("models")
+    items = raw if isinstance(raw, list) else []
+    ids = []
+    for item in items:
+        if isinstance(item, str):
+            ids.append(item)
+        elif isinstance(item, dict):
+            mid = item.get("id") or item.get("name") or item.get("model")
+            if mid:
+                ids.append(str(mid))
+    ids = sorted(set(ids))
+    if not ids:
+        return {"ok": False, "models": [],
+                "message": "接口返回里没有模型 id，直接手填模型名即可"}
+    return {"ok": True, "models": ids, "count": len(ids),
+            "message": f"获取到 {len(ids)} 个模型"}
