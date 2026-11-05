@@ -23,6 +23,11 @@ AGENT_KINDS = {
     "autogen_group_chat", "crewai_agent", "crewai_crew", "group_chat", "debate",
 }
 BRANCH_KINDS = {"router", "condition", "loop"}
+# 检索类节点是流程里的正常一步，不需要挂到 agent 下游
+RETRIEVAL_KINDS = {"rag_retriever", "embedding", "vector_store"}
+# 这些节点天然能处理多条入边（汇总/评审类），不算"无法合并"
+MULTI_INPUT_OK = {"merge", "critic", "reflector", "evaluator", "self_check",
+                  "formatter", "format_observations", "summarize", "output", "blackboard"}
 TOOL_KINDS = {
     "tool", "function", "mcp_tool", "crewai_tool", "http_request", "web_search",
     "code_interpreter", "sql_query", "rag_retriever", "file_io", "browser", "shell",
@@ -233,7 +238,7 @@ def _check_builtin(g: GraphView) -> List[Dict[str, Any]]:
         # 循环回边（源节点在我的下游）不算真正的多入边
         back = g.downstream(nid)
         real_ins = [s for s in g.inn.get(nid, []) if s not in back]
-        if len(real_ins) > 1 and g.kind[nid] not in {"join", "format_observations"}:
+        if len(real_ins) > 1 and g.kind[nid] not in {"join"} | MULTI_INPUT_OK:
             out.append(_v("multi-in-needs-join",
                           f"节点「{g.label[nid]}」有 {len(real_ins)} 条入边", [nid]))
 
@@ -256,15 +261,20 @@ def _check_builtin(g: GraphView) -> List[Dict[str, Any]]:
 
     cycles = g.cycles()
     for cyc in cycles:
-        has_control = any(g.kind.get(n) in BRANCH_KINDS for n in cyc)
+        # agent 自己就能决定"继续还是收尾"（ReAct 的循环），也算循环控制
+        has_control = any(
+            g.kind.get(n) in BRANCH_KINDS or g.kind.get(n) in AGENT_KINDS for n in cyc
+        )
         if not has_control:
             out.append(_v("cycle-needs-control",
                           "存在没有任何循环控制节点的环：" + " → ".join(g.label.get(n, n) for n in cyc[:4]),
                           cyc[:6]))
 
     agents = set(g.ids_of(AGENT_KINDS))
-    for tid in g.ids_of(TOOL_KINDS):
-        if not (g.ancestors(tid) & agents):
+    # planner 也能直接驱动工具（ReWOO 这类"先规划工具序列再执行"的模式）
+    drivers = agents | set(g.ids_of({"planner", "decomposer"}))
+    for tid in g.ids_of(TOOL_KINDS - RETRIEVAL_KINDS):
+        if not (g.ancestors(tid) & drivers):
             out.append(_v("tool-under-agent", f"工具「{g.label[tid]}」不在任何 agent 的下游", [tid]))
 
     for aid in agents:
@@ -284,9 +294,11 @@ def _check_builtin(g: GraphView) -> List[Dict[str, Any]]:
             out.append(_v("skill-has-content", f"技能节点「{g.label[nid]}」还没有内容", [nid]))
 
     risky = set(g.ids_of({"shell", "code_interpreter"}))
+    # 自检 / 条件 / 评审 也能起到"先过一遍"的作用，不只认专门的护栏节点
+    guard_kinds = {"guardrail", "human_approval", "self_check", "condition", "critic"}
     for rid in risky:
         guards = {g.kind.get(a) for a in g.ancestors(rid)}
-        if not (guards & {"guardrail", "human_approval"}):
+        if not (guards & guard_kinds):
             out.append(_v("guardrail-before-shell", f"「{g.label[rid]}」前没有护栏或人工审批", [rid]))
 
     if len(g.nodes) > 200:

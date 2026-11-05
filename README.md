@@ -457,6 +457,49 @@ python agent.py --input "..."
 
 模式分五组：基础 / 推理 / 循环 / 规划 / 多智能体 / 框架专有，下拉里会标出来。
 
+### 每个模式自带节点模板
+
+**选中模式会直接生成对应的画布**，不是只改一个设置值——33 个模式各有一套最小可用架构，
+从 3 节点（单次调用）到 6 节点（自洽投票、分治汇总、代码行动）。生成后 `Ctrl+Z` 可撤销。
+
+| 模式 | 生成的节点链 |
+| --- | --- |
+| 单次调用 | input → llm → output |
+| CoT 思维链 | input → llm（分步推理） → output |
+| 函数调用 | input → agent(tool_call) → tool → output |
+| 结构化输出 | input → llm(只输出 JSON) → formatter → output |
+| Self-Ask | input → 拆子问题 → 逐题回答 → 汇总 → output |
+| 自洽投票 | input → 采样 A/B/C → 投票汇总 → output |
+| Tree-of-Thoughts | input → 展开思路 → 评估打分 → 求解 → output |
+| **ReAct** | input → agent(react) → tool → 观察 → 回到 agent → output |
+| 目标驱动 | input → agent(goal) → 完成度判断 → 达标?（否→回到 agent / 是→output） |
+| 反思迭代 | input → 生成 → 评审 → 还要改?（是→回到生成 / 否→output） |
+| Plan-and-Execute | input → 任务规划 → 按计划执行 → 整理结果 → output |
+| ReWOO | input → 规划工具序列 → 批量执行 → 融合结果 → output |
+| 分治汇总 | input → 切分任务 → 分片 A/B → 合并 → output |
+| 主管调度 | input → 主管 → worker → 汇总 → output |
+| 群聊 | input → 群聊 → 参与者 → 收敛结论 → output |
+| 顺序接力 | input → 第一棒 → 第二棒 → 第三棒 → output |
+| 层级分派 | input → 管理者 → 执行者 → 验收 → 回到管理者 → output |
+| 并行处理 | input → 拆分支 → 分支 A/B → 合并 → output |
+| 辩论 | input → 正方/反方 → 裁判 → output |
+| 共识投票 | input → 成员 A/B → 投票定案 → output |
+| 嵌套对话 | input → 主 Agent → 子 Agent → 整合 → output |
+| 移交 | input → 前台 Agent → 该谁处理?（是→专职 Agent / 否→output） |
+| 群体交接 | input → Agent A → Agent B → Agent C → output |
+| 意图路由 | input → 意图识别（true→咨询 / false→执行） → output |
+| 双人对话 | input → Assistant ↔ 代理用户 → 收敛 → output |
+| 代码行动 | input → agent → 代码安全检查 → 代码执行 → 观察 → 回到 agent → output |
+| 标准作业流程 | input → 分析师 → 执行者 → 复核 → output |
+| 护栏校验 | input → 输入校验（不过→output） → Agent → 输出校验 → output |
+| 节点工作流 | input → 处理 1 → 处理 2 → 输出整理 → output |
+| 对话流 | input → 会话记忆 → 回答 → output |
+| 受管执行 | input → 管理 Agent → 受管 Agent → 收口 → output |
+| 显式推理 | input → 推理步骤 → 检查推理 → 整理 → output |
+| 检索增强 | input → 检索 → 基于资料回答 → 附上引用 → output |
+
+33 个模板全部通过编排约束检查（0 error / 0 warn）。
+
 三个「可运行」框架的项目都会生成 `agent.py` 原生入口；
 如果本机没装该框架，`agent.py` 会自动提示并回退到内置 `runner.py`，保证流程任何时候都能跑。
 

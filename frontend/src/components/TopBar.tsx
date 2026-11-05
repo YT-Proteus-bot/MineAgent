@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
 import { useStore } from '../store'
 import Popover from './Popover'
@@ -50,14 +50,32 @@ export default function TopBar({ onOpenUserCenter, onOpenCanvasModel }: Props) {
   const activeMode = canvas?.mode || defaultMode
   const currentMode = metaModes.find((m) => m.value === activeMode)
 
+  const [modeTpls, setModeTpls] = useState<
+    Record<string, { name: string; summary: string; node_count: number }>
+  >({})
+  useEffect(() => {
+    api
+      .modeTemplates()
+      .then(setModeTpls)
+      .catch(() => setModeTpls({}))
+  }, [])
+
   const setCanvasMode = async (mode: string) => {
     if (!canvas) return
     try {
-      await api.updateCanvas(canvas.id, { mode } as any)
-      useStore.setState({ canvas: { ...canvas, mode } })
-      toast(`画布默认模式已设为「${metaModes.find((m) => m.value === mode)?.label || mode}」，新建 agent 节点会用它`, 'ok')
+      // 按这个模式生成一套标准节点模板，而不是只改一个设置
+      const tpl = await api.modeTemplate(mode, canvas.framework)
+      await api.updateCanvas(canvas.id, {
+        mode,
+        graph: { nodes: tpl.nodes, edges: tpl.edges, viewport: tpl.viewport } as any,
+      })
+      await loadCanvas(canvas.id)
+      toast(
+        `已按「${tpl.name}」生成画布：${tpl.nodes.length} 个节点、${tpl.edges.length} 条连线（Ctrl+Z 可撤销）`,
+        'ok',
+      )
     } catch (e: any) {
-      toast(`设置失败：${e.message || e}`, 'err')
+      toast(`生成模板失败：${e.message || e}`, 'err')
     }
   }
 
@@ -234,28 +252,36 @@ export default function TopBar({ onOpenUserCenter, onOpenCanvasModel }: Props) {
         {(close) => (
           <>
             <div className="group-title">
-              {currentFw?.label || '当前框架'} 支持的模式
+              选一个模式，直接生成它的节点模板
             </div>
-            {(metaModes || []).map((m) => (
-              <div
-                key={m.value}
-                className={`menu-item${m.value === activeMode ? ' active' : ''}`}
-                onClick={() => {
-                  setCanvasMode(m.value)
-                  close()
-                }}
-              >
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ display: 'flex', gap: 6, alignItems: 'baseline' }}>
-                    <span>{m.label}</span>
-                    <span className="dim small">{m.group}</span>
-                  </div>
-                  <div className="dim small" style={{ whiteSpace: 'normal', lineHeight: 1.5 }}>
-                    {m.desc}
+            {(metaModes || []).map((m) => {
+              const tpl = modeTpls[m.value]
+              return (
+                <div
+                  key={m.value}
+                  className={`menu-item${m.value === activeMode ? ' active' : ''}`}
+                  onClick={() => {
+                    setCanvasMode(m.value)
+                    close()
+                  }}
+                >
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: 'flex', gap: 6, alignItems: 'baseline' }}>
+                      <span>{m.label}</span>
+                      <span className="dim small">{m.group}</span>
+                      {tpl ? (
+                        <span className="badge" style={{ padding: '0 4px', fontSize: 9.5 }}>
+                          {tpl.node_count} 节点
+                        </span>
+                      ) : null}
+                    </div>
+                    <div className="dim small" style={{ whiteSpace: 'normal', lineHeight: 1.5 }}>
+                      {tpl?.summary || m.desc}
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))}
+              )
+            })}
           </>
         )}
       </Popover>

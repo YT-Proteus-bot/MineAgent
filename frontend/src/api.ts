@@ -170,6 +170,21 @@ export const api = {
   deleteChat: (id: string) =>
     request<{ ok: boolean }>(`/api/assistant/chats/${id}`, { method: 'DELETE' }),
 
+  // ---- 模式模板 ----
+  modeTemplates: () =>
+    request<Record<string, { mode: string; name: string; summary: string; node_count: number }>>(
+      '/api/meta/modes',
+    ),
+  modeTemplate: (mode: string, framework: string) =>
+    request<{
+      nodes: any[]
+      edges: any[]
+      viewport: any
+      name: string
+      summary: string
+      mode: string
+    }>(`/api/meta/modes/${mode}?framework=${encodeURIComponent(framework)}`),
+
   assistantStatus: () =>
     request<{ ready: boolean; model: string; base_url: string; hint: string }>(
       '/api/assistant/status',

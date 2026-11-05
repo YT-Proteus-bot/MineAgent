@@ -234,7 +234,8 @@ def _block_llm(node: Dict[str, Any]) -> str:
             "planner": "你是一个任务规划专家。把目标拆成有序、可执行的步骤，每行一步；"
                        "输入只是寒暄、闲聊或没有可拆解目标时，原样返回输入，不要追问。",
             "observation": "把工具返回的结果压缩成 3 条以内的关键观察；没有工具结果时保留原始回答的要点。",
-            "review_observation": "判断现有观察是否足够支撑结论，指出还缺什么。",
+            "review_observation": "判断现有观察是否已经够用：够用就一句话确认；"
+                                  "只有确实缺关键信息时才列出缺口，不要展开长分析。",
             "formatter": "你是格式化工具：把输入原样输出，最多调整 Markdown 结构；"
                          "不得增删内容、不得添加解释或判断。",
             "format_observations": "把多轮观察归并成结构化上下文：只做合并与去重，不新增事实、不编造标题。",
@@ -298,7 +299,7 @@ def _block_router(node: Dict[str, Any]) -> str:
         _text(p, "expression") or _text(p, "condition") or _text(p, "rule")
         or _text(p, "question") or "该请求是否需要调用工具？"
     )
-    max_loops = int(_num(p, "max_loops", 2))
+    max_loops = int(_num(p, "max_loops", 0))
     llm_var = _llm_var(node)
     name = _q(node["name"])
     nid = _q(node["id"])
@@ -317,7 +318,7 @@ def _block_router(node: Dict[str, Any]) -> str:
         f'    if branch == "false" and rounds > max_loops:\n'
         f'        branch = "true"\n'
         f'        _emit({{"event": "log", "level": "warn", "node": {nid}, "name": {name},\n'
-        f'               "message": f"已连续循环 {{rounds - 1}} 次，强制收敛到 true 出口"}})\n'
+        f'               "message": f"已到循环上限 {{max_loops}} 次，强制收敛"}})\n'
         f'    _emit({{"event": "route", "node": {nid}, "name": {name},\n'
         f'           "branch": branch, "reason": _brief(verdict, 120)}})\n'
         f'    return {{"data": text, "route": branch, "loop_count": rounds}}\n'
@@ -767,7 +768,7 @@ def _main_section(spec: Dict[str, Any], framework: str) -> str:
         body = (
             f'    result = graph.invoke({{"data": user_input, "user_input": user_input, "route": ""}})\n'
             f'    data = result.get("data", "")\n'
-            f'    _emit({{"event": "final", "output": _brief(data)}})\n'
+            f'    _emit({{"event": "final", "output": data if isinstance(data, str) else _brief(data)}})\n'
             f'    return data\n'
         )
     elif framework == "autogen":
@@ -800,7 +801,7 @@ def _main_section(spec: Dict[str, Any], framework: str) -> str:
             "    print(\"\")\n"
             '    print("=" * 16, "最终结果", "=" * 16)\n'
             "    print(answer)\n"
-            '    _emit({"event": "run_end", "status": "ok", "output": _brief(answer)})\n'
+            '    _emit({"event": "run_end", "status": "ok", "output": answer if isinstance(answer, str) else _brief(answer)})\n'
         )
     else:
         run_main += (

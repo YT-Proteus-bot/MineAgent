@@ -7,6 +7,7 @@ from ..constraints import CUSTOM_RULE_TYPES, rule_catalog
 from ..framework_templates import FRAMEWORKS, FRAMEWORK_INDEX, build_graph
 from ..codegen.native import default_block
 from ..framework_modes import FRAMEWORK_MODES, all_modes
+from ..mode_templates import TPL, all_templates, build_mode_graph
 from ..node_docs import node_doc
 from ..node_registry import AGENT_MODES, CATEGORIES, NODE_TYPES
 
@@ -55,3 +56,17 @@ def framework_template(framework: str):
     if framework not in FRAMEWORK_INDEX:
         raise HTTPException(404, "框架不存在")
     return build_graph(framework)
+
+
+@router.get("/modes")
+def mode_templates():
+    """33 个模式各自的节点模板概要。"""
+    return all_templates()
+
+
+@router.get("/modes/{mode}")
+def mode_template(mode: str, framework: str = "langchain"):
+    """某个模式的完整画布图，前端选模式后直接套用。"""
+    if mode not in TPL:
+        raise HTTPException(404, f"没有这个模式的模板：{mode}")
+    return build_mode_graph(mode, framework)
