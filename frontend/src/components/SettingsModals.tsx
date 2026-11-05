@@ -152,10 +152,21 @@ export function CanvasModelModal({ onClose }: { onClose: () => void }) {
   const loadCanvas = useStore((s) => s.loadCanvas)
   const [form, setForm] = useState<ModelConfig | null>(canvas?.llm_config || null)
   const [key, setKey] = useState('')
+  const [fallback, setFallback] = useState<GlobalSettings | null>(null)
+
+  // 拉一次用户中心配置，好让用户看清「留空时实际会用哪一份」
+  useEffect(() => {
+    api
+      .getSettings()
+      .then(setFallback)
+      .catch(() => setFallback(null))
+  }, [])
 
   if (!canvas || !form) return null
 
   const preset = PRESETS.find((p) => p.id === form.provider) || PRESETS[0]
+  const effectiveModel = form.model || fallback?.orchestrator_model || '未配置'
+  const effectiveBase = form.base_url || fallback?.orchestrator_base_url || '未配置'
 
   const save = async () => {
     try {
@@ -251,6 +262,15 @@ export function CanvasModelModal({ onClose }: { onClose: () => void }) {
         />
       </label>
       <div className="hint-box">
+        <strong>这个画布实际生效：</strong> <code className="mono">{effectiveModel}</code> @{' '}
+        <code className="mono">{effectiveBase}</code>
+        <br />
+        {form.model || form.base_url ? (
+          <span style={{ color: 'var(--warn)' }}>↑ 用的是画布自己的配置（会覆盖用户中心）</span>
+        ) : (
+          <span style={{ color: 'var(--ok)' }}>↑ 画布没单独配，跟随「用户中心」</span>
+        )}
+        <br />
         运行时 key 通过环境变量注入子进程，不会明文写进项目文件夹。项目里也支持自己放
         <code className="mono"> .env</code> 做独立运行。
       </div>
