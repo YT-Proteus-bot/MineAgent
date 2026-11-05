@@ -25,18 +25,6 @@ const check = (name, ok, extra = '') => {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
-// 让运行时指向 mock 模型，这样不需要真 key
-await fetch(`${BASE}/api/settings`, {
-  method: 'PUT',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({
-    orchestrator_provider: 'openai',
-    orchestrator_base_url: MOCK,
-    orchestrator_model: 'mock-model',
-    orchestrator_api_key: 'mock-key',
-  }),
-})
-
 // 建一个专用画布，测完删掉，不动用户数据
 const createdCanvas = await (
   await fetch(`${BASE}/api/canvases`, {
@@ -46,6 +34,22 @@ const createdCanvas = await (
   })
 ).json()
 console.log(`  · 已创建测试画布 ${createdCanvas.name}`)
+
+// 只给这张测试画布配 mock 模型，不碰用户中心的全局 key
+await fetch(`${BASE}/api/canvases/${createdCanvas.id}`, {
+  method: 'PATCH',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    llm_config: {
+      provider: 'openai',
+      base_url: MOCK,
+      model: 'mock-model',
+      temperature: 0.3,
+      max_tokens: 2048,
+      api_key: 'mock-key',
+    },
+  }),
+})
 
 const browser = await puppeteer.launch({
   executablePath: CHROME,
