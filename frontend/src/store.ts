@@ -48,6 +48,130 @@ function takeSnapshot(state: { nodes: AgentNode[]; edges: FlowEdge[] }): CanvasS
   return { nodes: state.nodes, edges: state.edges }
 }
 
+/* ------------------------------------------------------------------ */
+/* 新增节点时的自动连线建议                                            */
+/* ------------------------------------------------------------------ */
+const AGENT_KINDS = new Set([
+  'agent', 'worker', 'supervisor', 'autogen_assistant', 'autogen_tool_agent',
+  'autogen_group_chat', 'crewai_agent', 'crewai_crew', 'group_chat', 'debate',
+])
+const TOOL_KINDS = new Set([
+  'tool', 'function', 'mcp_tool', 'crewai_tool', 'http_request', 'web_search',
+  'code_interpreter', 'sql_query', 'rag_retriever', 'file_io', 'browser', 'shell',
+])
+
+const NEW_NODE = '__new__'
+
+export function buildEdge(source: string, target: string, sourceHandle?: string | null): FlowEdge {
+  const handle = sourceHandle || 'out'
+  return {
+    id: `e_${source}_${handle}_${target}_${Date.now().toString(36)}_${Math.random()
+      .toString(36)
+      .slice(2, 5)}`,
+    source,
+    target,
+    sourceHandle: handle,
+    targetHandle: 'in',
+    type: 'agent',
+    label: handle !== 'out' ? handle : undefined,
+    data: { branch: handle !== 'out' ? handle : undefined },
+  } as FlowEdge
+}
+
+/**
+ * 给新节点挑连线：
+ * - 新加 output → 接到当前末端节点
+ * - 有选中节点 → 从它连出，并把原来的下一跳串到新节点后面（插入）
+ * - 没选中 → 连到最近的可接上游（工具类节点优先挂到 agent 下游）
+ * - 找不到合法上游、或新节点是 input 时不连，保持孤立
+ * 所有选择都遵守约束：output 不能有出边、input 不能有入边、不重复连。
+ */
+export function suggestLinks(args: {
+  kind: string
+  position: { x: number; y: number }
+  nodes: AgentNode[]
+  edges: FlowEdge[]
+  selectedId: string | null
+  outputs: string
+}): { links: { source: string; target: string; handle: string }[]; remove: FlowEdge[]; note: string } {
+  const { kind, position, nodes, edges, selectedId, outputs } = args
+  const links: { source: string; target: string; handle: string }[] = []
+  const remove: FlowEdge[] = []
+  let note = ''
+  if (!nodes.length) return { links, remove, note }
+
+  const meta = useStore.getState().meta
+  const kindOf = (id: string) => nodes.find((n) => n.id === id)?.data.kind || ''
+  const labelOf = (id: string) => nodes.find((n) => n.id === id)?.data.label || '节点'
+  const centerOf = (n: AgentNode) => ({
+    x: n.position.x + (Number(n.width) || 216) / 2,
+    y: n.position.y + (Number(n.height) || 90) / 2,
+  })
+  const distTo = (n: AgentNode) =>
+    Math.hypot(centerOf(n).x - position.x, centerOf(n).y - position.y)
+  const outEdges = (id: string) => edges.filter((e) => e.source === id)
+  const outPortsOf = (id: string): string[] => {
+    const def = meta?.nodes.find((n) => n.kind === kindOf(id))
+    return def?.outputs?.length ? def.outputs : ['out']
+  }
+  // 多端口节点优先接还没用过的出口
+  const pickHandle = (id: string): string => {
+    const ports = outPortsOf(id)
+    const used = new Set(outEdges(id).map((e) => e.sourceHandle || 'out'))
+    return ports.find((p) => !used.has(p)) || ports[0] || 'out'
+  }
+
+  if (kind === 'output') {
+    const terminals = nodes
+      .filter((n) => n.data.kind !== 'output' && outEdges(n.id).length === 0)
+      .sort((a, b) => distTo(a) - distTo(b))
+    if (terminals.length) {
+      links.push({ source: terminals[0].id, target: NEW_NODE, handle: 'out' })
+      note = `已自动接到末端「${terminals[0].data.label}」`
+    }
+    return { links, remove, note }
+  }
+
+  if (kind === 'input') {
+    // 输入节点是起点，不自动接上游
+    return { links, remove, note }
+  }
+
+  let sourceId: string | null = null
+  let insertMode = false
+
+  const sel = selectedId ? nodes.find((n) => n.id === selectedId) : null
+  if (sel && sel.data.kind !== 'output') {
+    sourceId = sel.id
+    insertMode = true
+  } else {
+    const pool = nodes.filter((n) => n.data.kind !== 'output')
+    const preferAgent = TOOL_KINDS.has(kind) && pool.some((n) => AGENT_KINDS.has(n.data.kind))
+    const narrowed = preferAgent ? pool.filter((n) => AGENT_KINDS.has(n.data.kind)) : pool
+    const nearest = [...narrowed].sort((a, b) => distTo(a) - distTo(b))[0]
+    if (nearest && distTo(nearest) < 720) sourceId = nearest.id
+  }
+
+  if (!sourceId) return { links, remove, note }
+
+  const handle = pickHandle(sourceId)
+  links.push({ source: sourceId, target: NEW_NODE, handle })
+  note = `已自动从「${labelOf(sourceId)}」连过来`
+
+  // 选中后新增：把原来那条边拆开，新节点插中间
+  if (insertMode) {
+    const outs = outEdges(sourceId)
+    if (outs.length === 1) {
+      const nextId = outs[0].target
+      remove.push(outs[0])
+      links.push({ source: NEW_NODE, target: nextId, handle: outputs })
+      note = `已插入到「${labelOf(sourceId)}」与「${labelOf(nextId)}」之间`
+    }
+  }
+
+  return { links, remove, note }
+}
+
 interface AppState {
   meta: Meta | null
   canvases: CanvasSummary[]
@@ -572,7 +696,9 @@ export const useStore = create<AppState>((set, get) => ({
     const meta = get().meta
     const def: NodeTypeDef | undefined = meta?.nodes.find((n) => n.kind === kind)
     if (!def) return
-    const existing = get().nodes.filter((n) => n.data.kind === kind).length + 1
+    const nodes = get().nodes
+    const edges = get().edges
+    const existing = nodes.filter((n) => n.data.kind === kind).length + 1
     const params: Record<string, any> = {}
     def.params.forEach((p) => {
       params[p.key] = p.default
@@ -593,7 +719,32 @@ export const useStore = create<AppState>((set, get) => ({
         status: 'idle',
       },
     }
-    set({ nodes: [...get().nodes, node], dirty: true, selectedNodeId: id })
+
+    const auto = suggestLinks({
+      kind,
+      position,
+      nodes,
+      edges,
+      selectedId: get().selectedNodeId,
+      outputs: (def.outputs && def.outputs.length ? def.outputs : ['out'])[0],
+    })
+    const newEdges: FlowEdge[] = auto.links.map((l) =>
+      buildEdge(
+        l.source === NEW_NODE ? id : l.source,
+        l.target === NEW_NODE ? id : l.target,
+        l.handle,
+      ),
+    )
+    const removed = new Set(auto.remove.map((e) => e.id))
+    const keptEdges = edges.filter((e) => !removed.has(e.id))
+
+    set({
+      nodes: [...nodes, node],
+      edges: [...keptEdges, ...newEdges],
+      dirty: true,
+      selectedNodeId: id,
+    })
+    if (auto.note) get().toast(auto.note, 'info')
   },
 
   updateNode: (id, patch) => {

@@ -130,7 +130,8 @@ export default function FlowCanvas() {
       edges.map((e) => {
         const src = nodePos.get(e.source)
         const dst = nodePos.get(e.target)
-        const isBackEdge = !!(src && dst && dst.x < src.x - 40)
+        // 只有明显往回走（跨过一个节点宽度）才算回边，垂直/S 形连线不算
+        const isBackEdge = !!(src && dst && dst.x < src.x - 240)
         return {
           ...e,
           type: 'agent',
