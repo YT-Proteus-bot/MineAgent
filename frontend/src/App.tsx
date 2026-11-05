@@ -3,6 +3,7 @@ import { ReactFlowProvider } from '@xyflow/react'
 import { useStore } from './store'
 import TopBar from './components/TopBar'
 import FlowCanvas from './components/FlowCanvas'
+import AgentChatPanel from './components/AgentChatPanel'
 import NodeInspector from './components/NodeInspector'
 import RunPanel from './components/RunPanel'
 import { CanvasModelModal, UserCenterModal } from './components/SettingsModals'
@@ -14,6 +15,8 @@ export default function App() {
   const dismissToast = useStore((s) => s.dismissToast)
   const save = useStore((s) => s.save)
   const dirty = useStore((s) => s.dirty)
+  const rightTab = useStore((s) => s.rightTab)
+  const setRightTab = useStore((s) => s.setRightTab)
 
   const [userCenterOpen, setUserCenterOpen] = useState(false)
   const [canvasModelOpen, setCanvasModelOpen] = useState(false)
@@ -65,7 +68,25 @@ export default function App() {
         <ReactFlowProvider>
           <FlowCanvas />
         </ReactFlowProvider>
-        <NodeInspector />
+        <aside className="right-pane">
+          <div className="pane-tabs">
+            <div
+              className={`pane-tab${rightTab === 'assistant' ? ' active' : ''}`}
+              onClick={() => setRightTab('assistant')}
+            >
+              ✦ AI 助手
+            </div>
+            <div
+              className={`pane-tab${rightTab === 'node' ? ' active' : ''}`}
+              onClick={() => setRightTab('node')}
+            >
+              节点详情
+            </div>
+          </div>
+          <div className="pane-content">
+            {rightTab === 'assistant' ? <AgentChatPanel /> : <NodeInspector />}
+          </div>
+        </aside>
       </div>
       <RunPanel />
 

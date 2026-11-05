@@ -36,6 +36,7 @@ interface AppState {
   edges: FlowEdge[]
   selectedNodeId: string | null
   inspectorTab: 'props' | 'code'
+  rightTab: 'assistant' | 'node'
   dirty: boolean
   saving: boolean
   lastSaved: string
@@ -72,6 +73,8 @@ interface AppState {
   connectNodes: (source: string, target: string, sourceHandle?: string | null) => void
   setSelected: (id: string | null) => void
   setInspectorTab: (tab: 'props' | 'code') => void
+  setRightTab: (tab: 'assistant' | 'node') => void
+  openNodePanel: (id: string, tab?: 'props' | 'code') => void
   addNode: (kind: string, position: { x: number; y: number }) => void
   updateNode: (id: string, patch: Partial<FlowNodeData>) => void
   updateNodeOrg: (nodeId: string, patch: Partial<AgentOrg>) => void
@@ -199,6 +202,7 @@ export const useStore = create<AppState>((set, get) => ({
   edges: [],
   selectedNodeId: null,
   inspectorTab: 'props',
+  rightTab: 'assistant',
   dirty: false,
   saving: false,
   lastSaved: '',
@@ -452,6 +456,9 @@ export const useStore = create<AppState>((set, get) => ({
 
   setSelected: (id) => set({ selectedNodeId: id }),
   setInspectorTab: (tab) => set({ inspectorTab: tab }),
+  setRightTab: (tab) => set({ rightTab: tab }),
+  openNodePanel: (id, tab = 'props') =>
+    set({ selectedNodeId: id, rightTab: 'node', inspectorTab: tab }),
 
   connectNodes: (source, target, sourceHandle) => {
     if (source === target) {

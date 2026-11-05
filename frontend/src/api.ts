@@ -142,6 +142,78 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+
+  assistantStatus: () =>
+    request<{ ready: boolean; model: string; base_url: string; hint: string }>(
+      '/api/assistant/status',
+    ),
+}
+
+export interface ChatMsg {
+  role: 'user' | 'assistant'
+  content: string
+}
+
+/** 内置助手：流式对话，token 逐个回调。 */
+export async function assistantChat(
+  messages: ChatMsg[],
+  context: Record<string, any>,
+  onToken: (text: string) => void,
+  onError: (message: string) => void,
+  onDone: () => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  let resp: Response
+  try {
+    resp = await fetch('/api/assistant/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json; charset=utf-8' },
+      body: JSON.stringify({ messages, context }),
+      signal,
+    })
+  } catch (err: any) {
+    if (err?.name !== 'AbortError') onError(String(err?.message || err))
+    return
+  }
+  if (!resp.ok || !resp.body) {
+    let detail = `助手接口返回 ${resp.status}`
+    try {
+      const body = await resp.json()
+      detail = typeof body.detail === 'string' ? body.detail : detail
+    } catch {
+      /* ignore */
+    }
+    onError(detail)
+    return
+  }
+  const reader = resp.body.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let buffer = ''
+  while (true) {
+    let chunk: ReadableStreamReadResult<Uint8Array>
+    try {
+      chunk = await reader.read()
+    } catch (err: any) {
+      if (err?.name !== 'AbortError') onError(String(err?.message || err))
+      break
+    }
+    if (chunk.done) break
+    buffer += decoder.decode(chunk.value, { stream: true })
+    const parts = buffer.split('\n\n')
+    buffer = parts.pop() || ''
+    for (const part of parts) {
+      const line = part.split('\n').find((l) => l.startsWith('data:'))
+      if (!line) continue
+      try {
+        const evt = JSON.parse(line.slice(5).trim())
+        if (evt.event === 'token') onToken(evt.text)
+        else if (evt.event === 'error') onError(evt.message)
+        else if (evt.event === 'done') onDone()
+      } catch {
+        /* 忽略半行 */
+      }
+    }
+  }
 }
 
 export interface RunHandle {

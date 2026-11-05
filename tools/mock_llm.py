@@ -53,6 +53,28 @@ class Handler(BaseHTTPRequestHandler):
             data = {}
         messages = data.get("messages") or []
         content = reply_for(messages)
+
+        # 支持 SSE 流式，方便测内置助手和流式节点
+        if data.get("stream"):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            try:
+                for i in range(0, len(content), 12):
+                    chunk = {"id": "chatcmpl-mock", "object": "chat.completion.chunk",
+                             "choices": [{"index": 0, "delta": {"content": content[i:i + 12]},
+                                          "finish_reason": None}]}
+                    self.wfile.write(
+                        ("data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n").encode("utf-8"))
+                    self.wfile.flush()
+                    time.sleep(0.02)
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
+
         self._send({
             "id": "chatcmpl-mock",
             "object": "chat.completion",

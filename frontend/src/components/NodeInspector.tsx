@@ -164,7 +164,7 @@ export default function NodeInspector() {
 
   if (!node) {
     return (
-      <aside className="inspector">
+      <div className="inspector">
         <div className="inspector-head">
           <span className="dim">未选中节点</span>
         </div>
@@ -188,7 +188,7 @@ export default function NodeInspector() {
             框架：{canvas?.framework}
           </div>
         </div>
-      </aside>
+      </div>
     )
   }
 
@@ -204,7 +204,7 @@ export default function NodeInspector() {
   const nodeModel = (data.model || {}) as Record<string, any>
 
   return (
-    <aside className="inspector">
+    <div className="inspector">
       <div className="inspector-head">
         <div
           className="node-icon"
@@ -418,6 +418,6 @@ export default function NodeInspector() {
       </div>
 
       {showModel && <NodeModelModal nodeId={node.id} onClose={() => setShowModel(false)} />}
-    </aside>
+    </div>
   )
 }

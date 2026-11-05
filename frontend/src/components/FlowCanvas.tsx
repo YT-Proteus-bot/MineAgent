@@ -50,6 +50,7 @@ export default function FlowCanvas() {
   const onEdgesChange = useStore((s) => s.onEdgesChange)
   const onConnect = useStore((s) => s.onConnect)
   const setSelected = useStore((s) => s.setSelected)
+  const openNodePanel = useStore((s) => s.openNodePanel)
   const addNode = useStore((s) => s.addNode)
   const removeNode = useStore((s) => s.removeNode)
   const duplicateNode = useStore((s) => s.duplicateNode)
@@ -151,10 +152,11 @@ export default function FlowCanvas() {
   const handleNodeContextMenu: NodeMouseHandler = useCallback(
     (event, node) => {
       event.preventDefault()
-      setSelected(node.id)
+      // 右键才打开右列「节点详情」
+      openNodePanel(node.id, 'props')
       setMenu({ kind: 'node', x: event.clientX, y: event.clientY, nodeId: node.id })
     },
-    [setSelected],
+    [openNodePanel],
   )
 
   const frameworkLabel =
@@ -194,7 +196,10 @@ export default function FlowCanvas() {
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
-        onNodeClick={(_, node) => setSelected(node.id)}
+        onNodeClick={(_, node) => {
+          // 单击不打开详情：节点信息看 hover 浮层，右键 / 双击才进详情面板
+          setSelected(node.id)
+        }}
         onPaneClick={() => {
           setSelected(null)
           setMenu(null)
@@ -292,8 +297,7 @@ export default function FlowCanvas() {
           <div
             className="ctx-item"
             onClick={() => {
-              setInspectorTab('code')
-              setSelected(menu.nodeId)
+              openNodePanel(menu.nodeId, 'code')
               setMenu(null)
             }}
           >
@@ -302,8 +306,7 @@ export default function FlowCanvas() {
           <div
             className="ctx-item"
             onClick={() => {
-              setInspectorTab('props')
-              setSelected(menu.nodeId)
+              openNodePanel(menu.nodeId, 'props')
               setMenu(null)
             }}
           >

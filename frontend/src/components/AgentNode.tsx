@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { Handle, NodeResizer, Position, type NodeProps } from '@xyflow/react'
 import { useStore } from '../store'
 import { isAgentKind, type AgentNode as AgentNodeType, type AgentOrg } from '../types'
@@ -23,7 +24,7 @@ const MODE_LABEL: Record<string, string> = {
   simple: 'Simple',
 }
 
-export default function AgentNode({ id, data, selected }: NodeProps<AgentNodeType>) {
+export default function AgentNode({ id, data, selected, dragging }: NodeProps<AgentNodeType>) {
   const meta = useStore((s) => s.meta)
   const setSelected = useStore((s) => s.setSelected)
   const setInspectorTab = useStore((s) => s.setInspectorTab)
@@ -47,16 +48,21 @@ export default function AgentNode({ id, data, selected }: NodeProps<AgentNodeTyp
     const n = s.nodes.find((x) => x.id === id)
     return !!n && (Number(n.width) > 0 || Number(n.height) > 0)
   })
+  const openNodePanel = useStore((s) => s.openNodePanel)
+  const [hovered, setHovered] = useState(false)
+
+  const paramEntries = Object.entries(data.params || {})
+    .filter(([, v]) => v !== '' && v !== null && v !== undefined && !(Array.isArray(v) && !v.length))
+    .slice(0, 3)
 
   return (
     <div
       className={`agent-node${selected ? ' selected' : ''} status-${status}${
         violated ? ' violated' : ''
       }${resized ? ' resized' : ''}`}
-      onDoubleClick={() => {
-        setSelected(id)
-        setInspectorTab('code')
-      }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onDoubleClick={() => openNodePanel(id, 'code')}
     >
       <NodeResizer
         minWidth={190}
@@ -134,6 +140,53 @@ export default function AgentNode({ id, data, selected }: NodeProps<AgentNodeTyp
           }}
         />
       ))}
+
+      {hovered && !dragging && (
+        <div className="node-tip">
+          <div className="tip-title">{data.label}</div>
+          <div className="tip-name">{data.name}</div>
+          {data.description && <div className="tip-desc">{data.description}</div>}
+          <div className="tip-row">
+            <span className="tip-key">类型</span>
+            <span className="tip-val">{def?.label || data.kind}（{data.kind}）</span>
+          </div>
+          {isAgent && (
+            <div className="tip-row">
+              <span className="tip-key">模式</span>
+              <span className="tip-val">
+                {MODE_LABEL[mode] || mode}
+                {nodeModel.model ? ` · ${nodeModel.model}` : ''}
+                {nodeModel.has_key ? ' · 独立 Key' : ''}
+              </span>
+            </div>
+          )}
+          {isAgent && (org.superior || org.subordinates.length > 0 || org.peers.length > 0) && (
+            <div className="tip-row">
+              <span className="tip-key">组织</span>
+              <span className="tip-val">
+                {org.superior ? '有上级' : '顶层'}
+                {org.subordinates.length > 0 ? ` · 下级 ${org.subordinates.length}` : ''}
+                {org.peers.length > 0 ? ` · 平级 ${org.peers.length}` : ''}
+              </span>
+            </div>
+          )}
+          {paramEntries.length > 0 && (
+            <div className="tip-row">
+              <span className="tip-key">参数</span>
+              <span className="tip-val">
+                {paramEntries
+                  .map(([k, v]) => `${k}=${String(v).slice(0, 24)}`)
+                  .join('，')}
+              </span>
+            </div>
+          )}
+          <div className="tip-row">
+            <span className="tip-key">出口</span>
+            <span className="tip-val">{outputs.map((o) => BRANCH_LABEL[o] || o).join(' / ')}</span>
+          </div>
+          <div className="tip-hint">双击打开代码 · 右键查看与编辑</div>
+        </div>
+      )}
     </div>
   )
 }
