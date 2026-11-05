@@ -46,7 +46,32 @@ function ParamField({
       ? 'boolean'
       : typeof def.default === 'number'
         ? 'number'
-        : 'string'
+        : def.default !== null && typeof def.default === 'object'
+          ? 'json'
+          : 'string'
+
+  if (kind === 'json') {
+    const current =
+      typeof value === 'string' ? value : JSON.stringify(value ?? def.default ?? {}, null, 2)
+    return (
+      <label className="field">
+        <span>{def.label}</span>
+        <textarea
+          key={current}
+          rows={4}
+          className="mono"
+          defaultValue={current}
+          onBlur={(e) => {
+            try {
+              onChange(JSON.parse(e.target.value))
+            } catch {
+              onChange(e.target.value)
+            }
+          }}
+        />
+      </label>
+    )
+  }
 
   if (kind === 'boolean') {
     return (

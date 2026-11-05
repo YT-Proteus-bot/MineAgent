@@ -54,7 +54,7 @@
 
 ![运行面板](docs/screenshots/05-run.png)
 
-右键空白画布可以搜出 67 种节点，从 `observation` 这类经典循环节点到 MCP、向量库、护栏、人工审批：
+右键空白画布可以搜出 110 种节点，从 `observation` 这类经典循环节点，到意图识别、查询改写、混合检索、重排、上下文拼装，再到 MCP、护栏、人工审批：
 
 ![节点面板](docs/screenshots/04-node-picker.png)
 
@@ -67,7 +67,7 @@
 | 右上角下拉 | 选择 Agent 框架（LangChain/LangGraph、AutoGen、CrewAI…），切换后重建架构图 |
 | 右上角「模型」 | 配置**这个画布**用的大模型与 API Key |
 | 右上角「用户中心」 | 配置**整个项目**的全局 API Key（画布没单独配置时回退到这里） |
-| 右键空白画布 | 弹出节点面板，67 种工业级节点任选（带搜索） |
+| 右键空白画布 | 弹出节点面板，110 种细粒度节点任选（带搜索） |
 | 右键任意节点 | 编辑代码逻辑 / 编辑属性参数 / 重命名标识 / 复制 / 删除 |
 | 拖动节点右侧圆点 | 连到下个节点，编排顺序与循环 |
 | 拖动节点本身 | 调整位置（吸附 16px 网格） |
@@ -177,7 +177,7 @@ MineAgent/
 │  │  ├─ config.py              # 路径与端口
 │  │  ├─ db.py                  # SQLite（canvases / app_settings / runs）
 │  │  ├─ security.py            # key 加密（HMAC 密钥流 + 校验标签）
-│  │  ├─ node_registry.py       # 67 种节点类型注册表
+│  │  ├─ node_registry.py       # 110 种节点类型注册表
 │  │  ├─ node_templates.py      # 每种节点的默认代码模板
 │  │  ├─ framework_templates.py # 10 个框架 + 各自的架构图模板 + 自动布局
 │  │  ├─ codegen/generators.py  # 画布 → 独立 Agent 项目的代码生成
@@ -250,22 +250,46 @@ python runner.py --input "..."      # 不依赖框架的执行器
 
 ---
 
-## 节点清单（67 种）
+## 节点清单（110 种，13 类）
+
+![节点库](docs/screenshots/09-node-library.png)
+
+**RAG 全链路都是独立节点**，不是藏在某个"检索"黑盒里：
+
+```text
+索引侧：doc_loader → text_splitter → chunk_refiner → vector_indexer
+查询侧：intent_recognizer → query_rewrite → query_expand → query_router
+检索侧：hybrid_retriever（向量 + 关键词）→ reranker → context_builder → citation_formatter
+质检侧：doc_grader → rag_evaluator
+```
+
+对应的 SDK 能力：`ctx.retrieve(mode="hybrid|vector|keyword")`、`ctx.vector_upsert/search`、
+`ctx.rerank(query, docs, top_k)`、`ctx.build_context(docs, max_chars)`、`ctx.split_text()`、
+`ctx.load_document()`（pdf/docx/md/csv）。
+
+文档与多模态节点（`pdf_parser` / `ocr_extract` / `speech_to_text` / `image_analyzer`）依赖可选库，
+没装时节点会返回一条可直接照做的安装提示，而不是把整个流程跑崩。
 
 | 分类 | 节点 |
 | --- | --- |
 | 输入输出 | `input` 输入、`output` 输出 |
 | 推理与决策 | `llm` LLM 推理、`agent` Agent 主体、`prompt` 提示词模板、`system_prompt` 系统提示词、`planner` 任务规划、`decomposer` 任务分解、`router` 条件路由、`reflector` 反思、`critic` 评审、`self_check` 自检、`evaluator` 质量评估 |
+| RAG 与检索 | `intent_recognizer` 意图识别、`slot_filler` 槽位抽取、`query_rewrite` 查询改写、`query_expand` 查询扩展、`query_router` 查询路由、`doc_loader` 文档加载、`text_splitter` 文本切分、`chunk_refiner` 分块精炼、`vector_indexer` 向量入库、`hybrid_retriever` 混合检索、`bm25_search` 关键词检索、`reranker` 重排、`context_builder` 上下文拼装、`citation_formatter` 引用标注、`doc_grader` 相关性打分、`rag_evaluator` RAG 质量评估 |
+| 数据与存储 | `db_write` 数据写入、`kv_store` 键值存储、`cache_lookup` 缓存查询、`cache_write` 缓存写入、`graph_query` 图关系查询 |
+| 文档与多模态 | `pdf_parser` PDF 解析、`table_parser` 表格解析、`ocr_extract` OCR 文字识别、`image_analyzer` 图像理解、`speech_to_text` 语音转写 |
+| 文本加工 | `translator` 翻译、`classifier` 分类器、`extractor` 实体抽取、`sentiment` 情感分析、`fact_checker` 事实核查、`deduplicator` 去重、`merger` 多路合并、`outline_builder` 大纲生成、`section_writer` 分段写作、`polisher` 润色、`title_generator` 标题生成 |
 | 工具与能力 | `tool` 工具、`function` 自定义函数、`http_request` HTTP 请求、`web_search` 联网搜索、`code_interpreter` 代码解释器、`shell` 命令执行、`file_io` 文件读写、`sql_query` SQL 查询、`rag_retriever` 知识库检索、`embedding` 向量化、`vector_store` 向量库、`mcp_tool` MCP 工具、`browser` 网页抓取、`skill` 技能 |
 | 记忆与状态 | `memory` 记忆、`state_store` 状态存取、`blackboard` 黑板、`history` 会话历史 |
-| 流程控制 | `condition` 条件判断、`loop` 循环控制、`join` 分支汇聚、`delay` 延时、`subgraph` 子图调用、`human_approval` 人工审批、`guardrail` 护栏 |
+| 流程控制 | `condition` 条件判断、`loop` 循环控制、`join` 分支汇聚、`delay` 延时、`subgraph` 子图调用、`human_approval` 人工审批、`guardrail` 护栏、`rate_limiter` 限流、`circuit_breaker` 熔断、`budget_guard` 预算控制、`cost_tracker` 成本统计 |
 | 观察与反馈 | `observation` 观察、`review_observation` 观察复核、`format_observations` 观察格式化、`error_handler` 错误处理、`retry` 重试、`fallback` 兜底 |
 | 多智能体协作 | `supervisor` 主管、`worker` 工作者、`group_chat` 群聊、`handoff` 转交、`debate` 辩论、`message_bus` 消息总线 |
-| 后处理与交付 | `formatter` 格式化、`parser` 结构化解析、`summarizer` 摘要、`validator` 结构校验、`artifact_writer` 产物写出、`notification` 通知推送 |
+| 后处理与交付 | `formatter` 格式化、`parser` 结构化解析、`summarizer` 摘要、`validator` 结构校验、`artifact_writer` 产物写出、`notification` 通知推送、`json_repair` JSON 修复、`markdown_render` Markdown 渲染 |
 | 框架专有 | `langgraph_state` / `langgraph_node` / `langgraph_edge`、`autogen_assistant` / `autogen_user_proxy` / `autogen_group_chat` / `autogen_tool_agent`、`crewai_agent` / `crewai_task` / `crewai_crew` / `crewai_tool` |
 
+每个节点在画布上都是独立可编辑的方块，点开就能改它的代码——没有藏在框架内部的"黑盒步骤"。
+
 新增节点类型只需要在 `backend/app/node_registry.py` 的 `_DEFS` 里加一行，
-并在 `node_templates.py` 里写默认代码，前端菜单会自动出现。
+并在 `node_templates.py`（或 `node_templates_ext.py`）里写默认代码，前端菜单会自动出现。
 
 ---
 
@@ -349,6 +373,9 @@ ctx.log() / ctx.emit() / ctx.route()
 
 # Agent 模式 / 多 agent 委派 / 节点级模型
 .\.venv\Scripts\python.exe tools\feature_test.py
+
+# 节点库与细粒度能力（110 节点、检索链路、新 SDK 能力）
+.\.venv\Scripts\python.exe tools\granularity_test.py
 
 # 浏览器端交互（右键菜单、代码编辑、保存、运行）
 cd frontend

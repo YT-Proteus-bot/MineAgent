@@ -362,8 +362,12 @@ class NodeContext:
         if sys_prompt:
             messages.append({"role": "system", "content": sys_prompt})
         messages.append({"role": "user", "content": str(prompt)})
-        return chat_completion(messages, self.cfg, model=model, temperature=temperature,
-                               max_tokens=max_tokens)
+        result = chat_completion(messages, self.cfg, model=model, temperature=temperature,
+                                 max_tokens=max_tokens)
+        # 粗略估算 token 用量，供 budget_guard / cost_tracker 使用
+        self.state["tokens_used"] = int(self.state.get("tokens_used", 0)) + (
+            len(str(prompt)) + len(result)) // 4
+        return result
 
     def llm_stream(self, prompt: str, system: Optional[str] = None, model: Optional[str] = None) -> str:
         messages: List[Dict[str, str]] = []
@@ -642,9 +646,16 @@ class NodeContext:
     def embed(self, text: str) -> List[float]:
         return local_embed(text)
 
-    def retrieve(self, query: str, top_k: int = 4, folders: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    def retrieve(self, query: str, top_k: int = 4, folders: Optional[List[str]] = None,
+                 mode: str = "hybrid") -> List[Dict[str, Any]]:
+        """从项目内的 skills/ docs/ outputs/ 召回片段。
+
+        mode: hybrid（向量+关键词加权） / vector / keyword
+        """
         folders = folders or ["skills", "docs", "outputs"]
+        mode = (mode or "hybrid").lower()
         qv = local_embed(query)
+        q_tokens = set(re.findall(r"[\w\u4e00-\u9fff]+", (query or "").lower()))
         scored: List[Dict[str, Any]] = []
         for folder in folders:
             base = PROJECT_DIR / folder
@@ -658,14 +669,299 @@ class NodeContext:
                 except Exception:
                     continue
                 for i, chunk in enumerate(_chunk(content, 600)):
+                    vscore = cosine(qv, local_embed(chunk))
+                    if mode == "vector":
+                        score = vscore
+                    else:
+                        toks = set(re.findall(r"[\w\u4e00-\u9fff]+", chunk.lower()))
+                        kscore = len(q_tokens & toks) / (len(q_tokens) or 1)
+                        score = kscore if mode == "keyword" else 0.65 * vscore + 0.35 * kscore
                     scored.append({
                         "source": str(path.relative_to(PROJECT_DIR)).replace("\\", "/"),
                         "chunk": chunk,
-                        "score": round(cosine(qv, local_embed(chunk)), 4),
+                        "score": round(float(score), 4),
                         "index": i,
                     })
         scored.sort(key=lambda x: x["score"], reverse=True)
         return scored[:top_k]
+
+    def rerank(self, query: str, docs: List[Any], top_k: int = 3) -> List[Dict[str, Any]]:
+        """让模型给候选片段打相关性分并重排；模型不可用时回退到向量相似度。"""
+        items: List[Dict[str, Any]] = []
+        for i, doc in enumerate(docs or []):
+            if isinstance(doc, str):
+                text = doc
+            elif isinstance(doc, dict):
+                text = str(doc.get("chunk") or doc.get("text") or doc.get("content") or doc)
+            else:
+                text = str(doc)
+            items.append({"id": i, "text": text})
+        if not items:
+            return []
+        trimmed = items[:12]
+        prompt = (
+            f"问题：{query}\n\n"
+            + "\n".join(f"[{it['id']}] {it['text'][:600]}" for it in trimmed)
+            + "\n\n给每个片段与问题的相关性打 0-1 分。"
+        )
+        data = self.json_prompt(
+            prompt, schema={"scores": [{"id": 0, "score": 0.0}]}, context="")
+        scores: Dict[int, float] = {}
+        if isinstance(data, dict) and isinstance(data.get("scores"), list):
+            for row in data["scores"]:
+                try:
+                    scores[int(row.get("id"))] = float(row.get("score"))
+                except (TypeError, ValueError):
+                    continue
+        if not scores:
+            qv = local_embed(query)
+            for it in trimmed:
+                scores[it["id"]] = cosine(qv, local_embed(it["text"]))
+        ranked = [{**it, "score": round(scores.get(it["id"], 0.0), 4)} for it in trimmed]
+        ranked.sort(key=lambda x: x["score"], reverse=True)
+        self.emit("rerank", {"in": len(items), "out": min(top_k, len(ranked))})
+        return ranked[:top_k]
+
+    def build_context(self, docs: List[Any], max_chars: int = 3000) -> str:
+        """把检索结果拼成带编号的参考上下文。"""
+        lines: List[str] = []
+        used = 0
+        for i, doc in enumerate(docs or [], 1):
+            if isinstance(doc, dict):
+                text = str(doc.get("chunk") or doc.get("text") or doc.get("content") or "")
+                src = doc.get("source") or doc.get("path") or ""
+            else:
+                text, src = str(doc), ""
+            text = text.strip()
+            if not text:
+                continue
+            block = f"[{i}] {text}" + (f"\\n（来源：{src}）" if src else "")
+            if used + len(block) > max_chars:
+                remain = max_chars - used
+                if remain > 80:
+                    lines.append(block[:remain] + "…")
+                break
+            lines.append(block)
+            used += len(block)
+        return "\n\n".join(lines)
+
+    def split_text(self, text: str, chunk_size: int = 600, overlap: int = 80) -> List[str]:
+        """按段落切块，超长段落再按句子切，块间保留重叠。"""
+        text = (text or "").strip()
+        if not text:
+            return []
+        size = max(80, int(chunk_size))
+        ov = max(0, min(int(overlap), size // 2))
+        paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+        if not paragraphs:
+            paragraphs = [text]
+        chunks: List[str] = []
+        buf = ""
+        for para in paragraphs:
+            while len(para) > size:
+                if buf:
+                    chunks.append(buf)
+                    buf = ""
+                cut = para[:size]
+                chunks.append(cut)
+                para = para[size - ov:]
+            if len(buf) + len(para) + 2 <= size:
+                buf = f"{buf}\n\n{para}" if buf else para
+            else:
+                if buf:
+                    chunks.append(buf)
+                buf = para
+        if buf:
+            chunks.append(buf)
+        return chunks
+
+    def load_document(self, path: str) -> str:
+        """读取 pdf / docx / md / txt / csv / json 的纯文本。"""
+        target = self._resolve_project_path(path)
+        if not target.exists():
+            raise FileNotFoundError(f"文件不存在：{path}")
+        suffix = target.suffix.lower()
+        if suffix in {".txt", ".md", ".markdown", ".csv", ".json", ".log", ".py", ".html", ".htm"}:
+            return target.read_text(encoding="utf-8", errors="replace")
+        if suffix == ".pdf":
+            try:
+                from pypdf import PdfReader  # type: ignore
+            except Exception:
+                return ("[缺少依赖] 解析 PDF 需要 pypdf：请执行 pip install pypdf，"
+                        "或先把 PDF 转成 txt 放到 docs/ 下")
+            reader = PdfReader(str(target))
+            return "\n\n".join((page.extract_text() or "") for page in reader.pages)
+        if suffix == ".docx":
+            try:
+                import docx  # type: ignore
+            except Exception:
+                return ("[缺少依赖] 解析 docx 需要 python-docx：请执行 pip install python-docx")
+            doc = docx.Document(str(target))
+            return "\n".join(p.text for p in doc.paragraphs)
+        return target.read_text(encoding="utf-8", errors="replace")
+
+    def _resolve_project_path(self, path: str) -> Path:
+        p = Path(path)
+        target = (p if p.is_absolute() else PROJECT_DIR / p).resolve()
+        if PROJECT_DIR not in target.parents and target != PROJECT_DIR:
+            raise PermissionError("只能访问项目目录内的文件")
+        return target
+
+    def parse_table(self, text: str) -> List[Dict[str, Any]]:
+        """把 CSV 或 Markdown 表格解析成行字典。"""
+        rows: List[Dict[str, Any]] = []
+        lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+        if not lines:
+            return rows
+        if "|" in lines[0]:
+            def cells(line: str) -> List[str]:
+                return [c.strip() for c in line.strip().strip("|").split("|")]
+            header = cells(lines[0])
+            for line in lines[1:]:
+                if set(line.replace("|", "").replace("-", "").replace(":", "").strip()) == set():
+                    continue
+                vals = cells(line)
+                rows.append({header[i]: (vals[i] if i < len(vals) else "") for i in range(len(header))})
+            return rows
+        header = [c.strip() for c in re.split(r"[,\t]", lines[0])]
+        for line in lines[1:]:
+            vals = [c.strip() for c in re.split(r"[,\t]", line)]
+            rows.append({header[i]: (vals[i] if i < len(vals) else "") for i in range(len(header))})
+        return rows
+
+    def ocr_text(self, path: str) -> str:
+        target = self._resolve_project_path(path)
+        if not target.exists():
+            raise FileNotFoundError(f"图片不存在：{path}")
+        try:
+            import pytesseract  # type: ignore
+            from PIL import Image  # type: ignore
+            return pytesseract.image_to_string(Image.open(str(target)), lang="chi_sim+eng")
+        except Exception as exc:  # noqa: BLE001
+            return (f"[缺少依赖] OCR 需要 pytesseract + Pillow（{exc}）。"
+                    "也可以先把图片里的文字手工贴进 skill 节点")
+
+    def describe_image(self, path: str) -> str:
+        target = self._resolve_project_path(path)
+        if not target.exists():
+            raise FileNotFoundError(f"图片不存在：{path}")
+        return (f"[需要多模态模型] 当前后端只接了文本模型，无法直接理解图片 {target.name}。"
+                "可以在节点参数里把图片描述手动写进 prompt，或换成支持视觉的模型后再扩展这里。")
+
+    def transcribe(self, path: str) -> str:
+        target = self._resolve_project_path(path)
+        if not target.exists():
+            raise FileNotFoundError(f"音频不存在：{path}")
+        try:
+            from faster_whisper import WhisperModel  # type: ignore
+            model = WhisperModel("base", device="cpu", compute_type="int8")
+            segments, _ = model.transcribe(str(target))
+            return "".join(seg.text for seg in segments)
+        except Exception as exc:  # noqa: BLE001
+            return (f"[缺少依赖] 语音转写需要 faster-whisper（{exc}），"
+                    "安装后再重试：pip install faster-whisper")
+
+    def parse_json(self, text: str) -> Any:
+        """从任意文本里抽出 JSON。"""
+        return _extract_json(text)
+
+    # ---- 键值 / 缓存 / 图 ----
+    def kv_set(self, key: str, value: Any) -> None:
+        store = _open_store()
+        store.execute("CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY, value TEXT, ts REAL)", ())
+        store.execute(
+            "INSERT INTO kv(key,value,ts) VALUES(?,?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, ts=excluded.ts",
+            (str(key), json.dumps(value, ensure_ascii=False, default=str), time.time()),
+        )
+        store.commit()
+
+    def kv_get(self, key: str, default: Any = None) -> Any:
+        store = _open_store()
+        store.execute("CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY, value TEXT, ts REAL)", ())
+        row = store.execute("SELECT value FROM kv WHERE key=?", (str(key),)).fetchone()
+        if not row:
+            return default
+        try:
+            return json.loads(row[0])
+        except Exception:
+            return row[0]
+
+    def cache_key(self, text: str) -> str:
+        import hashlib
+        raw = f"{self.node_name}:{text}"
+        return hashlib.sha1(raw.encode("utf-8", "replace")).hexdigest()[:24]
+
+    def cache_get(self, key: str) -> Any:
+        store = _open_store()
+        store.execute(
+            "CREATE TABLE IF NOT EXISTS cache(key TEXT PRIMARY KEY, value TEXT, exp REAL)", ())
+        row = store.execute("SELECT value, exp FROM cache WHERE key=?", (str(key),)).fetchone()
+        if not row:
+            return None
+        if row[1] and row[1] < time.time():
+            store.execute("DELETE FROM cache WHERE key=?", (str(key),))
+            store.commit()
+            return None
+        try:
+            return json.loads(row[0])
+        except Exception:
+            return row[0]
+
+    def cache_set(self, key: str, value: Any, ttl: int = 3600) -> None:
+        store = _open_store()
+        store.execute(
+            "CREATE TABLE IF NOT EXISTS cache(key TEXT PRIMARY KEY, value TEXT, exp REAL)", ())
+        exp = time.time() + ttl if ttl else 0
+        store.execute(
+            "INSERT INTO cache(key,value,exp) VALUES(?,?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, exp=excluded.exp",
+            (str(key), json.dumps(value, ensure_ascii=False, default=str), exp),
+        )
+        store.commit()
+
+    def graph_query(self, query: str, limit: int = 20) -> List[Dict[str, Any]]:
+        """在项目内的 triples 表里按关键词找关系（subject, predicate, object）。"""
+        store = _open_store()
+        store.execute(
+            "CREATE TABLE IF NOT EXISTS triples(subject TEXT, predicate TEXT, object TEXT)", ())
+        like = f"%{query}%"
+        rows = store.execute(
+            "SELECT subject, predicate, object FROM triples "
+            "WHERE subject LIKE ? OR predicate LIKE ? OR object LIKE ? LIMIT ?",
+            (like, like, like, int(limit)),
+        ).fetchall()
+        if not rows:
+            return [{"hint": "triples 表还是空的，请先用 db_write 或自定义节点写入关系"}]
+        return [{"subject": r[0], "predicate": r[1], "object": r[2]} for r in rows]
+
+    def exec_sql(self, sql: str, readonly: bool = True) -> Any:
+        """执行 SQL。readonly=True 时只允许 SELECT。"""
+        store = _open_store()
+        try:
+            if readonly and not re.match(r"^\s*(select|with)\b", sql, re.I):
+                raise PermissionError("只读模式下只允许 SELECT / WITH")
+            cur = store.execute(sql)
+            if cur.description:
+                cols = [d[0] for d in cur.description]
+                return [dict(zip(cols, row)) for row in cur.fetchall()][:500]
+            store.commit()
+            return {"rowcount": cur.rowcount}
+        finally:
+            pass
+
+    def wait_for_slot(self, per_minute: int = 30) -> None:
+        """朴素限流：一分钟内最多 per_minute 次。"""
+        now = time.time()
+        window = [t for t in (self.state.get("__rate__") or []) if now - t < 60]
+        if len(window) >= max(1, per_minute):
+            wait = 60 - (now - window[0])
+            if wait > 0:
+                self.log(f"触发限流，等待 {wait:.1f}s", "warn")
+                time.sleep(min(wait, 30))
+            window = []
+        window.append(now)
+        self.state["__rate__"] = window[-per_minute:]
 
     def vector_upsert(self, text: str) -> Dict[str, Any]:
         store = _open_store()

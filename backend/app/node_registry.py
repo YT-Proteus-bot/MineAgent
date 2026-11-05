@@ -8,11 +8,18 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from .node_templates import CODE_TEMPLATES
+from .node_templates_ext import EXT_TEMPLATES
+
+ALL_TEMPLATES = {**CODE_TEMPLATES, **EXT_TEMPLATES}
 
 # 分类：id, 名称, 颜色
 CATEGORIES: List[Dict[str, str]] = [
     {"id": "io", "label": "输入输出", "color": "#22d3ee"},
     {"id": "llm", "label": "推理与决策", "color": "#8b5cf6"},
+    {"id": "rag", "label": "RAG 与检索", "color": "#0ea5e9"},
+    {"id": "data", "label": "数据与存储", "color": "#a16207"},
+    {"id": "doc", "label": "文档与多模态", "color": "#d946ef"},
+    {"id": "text", "label": "文本加工", "color": "#f97316"},
     {"id": "tool", "label": "工具与能力", "color": "#f59e0b"},
     {"id": "memory", "label": "记忆与状态", "color": "#10b981"},
     {"id": "flow", "label": "流程控制", "color": "#64748b"},
@@ -151,6 +158,91 @@ _DEFS: List[tuple] = [
      [P("filename", "文件名", "artifact.md")], "python"),
     ("notification", "通知推送", "post", "✉", "把结果推送到 webhook。", ["out"], [P("webhook", "Webhook", "")], "python"),
 
+    # ---------------- RAG 与检索 ----------------
+    ("intent_recognizer", "意图识别", "rag", "⌖", "把用户输入归到预定义意图，输出置信度与理由。", ["out"],
+     [P("intents", "可选意图（逗号分隔）", ["咨询", "任务执行", "闲聊", "投诉", "其他"])], "python"),
+    ("slot_filler", "槽位抽取", "rag", "▤", "按 schema 从输入里抽结构化字段。", ["out"],
+     [P("schema", "槽位 schema（JSON）", {"who": "", "what": "", "when": "", "where": ""})], "python"),
+    ("query_rewrite", "查询改写", "rag", "✎", "把口语问题改写成适合检索的查询。", ["out"], [], "python"),
+    ("query_expand", "查询扩展", "rag", "⋈", "生成多条同义查询，提升召回。", ["out"],
+     [P("n", "生成条数", 3)], "python"),
+    ("query_router", "查询路由", "rag", "⇢", "判断问题该走哪个知识库。", ["out"],
+     [P("stores", "知识库（逗号分隔）", ["docs", "faq", "manual"])], "python"),
+    ("doc_loader", "文档加载", "rag", "▥", "把 pdf / docx / md / csv 抽成纯文本。", ["out"],
+     [P("path", "文件路径", "docs/sample.pdf")], "python"),
+    ("text_splitter", "文本切分", "rag", "⑂", "按段落和长度切块，支持重叠。", ["out"],
+     [P("chunk_size", "块大小", 600), P("overlap", "重叠字符", 80)], "python"),
+    ("chunk_refiner", "分块精炼", "rag", "◇", "给每个 chunk 补语义标题，便于召回与展示。", ["out"], [], "python"),
+    ("vector_indexer", "向量入库", "rag", "⤓", "把文本块写进项目内向量库。", ["out"], [], "python"),
+    ("hybrid_retriever", "混合检索", "rag", "⊚", "向量召回 + 关键词召回各取一份。", ["out"],
+     [P("top_k", "每路条数", 4)], "python"),
+    ("bm25_search", "关键词检索", "rag", "⌕", "基于词频与 IDF 的传统检索。", ["out"],
+     [P("top_k", "条数", 6)], "python"),
+    ("reranker", "重排 Rerank", "rag", "⇅", "让模型给候选片段打相关性分，取前 K。", ["out"],
+     [P("top_k", "保留条数", 3)], "python"),
+    ("context_builder", "上下文拼装", "rag", "▧", "把检索结果拼成带编号的参考上下文。", ["out"],
+     [P("max_chars", "最大字符数", 3000)], "python"),
+    ("citation_formatter", "引用标注", "rag", "❝", "给答案补 [1][2] 形式的来源编号。", ["out"], [], "python"),
+    ("doc_grader", "相关性打分", "rag", "◐", "判断召回内容是否真的能回答问题。", ["out"], [], "python"),
+    ("rag_evaluator", "RAG 质量评估", "rag", "◑", "评估答案是否被检索内容支撑。", ["out"], [], "python"),
+
+    # ---------------- 数据与存储 ----------------
+    ("db_write", "数据写入", "data", "⤒", "执行 INSERT / UPDATE / DELETE，默认禁用需显式放行。", ["out"],
+     [P("sql", "写语句", ""), P("allow", "允许写入", False)], "python"),
+    ("kv_store", "键值存储", "data", "▣", "KV 读写，适合存中间结果。", ["out"],
+     [P("action", "动作(get/set)", "get"), P("key", "键", "default")], "python"),
+    ("cache_lookup", "缓存查询", "data", "⌛", "按输入做键查缓存，命中可跳过重算。", ["out"], [], "python"),
+    ("cache_write", "缓存写入", "data", "⧖", "把当前结果写进带 TTL 的缓存。", ["out"],
+     [P("key", "缓存键（默认用节点名）", ""), P("ttl", "有效期（秒）", 3600)], "python"),
+    ("graph_query", "图关系查询", "data", "◍", "在项目内三元组表里按关键词查关系。", ["out"],
+     [P("limit", "条数", 20)], "python"),
+
+    # ---------------- 文档与多模态 ----------------
+    ("pdf_parser", "PDF 解析", "doc", "▤", "抽取 PDF 正文（需要 pypdf）。", ["out"],
+     [P("path", "PDF 路径", "")], "python"),
+    ("table_parser", "表格解析", "doc", "▦", "把 CSV / Markdown 表格转成结构化行。", ["out"], [], "python"),
+    ("ocr_extract", "OCR 文字识别", "doc", "◫", "从图片抽文字（需要 pytesseract）。", ["out"],
+     [P("path", "图片路径", "")], "python"),
+    ("image_analyzer", "图像理解", "doc", "◉", "描述图片内容（需要多模态模型）。", ["out"],
+     [P("path", "图片路径", "")], "python"),
+    ("speech_to_text", "语音转写", "doc", "◊", "音频转文字（需要 faster-whisper）。", ["out"],
+     [P("path", "音频路径", "")], "python"),
+
+    # ---------------- 文本加工 ----------------
+    ("translator", "翻译", "text", "文", "翻译成指定目标语言。", ["out"],
+     [P("target", "目标语言", "English")], "python"),
+    ("classifier", "分类器", "text", "⊞", "把输入归到给定标签之一。", ["out"],
+     [P("labels", "标签（逗号分隔）", ["咨询", "投诉", "其他"])], "python"),
+    ("extractor", "实体抽取", "text", "◎", "抽人名 / 机构 / 地点 / 金额 / 时间。", ["out"], [], "python"),
+    ("sentiment", "情感分析", "text", "◔", "正向 / 中性 / 负向 + 强度。", ["out"], [], "python"),
+    ("fact_checker", "事实核查", "text", "⚖", "逐条判断陈述能否被支撑。", ["out"], [], "python"),
+    ("deduplicator", "去重", "text", "⊘", "按内容前缀归并重复项。", ["out"], [], "python"),
+    ("merger", "多路合并", "text", "⊕", "把多路结果拼成一段。", ["out"],
+     [P("separator", "分隔符", "\\n\\n")], "python"),
+    ("outline_builder", "大纲生成", "text", "☰", "给主题产出多级 Markdown 大纲。", ["out"],
+     [P("depth", "大纲层级", 3)], "python"),
+    ("section_writer", "分段写作", "text", "▭", "按给定小标题写一节正文。", ["out"],
+     [P("words", "目标字数", 400)], "python"),
+    ("polisher", "润色", "text", "✧", "保持原意，改掉啰嗦与病句。", ["out"],
+     [P("style", "风格", "简洁专业")], "python"),
+    ("title_generator", "标题生成", "text", "❖", "给内容起若干候选标题。", ["out"],
+     [P("n", "条数", 5)], "python"),
+
+    # ---------------- 可靠性控制（归到流程控制） ----------------
+    ("rate_limiter", "限流", "flow", "⏳", "控制每分钟调用次数，超了就等一下。", ["out"],
+     [P("per_minute", "每分钟上限", 30)], "python"),
+    ("circuit_breaker", "熔断", "flow", "⚡", "连续失败达阈值就快速失败。", ["out"],
+     [P("threshold", "失败阈值", 3)], "python"),
+    ("budget_guard", "预算控制", "flow", "◍", "token 用量超限就停下。", ["out"],
+     [P("max_tokens", "token 上限", 50000)], "python"),
+    ("cost_tracker", "成本统计", "flow", "¥", "按 token 用量估算花费。", ["out"],
+     [P("price_per_k", "每千 token 价格", 0.002)], "python"),
+
+    # ---------------- 输出处理（归到后处理） ----------------
+    ("json_repair", "JSON 修复", "post", "⛭", "把模型输出里夹带的 JSON 抽出来并解析。", ["out"], [], "python"),
+    ("markdown_render", "Markdown 渲染", "post", "▤", "把纯文本包装成规范 Markdown。", ["out"],
+     [P("title", "标题", "")], "python"),
+
     # ---------------- 框架专有 ----------------
     ("langgraph_state", "LangGraph State", "fw", "≣", "声明 LangGraph 的图状态字段。", ["out"],
      [P("fields", "字段", ["messages", "next"])], "python"),
@@ -177,7 +269,7 @@ _DEFS: List[tuple] = [
 
 NODE_TYPES: List[Dict[str, Any]] = []
 for kind, label, cat, icon, desc, outputs, params, language in _DEFS:
-    default_code = CODE_TEMPLATES.get(kind, '# 暂未提供默认模板\n')
+    default_code = ALL_TEMPLATES.get(kind, '# 暂未提供默认模板\n')
     NODE_TYPES.append({
         "kind": kind,
         "label": label,

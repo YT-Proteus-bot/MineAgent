@@ -5,6 +5,7 @@ frontend/dist/
 frontend/tsconfig.tsbuildinfo
 __pycache__/
 *.pyc
+.store.db
 backend/data/
 backend/**/__pycache__/
 
