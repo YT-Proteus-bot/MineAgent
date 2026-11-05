@@ -670,6 +670,77 @@ input[type='range'] {
   color: var(--muted);
   font-size: 10.5px;
 }
+/* ---------------- 模型选择器 ---------------- */
+.model-picker {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+}
+.model-picker input {
+  flex: 1;
+  min-width: 0;
+}
+.mp-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 8px;
+  font-size: 11.5px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--text-dim);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.12s ease;
+}
+.mp-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--text);
+}
+.mp-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.mp-arrow {
+  padding: 0 7px;
+  font-size: 10px;
+}
+.mp-menu {
+  position: absolute;
+  top: calc(100% + 5px);
+  left: 0;
+  right: 0;
+  max-height: 236px;
+  overflow-y: auto;
+  background: #131a2a;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.55);
+  z-index: 400;
+  padding: 4px;
+}
+.mp-item {
+  padding: 6px 9px;
+  font-size: 12px;
+  font-family: var(--mono);
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mp-item:hover {
+  background: rgba(109, 139, 255, 0.16);
+  color: var(--text);
+}
+.mp-item.active {
+  color: var(--accent);
+  background: rgba(109, 139, 255, 0.1);
+}
+
 .constraint-panel {
   position: absolute;
   top: 46px;

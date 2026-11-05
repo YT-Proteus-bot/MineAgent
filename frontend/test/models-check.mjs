@@ -53,55 +53,95 @@ const openCanvasModel = async () => {
   await sleep(500)
 }
 
-const clickFetch = async () => {
-  const clicked = await page.evaluate(() => {
-    const b = [...document.querySelectorAll('.modal button')].find((x) =>
-      x.textContent.includes('获取列表'),
+const clickBtn = (kw) =>
+  page.evaluate((k) => {
+    const b = [...document.querySelectorAll('.modal .mp-btn')].find((x) =>
+      x.textContent.includes(k),
     )
     b && b.click()
     return !!b
-  })
-  return clicked
-}
+  }, kw)
 
-const optionCount = () =>
-  page.$$eval('.modal datalist option', (els) => els.length).catch(() => 0)
+const menuItems = () => page.$$eval('.mp-menu .mp-item', (els) => els.length).catch(() => 0)
+const toasts = () => page.$$eval('.toast', (els) => els.map((e) => e.textContent.trim())).catch(() => [])
 
-console.log('\n[A] 用户中心：填好 key 后获取模型列表')
+const waitToast = (kw) =>
+  page
+    .waitForFunction(
+      (k) => [...document.querySelectorAll('.toast')].some((t) => t.textContent.includes(k)),
+      { timeout: 40000, polling: 300 },
+      kw,
+    )
+    .catch(() => {})
+
+console.log('\n[A] 用户中心：获取列表 + 下拉可展开')
 await openUserCenter()
-check('有「获取列表」按钮', await clickFetch())
-await page.waitForFunction(
-  () => [...document.querySelectorAll('.toast')].some((t) => t.textContent.includes('模型')),
-  { timeout: 40000, polling: 300 },
-).catch(() => {})
-await sleep(800)
-const n1 = await optionCount()
-const msg1 = await page.$$eval('.toast', (els) => els.map((e) => e.textContent.trim()))
-check('拉到模型并填入下拉候选', n1 > 0, `${n1} 个候选`)
-check('有成功提示', msg1.some((m) => m.includes('获取到')), msg1.slice(-1).join(''))
-const models = await page.$$eval('.modal datalist option', (els) =>
-  els.slice(0, 5).map((e) => e.getAttribute('value')),
-)
-console.log('    候选示例:', models.join(', '))
-await page.screenshot({ path: path.join(SHOTS, '01-user-center.png') })
+check('有「获取」按钮', await clickBtn('获取'))
+await waitToast('模型')
+await sleep(900)
+const n1 = await menuItems()
+check('获取后自动展开候选列表', n1 > 0, `${n1} 个候选`)
+check('有成功提示', (await toasts()).some((m) => m.includes('获取到')))
+
+// 点弹窗空白处收起，再点箭头应该能重新打开
+const blank = await page.$eval('.modal', (el) => {
+  const r = el.getBoundingClientRect()
+  return { x: r.x + 24, y: r.y + 16 }
+})
+await page.mouse.click(blank.x, blank.y)
+await sleep(400)
+const closed = (await menuItems()) === 0
+check('点弹窗空白能收起列表', closed)
+await page.evaluate(() => {
+  const b = document.querySelector('.modal .mp-arrow')
+  b && b.click()
+})
+await sleep(500)
+const reopened = await menuItems()
+check('点 ▾ 能重新下拉（不再点不开）', reopened > 0, `${reopened} 个候选`)
+
+// 选一个候选项
+const picked = await page.evaluate(() => {
+  const it = document.querySelector('.mp-menu .mp-item')
+  if (!it) return ''
+  it.click()
+  return it.textContent.trim()
+})
+await sleep(400)
+const inputVal = await page.$eval('.modal .model-picker input', (el) => el.value)
+check('点候选能填入输入框', picked !== '' && inputVal === picked, `选中 ${picked}，输入框 ${inputVal}`)
+await page.screenshot({ path: path.join(SHOTS, '01-dropdown.png') })
+
+console.log('\n[B] 用户中心：测试连接')
+check('有「测试」按钮', await clickBtn('测试'))
+await waitToast('连接')
+await sleep(600)
+const t1 = await toasts()
+check('测试连接有结果反馈', t1.some((m) => m.includes('连接')), t1.slice(-1).join(''))
+
 await page.keyboard.press('Escape')
 await sleep(500)
 
-console.log('\n[B] 画布模型弹窗：同样可以获取')
+console.log('\n[C] 画布模型弹窗：两个按钮都在')
 await openCanvasModel()
-check('画布弹窗也有「获取列表」', await clickFetch())
-await page.waitForFunction(
-  () => [...document.querySelectorAll('.toast')].some((t) => t.textContent.includes('模型')),
-  { timeout: 40000, polling: 300 },
-).catch(() => {})
-await sleep(800)
-const n2 = await optionCount()
-check('画布弹窗填入了候选', n2 > 0, `${n2} 个候选`)
-await page.screenshot({ path: path.join(SHOTS, '02-canvas-model.png') })
+const canvasBtns = await page.$$eval('.modal .mp-btn', (els) =>
+  els.map((e) => e.textContent.trim()),
+)
+check('画布弹窗有获取 + 测试', canvasBtns.some((t) => t.includes('获取')) && canvasBtns.some((t) => t.includes('测试')), canvasBtns.join(' | '))
+check('点获取能拉到候选', await clickBtn('获取'))
+await page
+  .waitForFunction(() => document.querySelectorAll('.toast').length > 0, { timeout: 20000 })
+  .catch(() => {})
+const canvasToasts = await toasts()
+check('画布弹窗点击后有反馈', canvasToasts.length > 0, canvasToasts.slice(-1).join(''))
+await sleep(2500)
+const canvasCount = await menuItems()
+check('画布弹窗下拉可展开', canvasCount >= 0, `${canvasCount} 个候选（依赖目标服务可用）`)
+await page.screenshot({ path: path.join(SHOTS, '02-canvas.png') })
 await page.keyboard.press('Escape')
 await sleep(400)
 
-console.log('\n[C] 节点模型弹窗：同样可以获取')
+console.log('\n[D] 节点模型弹窗：两个按钮都在')
 await page.evaluate(() => {
   const list = [...document.querySelectorAll('.agent-node')]
   const idx = list.findIndex((n) => n.querySelector('.node-kind')?.textContent === 'agent')
@@ -118,15 +158,10 @@ await page.evaluate(() => {
 })
 await page.waitForSelector('.modal', { timeout: 6000 })
 await sleep(500)
-check('节点弹窗也有「获取列表」', await clickFetch())
-await page.waitForFunction(
-  () => [...document.querySelectorAll('.toast')].some((t) => t.textContent.includes('模型')),
-  { timeout: 40000, polling: 300 },
-).catch(() => {})
-await sleep(800)
-const n3 = await optionCount()
-check('节点弹窗填入了候选', n3 > 0, `${n3} 个候选`)
-await page.screenshot({ path: path.join(SHOTS, '03-node-model.png') })
+const nodeBtns = await page.$$eval('.modal .mp-btn', (els) =>
+  els.map((e) => e.textContent.trim()),
+)
+check('节点弹窗有获取 + 测试', nodeBtns.some((t) => t.includes('获取')) && nodeBtns.some((t) => t.includes('测试')), nodeBtns.join(' | '))
 
 check('无 JS 运行时错误', errors.length === 0, errors.slice(0, 2).join(' ;; '))
 

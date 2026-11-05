@@ -73,9 +73,6 @@ export function UserCenterModal({ onClose }: { onClose: () => void }) {
       onClose={onClose}
       footer={
         <>
-          <button onClick={test} disabled={testing}>
-            {testing ? <span className="spin" /> : null} 测试连接
-          </button>
           <button onClick={onClose}>取消</button>
           <button className="primary" onClick={save}>
             保存
