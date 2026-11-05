@@ -11,6 +11,7 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import AgentNode from './AgentNode'
+import AgentEdge from './AgentEdge'
 import BackgroundPanel from './BackgroundPanel'
 import ConstraintPanel from './ConstraintPanel'
 import NodeModelModal from './NodeModelModal'
@@ -19,6 +20,7 @@ import { useStore } from '../store'
 import { DEFAULT_BACKGROUND, isAgentKind } from '../types'
 
 const nodeTypes = { agent: AgentNode }
+const edgeTypes = { agent: AgentEdge }
 
 const BRANCH_TEXT: Record<string, string> = {
   out: '输出',
@@ -74,6 +76,7 @@ export default function FlowCanvas() {
   const setConstraintPanelOpen = useStore((s) => s.setConstraintPanelOpen)
   const validateNow = useStore((s) => s.validateNow)
   const connectNodes = useStore((s) => s.connectNodes)
+  const autoLayout = useStore((s) => s.autoLayout)
   const [linker, setLinker] = useState<LinkerState>(null)
 
   const closeMenu = () => {
@@ -119,24 +122,33 @@ export default function FlowCanvas() {
     return () => clearTimeout(timer)
   }, [canvasId, fitView])
 
+  // 回边（从右往左绕回去的循环线）单独用虚线，和正向流程区分开
+  const nodePos = useMemo(() => new Map(nodes.map((n) => [n.id, n.position])), [nodes])
+
   const styledEdges = useMemo(
     () =>
-      edges.map((e) => ({
-        ...e,
-        type: e.type || 'smoothstep',
-        markerEnd: (e.markerEnd as any) || {
-          type: MarkerType.ArrowClosed,
-          width: 18,
-          height: 18,
-          color: '#6b7fa5',
-        },
-        style: { stroke: '#55688b', strokeWidth: 2, ...(e.style || {}) },
-        labelStyle: { fill: '#9db0d0', fontSize: 10, fontFamily: 'sans-serif' },
-        labelBgStyle: { fill: '#121828', fillOpacity: 0.9 },
-        labelBgPadding: [4, 2] as [number, number],
-        labelBgBorderRadius: 4,
-      })),
-    [edges],
+      edges.map((e) => {
+        const src = nodePos.get(e.source)
+        const dst = nodePos.get(e.target)
+        const isBackEdge = !!(src && dst && dst.x < src.x - 40)
+        return {
+          ...e,
+          type: 'agent',
+          markerEnd: (e.markerEnd as any) || {
+            type: MarkerType.ArrowClosed,
+            width: 16,
+            height: 16,
+            color: isBackEdge ? '#a78bfa' : '#7c8fae',
+          },
+          style: {
+            stroke: isBackEdge ? '#8b6fe0' : '#5b6f92',
+            strokeWidth: 2,
+            ...(isBackEdge ? { strokeDasharray: '6 4' } : null),
+            ...(e.style || {}),
+          },
+        }
+      }),
+    [edges, nodePos],
   )
 
   const handlePaneContextMenu = useCallback(
@@ -193,6 +205,7 @@ export default function FlowCanvas() {
         nodes={nodes}
         edges={styledEdges}
         nodeTypes={nodeTypes}
+        edgeTypes={edgeTypes}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
@@ -261,7 +274,23 @@ export default function FlowCanvas() {
           🎨 背景
           {bg.image ? <span className="badge" style={{ padding: '0 4px' }}>图</span> : null}
         </button>
-        <div className="hud-chip dim">右键画布新增节点 · 右键节点编辑</div>
+        <button
+          className="hud-chip hud-btn"
+          onClick={() => {
+            autoLayout()
+            setTimeout(() => {
+              try {
+                fitView({ padding: 0.16, minZoom: 0.28, maxZoom: 1.05, duration: 280 })
+              } catch {
+                /* ignore */
+              }
+            }, 120)
+          }}
+          title="按流程分层重排节点，减少连线交叉（会覆盖手动摆放的位置）"
+        >
+          ⤢ 整理布局
+        </button>
+        <div className="hud-chip dim">虚线是循环回边 · 右键画布新增节点</div>
       </div>
 
       {bgPanelOpen && <BackgroundPanel onClose={() => setBgPanelOpen(false)} />}

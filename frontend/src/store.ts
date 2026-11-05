@@ -83,6 +83,7 @@ interface AppState {
   removeNode: (id: string) => void
   duplicateNode: (id: string) => void
   resetNodeSize: (id: string) => void
+  autoLayout: () => void
   setViewport: (v: { x: number; y: number; zoom: number }) => void
 
   save: () => Promise<boolean>
@@ -595,6 +596,74 @@ export const useStore = create<AppState>((set, get) => ({
       ),
       dirty: true,
     })
+  },
+
+  /** 按拓扑分层重排节点，尽量把线拉成水平的一条条，减少交叉 */
+  autoLayout: () => {
+    const nodes = get().nodes
+    const edges = get().edges
+    if (!nodes.length) return
+
+    const ids = nodes.map((n) => n.id)
+    const indeg: Record<string, number> = {}
+    const succ: Record<string, string[]> = {}
+    ids.forEach((id) => {
+      indeg[id] = 0
+      succ[id] = []
+    })
+    for (const e of edges) {
+      if (succ[e.source] && indeg[e.target] !== undefined) {
+        succ[e.source].push(e.target)
+        indeg[e.target] += 1
+      }
+    }
+
+    const layer: Record<string, number> = {}
+    const roots = ids.filter((id) => indeg[id] === 0)
+    const seeds = roots.length ? roots : ids.slice(0, 1)
+    const queue: string[] = []
+    seeds.forEach((id) => {
+      layer[id] = 0
+      queue.push(id)
+    })
+    while (queue.length) {
+      const cur = queue.shift() as string
+      for (const nxt of succ[cur] || []) {
+        if (layer[nxt] === undefined) {
+          layer[nxt] = layer[cur] + 1
+          queue.push(nxt)
+        }
+      }
+    }
+    ids.forEach((id) => {
+      if (layer[id] === undefined) layer[id] = 0
+    })
+
+    const buckets: Record<number, string[]> = {}
+    ids.forEach((id) => {
+      const lv = layer[id]
+      buckets[lv] = buckets[lv] || []
+      buckets[lv].push(id)
+    })
+    const byId = new Map(nodes.map((n) => [n.id, n]))
+    const pos: Record<string, { x: number; y: number }> = {}
+    Object.keys(buckets)
+      .map(Number)
+      .sort((a, b) => a - b)
+      .forEach((lv) => {
+        const members = buckets[lv].sort(
+          (a, b) => (byId.get(a)?.position.y || 0) - (byId.get(b)?.position.y || 0),
+        )
+        members.forEach((id, i) => {
+          pos[id] = { x: 80 + lv * 320, y: 90 + i * 176 }
+        })
+      })
+
+    set({
+      nodes: nodes.map((n) => ({ ...n, position: pos[n.id] || n.position })),
+      dirty: true,
+    })
+    get().toast('已按流程分层整理布局', 'ok')
   },
 
   setViewport: (v) => {
