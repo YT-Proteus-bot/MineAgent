@@ -148,6 +148,28 @@ export const api = {
       { method: 'POST', body: JSON.stringify(payload) },
     ),
 
+  // ---- AI 助手历史对话 ----
+  listChats: () =>
+    request<
+      { id: string; title: string; message_count: number; updated_at: string }[]
+    >('/api/assistant/chats'),
+  getChat: (id: string) =>
+    request<{ id: string; title: string; messages: ChatMsg[]; updated_at: string }>(
+      `/api/assistant/chats/${id}`,
+    ),
+  saveChat: (payload: {
+    messages: ChatMsg[]
+    chat_id?: string
+    title?: string
+    canvas_id?: string
+  }) =>
+    request<{ ok: boolean; id: string; title?: string }>('/api/assistant/chats', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  deleteChat: (id: string) =>
+    request<{ ok: boolean }>(`/api/assistant/chats/${id}`, { method: 'DELETE' }),
+
   assistantStatus: () =>
     request<{ ready: boolean; model: string; base_url: string; hint: string }>(
       '/api/assistant/status',

@@ -9,6 +9,13 @@ const QUICK = [
   '节点代码里 ctx 有哪些能力？',
 ]
 
+type ChatBrief = {
+  id: string
+  title: string
+  message_count: number
+  updated_at: string
+}
+
 /** 常驻 AI 助手：用「用户中心」配置的 key，回答使用中遇到的框架 / 编排问题。 */
 export default function AgentChatPanel() {
   const canvas = useStore((s) => s.canvas)
@@ -17,6 +24,7 @@ export default function AgentChatPanel() {
   const report = useStore((s) => s.constraintReport)
   const runError = useStore((s) => s.runError)
   const selectedId = useStore((s) => s.selectedNodeId)
+  const toast = useStore((s) => s.toast)
 
   const [messages, setMessages] = useState<ChatMsg[]>([])
   const [input, setInput] = useState('')
@@ -24,8 +32,12 @@ export default function AgentChatPanel() {
   const [withContext, setWithContext] = useState(true)
   const [ready, setReady] = useState<boolean | null>(null)
   const [hint, setHint] = useState('')
+  const [chatId, setChatId] = useState<string | null>(null)
+  const [chats, setChats] = useState<ChatBrief[]>([])
+  const [historyOpen, setHistoryOpen] = useState(false)
   const listRef = useRef<HTMLDivElement>(null)
   const abortRef = useRef<AbortController | null>(null)
+  const accRef = useRef('')
 
   useEffect(() => {
     api
@@ -35,6 +47,27 @@ export default function AgentChatPanel() {
         setHint(s.hint)
       })
       .catch(() => setReady(false))
+  }, [])
+
+  const refreshChats = () => {
+    api
+      .listChats()
+      .then(setChats)
+      .catch(() => setChats([]))
+  }
+
+  // 打开面板时恢复最近一次对话
+  useEffect(() => {
+    refreshChats()
+    api
+      .listChats()
+      .then(async (list) => {
+        if (!list.length) return
+        const d = await api.getChat(list[0].id)
+        setChatId(d.id)
+        setMessages(d.messages || [])
+      })
+      .catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -68,23 +101,39 @@ export default function AgentChatPanel() {
     }
   }
 
+  const persist = async (msgs: ChatMsg[]) => {
+    if (!msgs.length) return
+    try {
+      const res = await api.saveChat({
+        messages: msgs,
+        chat_id: chatId || undefined,
+        canvas_id: canvas?.id,
+      })
+      if (!chatId && res.id) setChatId(res.id)
+      refreshChats()
+    } catch {
+      /* 保存失败不影响对话 */
+    }
+  }
+
   const send = async (text: string) => {
     const content = text.trim()
     if (!content || busy) return
     setInput('')
     const next: ChatMsg[] = [...messages, { role: 'user', content }]
-    setMessages(next)
-    setBusy(true)
-
     const assistantIndex = next.length
     setMessages([...next, { role: 'assistant', content: '' }])
+    setBusy(true)
+
     const controller = new AbortController()
     abortRef.current = controller
+    accRef.current = ''
 
     await assistantChat(
       next,
       buildContext(),
       (token) => {
+        accRef.current += token
         setMessages((prev) => {
           const copy = [...prev]
           const last = copy[assistantIndex]
@@ -95,10 +144,7 @@ export default function AgentChatPanel() {
       (msg) => {
         setMessages((prev) => {
           const copy = [...prev]
-          copy[assistantIndex] = {
-            role: 'assistant',
-            content: `⚠ ${msg}`,
-          }
+          copy[assistantIndex] = { role: 'assistant', content: `⚠ ${msg}` }
           return copy
         })
         setBusy(false)
@@ -108,25 +154,98 @@ export default function AgentChatPanel() {
     )
     setBusy(false)
     abortRef.current = null
+
+    const finalMsgs: ChatMsg[] = [...next]
+    if (accRef.current.trim()) finalMsgs.push({ role: 'assistant', content: accRef.current })
+    persist(finalMsgs)
   }
 
   const stop = () => {
     abortRef.current?.abort()
     abortRef.current = null
     setBusy(false)
+    // 中断时也把已有的部分存下来
+    const partial: ChatMsg[] = [...messages]
+    if (accRef.current.trim()) partial.push({ role: 'assistant', content: accRef.current })
+    persist(partial)
+  }
+
+  const startNewChat = () => {
+    setMessages([])
+    setChatId(null)
+    setHistoryOpen(false)
+    accRef.current = ''
+  }
+
+  const openChat = async (id: string) => {
+    try {
+      const d = await api.getChat(id)
+      setChatId(d.id)
+      setMessages(d.messages || [])
+      setHistoryOpen(false)
+    } catch (e: any) {
+      toast(`打开失败：${e.message || e}`, 'err')
+    }
+  }
+
+  const removeChat = async (id: string, e: React.MouseEvent) => {
+    e.stopPropagation()
+    try {
+      await api.deleteChat(id)
+      if (id === chatId) startNewChat()
+      refreshChats()
+    } catch (err: any) {
+      toast(`删除失败：${err.message || err}`, 'err')
+    }
+  }
+
+  const fmtTime = (iso: string) => {
+    if (!iso) return ''
+    const d = new Date(iso)
+    if (Number.isNaN(d.getTime())) return iso.slice(5, 16)
+    return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(
+      d.getMinutes(),
+    ).padStart(2, '0')}`
   }
 
   return (
     <div className="chat-panel">
       <div className="chat-head">
-        <button
-          className="ghost sm"
-          onClick={() => setMessages([])}
-          disabled={busy || messages.length === 0}
-          title="清空当前对话"
-        >
+        <button className="ghost sm" onClick={startNewChat} disabled={busy} title="开一段新对话">
           ＋ 新对话
         </button>
+        <div className="chat-history-wrap">
+          <button
+            className={`ghost sm${historyOpen ? ' active' : ''}`}
+            onClick={() => {
+              setHistoryOpen((v) => !v)
+              refreshChats()
+            }}
+            title="查看历史对话"
+          >
+            🕘 历史{chats.length ? ` ${chats.length}` : ''}
+          </button>
+          {historyOpen && (
+            <div className="chat-history">
+              {chats.length === 0 && <div className="dim small" style={{ padding: 10 }}>还没有历史对话</div>}
+              {chats.map((c) => (
+                <div
+                  key={c.id}
+                  className={`chat-history-item${c.id === chatId ? ' active' : ''}`}
+                  onClick={() => openChat(c.id)}
+                >
+                  <div className="ch-title">{c.title || '新对话'}</div>
+                  <div className="ch-meta">
+                    {fmtTime(c.updated_at)} · {c.message_count} 条
+                  </div>
+                  <span className="ch-del" title="删除这段对话" onClick={(e) => removeChat(c.id, e)}>
+                    ×
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
         <div style={{ flex: 1 }} />
         <label className="row small" style={{ gap: 5 }} title="把当前画布、约束问题和最近报错一起发给助手">
           <input

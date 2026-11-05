@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -12,7 +13,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from ..db import get_setting
+from ..db import get_conn, get_setting, now_iso
 from ..security import decrypt
 
 router = APIRouter(prefix="/api/assistant", tags=["assistant"])
@@ -104,6 +105,93 @@ def assistant_status():
         "base_url": cfg["base_url"],
         "hint": "" if cfg["api_key"] else "还没配置 key，去右上角「用户中心」填一个就能用",
     }
+
+
+# --------------------------------------------------------------------------- #
+# 历史对话：每次「新对话」都会把上一段存下来，不再像以前那样直接丢掉
+# --------------------------------------------------------------------------- #
+def _chat_brief(row) -> Dict[str, Any]:
+    try:
+        msgs = json.loads(row["messages"] or "[]")
+    except Exception:  # noqa: BLE001
+        msgs = []
+    return {
+        "id": row["id"],
+        "title": row["title"] or (msgs[0]["content"][:30] if msgs else "新对话"),
+        "message_count": len(msgs),
+        "updated_at": row["updated_at"],
+        "created_at": row["created_at"],
+    }
+
+
+@router.get("/chats")
+def list_chats(limit: int = 50):
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM assistant_chats ORDER BY updated_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [_chat_brief(r) for r in rows]
+
+
+@router.get("/chats/{chat_id}")
+def get_chat(chat_id: str):
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM assistant_chats WHERE id = ?", (chat_id,)).fetchone()
+    if row is None:
+        raise HTTPException(404, "对话不存在")
+    try:
+        msgs = json.loads(row["messages"] or "[]")
+    except Exception:  # noqa: BLE001
+        msgs = []
+    return {"id": row["id"], "title": row["title"], "messages": msgs,
+            "updated_at": row["updated_at"]}
+
+
+class SaveChatRequest(BaseModel):
+    messages: List[ChatMessage] = Field(default_factory=list)
+    chat_id: Optional[str] = None
+    title: str = ""
+    canvas_id: str = ""
+
+
+@router.post("/chats")
+def save_chat(payload: SaveChatRequest):
+    """保存一轮对话：给了 chat_id 就续写，没有就新建一条。"""
+    msgs = [{"role": m.role, "content": m.content} for m in payload.messages]
+    if not msgs:
+        return {"ok": True, "id": payload.chat_id or "", "skipped": True}
+    title = (payload.title or "").strip()
+    if not title:
+        first_user = next((m for m in msgs if m["role"] == "user"), None)
+        title = ((first_user or msgs[0])["content"] or "")[:40] or "新对话"
+    ts = now_iso()
+    with get_conn() as conn:
+        existing = None
+        if payload.chat_id:
+            existing = conn.execute(
+                "SELECT id FROM assistant_chats WHERE id = ?", (payload.chat_id,)
+            ).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE assistant_chats SET messages = ?, title = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(msgs, ensure_ascii=False), title, ts, payload.chat_id),
+            )
+            return {"ok": True, "id": payload.chat_id, "title": title}
+        chat_id = uuid.uuid4().hex[:16]
+        conn.execute(
+            "INSERT INTO assistant_chats(id,title,messages,canvas_id,created_at,updated_at)"
+            " VALUES(?,?,?,?,?,?)",
+            (chat_id, title, json.dumps(msgs, ensure_ascii=False),
+             payload.canvas_id or "", ts, ts),
+        )
+    return {"ok": True, "id": chat_id, "title": title}
+
+
+@router.delete("/chats/{chat_id}")
+def delete_chat(chat_id: str):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM assistant_chats WHERE id = ?", (chat_id,))
+    return {"ok": True}
 
 
 @router.post("/chat")

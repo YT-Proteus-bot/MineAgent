@@ -29,6 +29,17 @@ CREATE TABLE IF NOT EXISTS app_settings (
     updated_at  TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS assistant_chats (
+    id          TEXT PRIMARY KEY,
+    title       TEXT NOT NULL DEFAULT '',
+    messages    TEXT NOT NULL DEFAULT '[]',
+    canvas_id   TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_chats_time ON assistant_chats(updated_at DESC);
+
 CREATE TABLE IF NOT EXISTS runs (
     id           TEXT PRIMARY KEY,
     canvas_id    TEXT NOT NULL,
