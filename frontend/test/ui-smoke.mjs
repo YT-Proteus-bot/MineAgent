@@ -108,6 +108,17 @@ try {
   await sleep(500)
   const n1 = await page.$$eval('.agent-node', (els) => els.length)
   check('画布上新增了节点', n1 === n0Before + 1, `${n0Before} → ${n1}`)
+
+  // 新节点还是游离的（会触发可达性约束），删掉它再继续后面的保存/运行
+  await page.evaluate(() => {
+    const list = document.querySelectorAll('.agent-node')
+    list[list.length - 1]?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+  })
+  await sleep(500)
+  await page.keyboard.press('Delete')
+  await sleep(600)
+  const n2 = await page.$$eval('.agent-node', (els) => els.length)
+  check('游离节点可删除', n2 === n0Before, `剩 ${n2} 个节点`)
 } catch (e) {
   check('右键新增节点', false, String(e).slice(0, 200))
 }
