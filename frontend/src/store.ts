@@ -193,6 +193,7 @@ interface AppState {
   running: boolean
   runEvents: RunEvent[]
   runOutput: string
+  runStream: { node: string; name: string; text: string } | null
   runError: string
   runInput: string
   runPanelOpen: boolean
@@ -371,6 +372,7 @@ export const useStore = create<AppState>((set, get) => ({
   running: false,
   runEvents: [],
   runOutput: '',
+  runStream: null,
   runError: '',
   runInput: '',
   runPanelOpen: false,
@@ -1122,6 +1124,7 @@ export const useStore = create<AppState>((set, get) => ({
       running: true,
       runEvents: [],
       runOutput: '',
+      runStream: null,
       runError: '',
       runPanelOpen: true,
       nodes: get().nodes.map((n) => ({ ...n, data: { ...n.data, status: 'idle' as NodeStatus } })),
@@ -1138,8 +1141,22 @@ export const useStore = create<AppState>((set, get) => ({
       (evt) => {
         const events = [...get().runEvents, evt]
         set({ runEvents: events.slice(-400) })
+        if (evt.event === 'token') {
+          const node = String(evt.node || '')
+          const text = String(evt.text || '')
+          if (text) {
+            const prev = get().runStream
+            set({
+              runStream:
+                prev && prev.node === node
+                  ? { ...prev, text: (prev.text + text).slice(-6000) }
+                  : { node, name: String(evt.name || ''), text },
+            })
+          }
+        }
         if (evt.event === 'node_start' && evt.node) {
           set({
+            runStream: { node: String(evt.node), name: String(evt.name || ''), text: '' },
             nodes: get().nodes.map((n) =>
               n.id === evt.node ? { ...n, data: { ...n.data, status: 'running' as NodeStatus } } : n,
             ),
@@ -1162,7 +1179,7 @@ export const useStore = create<AppState>((set, get) => ({
           })
         }
         if (evt.event === 'error') {
-          set({ runError: String(evt.message || '运行出错') })
+          set({ runError: String(evt.message || '运行出错'), runStream: null })
           const bad = evt.node
           if (bad) {
             set({
@@ -1175,6 +1192,7 @@ export const useStore = create<AppState>((set, get) => ({
         if (evt.event === 'run_end') {
           set({
             running: false,
+            runStream: null,
             runOutput:
               typeof evt.output === 'string'
                 ? evt.output

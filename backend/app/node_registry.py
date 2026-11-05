@@ -67,7 +67,15 @@ _MODE_OPTIONS = [{"value": m["value"], "label": m["label"]} for m in AGENT_MODES
 _DEFS: List[tuple] = [
     # ---------------- 输入输出 ----------------
     ("input", "输入 Input", "io", "▶", "每个智能体必须有的入口方块，接收用户输入。", ["out"], [], "python"),
-    ("output", "输出 Output", "io", "■", "每个智能体必须有的出口方块，返回最终答案。", ["out"], [], "python"),
+    ("output", "输出 Output", "io", "■", "每个智能体必须有的出口方块，返回最终答案。", ["out"],
+     [P("source", "最终输出来源", "auto",
+        options=[
+            {"value": "auto", "label": "自动（有 agent 就用 agent 的回答）"},
+            {"value": "agent", "label": "最近一次 agent 的回答"},
+            {"value": "data", "label": "上游节点的输出"},
+        ],
+        help_text="默认 auto：链路里出现过 agent 就返回它最后一次回答，否则透传上游输出。")],
+     "python"),
 
     # ---------------- 推理与决策 ----------------
     ("llm", "LLM 推理", "llm", "✦", "一次大模型调用，最基础的推理单元。", ["out"], [P("system", "系统提示", "")], "python"),
@@ -78,7 +86,12 @@ _DEFS: List[tuple] = [
     ("system_prompt", "系统提示词", "llm", "☰", "注入角色设定，供下游 agent/llm 复用。", ["out"], [P("persona", "角色设定", "")], "python"),
     ("planner", "任务规划", "llm", "◇", "把目标拆成有序执行计划。", ["out"], [], "python"),
     ("decomposer", "任务分解", "llm", "⋔", "输出结构化子任务列表，便于并行或分派。", ["out"], [], "python"),
-    ("router", "条件路由", "llm", "⑂", "判断后走 true / false 两条出边，是分支与循环的枢纽。", ["true", "false"], [], "python"),
+    ("router", "条件路由", "llm", "⑂", "判断后走 true / false 两条出边，是分支与循环的枢纽。", ["true", "false"],
+     [P("question", "判别问题", "该请求是否需要调用工具？",
+        help_text="把这个判断交给模型，回答 true 走 true 出边，false 走 false 出边。"),
+      P("max_loops", "循环次数上限", 0,
+        help_text="0 表示不循环（默认，第一次判定继续时也会收敛）；设为 N 表示最多重跑 N 轮后强制收敛。")],
+     "python"),
     ("reflector", "反思 Reflection", "llm", "↺", "对上一轮结果自我批判并给出修订版。", ["out"], [], "python"),
     ("critic", "评审 Critic", "llm", "⚖", "按维度打分并给改进项。", ["out"], [], "python"),
     ("self_check", "自检 Self-Check", "llm", "✓", "断言产出满足硬性约束。", ["out"], [P("min_len", "最小长度", 20)], "python"),
@@ -268,6 +281,20 @@ _DEFS: List[tuple] = [
 ]
 
 NODE_TYPES: List[Dict[str, Any]] = []
+
+# 代码里出现这些调用，就说明这个节点在跑模型 —— 网页上应该允许给它单独配模型
+LLM_CALL_MARKERS = (
+    "ctx.llm", "ctx.json_prompt", "ctx.agent", "ctx.delegate",
+    "ctx.describe_image", "ctx.transcribe", "ctx.rerank",
+)
+
+
+def _uses_llm(kind: str, code: str) -> bool:
+    if kind in ("llm", "agent", "supervisor", "worker", "group_chat", "debate"):
+        return True
+    return any(m in (code or "") for m in LLM_CALL_MARKERS)
+
+
 for kind, label, cat, icon, desc, outputs, params, language in _DEFS:
     default_code = ALL_TEMPLATES.get(kind, '# 暂未提供默认模板\n')
     NODE_TYPES.append({
@@ -281,6 +308,7 @@ for kind, label, cat, icon, desc, outputs, params, language in _DEFS:
         "params": params,
         "language": language,
         "default_code": default_code,
+        "uses_llm": _uses_llm(kind, default_code),
     })
 
 NODE_INDEX: Dict[str, Dict[str, Any]] = {n["kind"]: n for n in NODE_TYPES}

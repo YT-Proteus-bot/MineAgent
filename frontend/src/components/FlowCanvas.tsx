@@ -73,8 +73,9 @@ export default function FlowCanvas() {
       ? nodes.find((n) => n.id === menu.nodeId)?.data.kind
       : undefined
   const menuNodeIsAgent = isAgentKind(menuNodeKind)
-  // 只要这个节点会调用大模型，就允许单独配模型
-  const menuNodeUsesLLM = usesLLM(menuNodeKind)
+  // 以服务端判断为准（它看的是真实代码模板），避免前端写死的清单漏掉 critic 这类节点
+  const menuNodeDef = meta?.nodes.find((n) => n.kind === menuNodeKind)
+  const menuNodeUsesLLM = menuNodeDef?.uses_llm ?? usesLLM(menuNodeKind)
 
   const constraintPanelOpen = useStore((s) => s.constraintPanelOpen)
   const setConstraintPanelOpen = useStore((s) => s.setConstraintPanelOpen)

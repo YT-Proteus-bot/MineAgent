@@ -74,6 +74,7 @@ export default function AgentNode({ id, data, selected, dragging }: NodeProps<Ag
         handleClassName="node-resize-handle"
       />
       <Handle type="target" position={Position.Left} id="in" style={{ left: -5 }} />
+      {status === 'running' && <div className="node-running-badge">运行中</div>}
       <div className="node-head">
         <div className="node-icon" style={{ background: color }}>
           {icon}

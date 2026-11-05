@@ -186,7 +186,9 @@ async def run_canvas(canvas_id: str, payload: RunRequest):
                     except json.JSONDecodeError:
                         continue
                     evt.setdefault("run_id", run_id)
-                    collected.append(evt)
+                    # token 事件只做实时推送，不进日志/落库，避免日志被撑爆
+                    if evt.get("event") != "token":
+                        collected.append(evt)
                     if evt.get("event") == "run_end":
                         got_run_end = True
                         final_output = evt.get("output", "") or ""

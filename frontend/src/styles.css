@@ -452,12 +452,31 @@ input[type='range'] {
 }
 .agent-node.status-running {
   border-color: var(--accent-2);
-  box-shadow: 0 0 0 2px rgba(34, 211, 238, 0.28), 0 0 24px rgba(34, 211, 238, 0.28);
+  box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.4), 0 0 34px rgba(34, 211, 238, 0.42);
   animation: pulse 1.1s ease-in-out infinite;
 }
 @keyframes pulse {
   50% {
-    box-shadow: 0 0 0 4px rgba(34, 211, 238, 0.14), 0 0 30px rgba(34, 211, 238, 0.4);
+    box-shadow: 0 0 0 6px rgba(34, 211, 238, 0.12), 0 0 42px rgba(34, 211, 238, 0.55);
+  }
+}
+.node-running-badge {
+  position: absolute;
+  top: -9px;
+  right: 8px;
+  padding: 1px 7px;
+  border-radius: 9px;
+  background: var(--accent-2);
+  color: #04121a;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  animation: badge-blink 1s ease-in-out infinite;
+  z-index: 3;
+}
+@keyframes badge-blink {
+  50% {
+    opacity: 0.5;
   }
 }
 .agent-node.status-done {
@@ -1551,6 +1570,66 @@ input[type='range'] {
   color: var(--text-dim);
   word-break: break-word;
   white-space: pre-wrap;
+}
+.evt.node-end {
+  flex-direction: column;
+  gap: 2px;
+}
+.evt-line {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+.evt-out {
+  margin: 2px 0 7px 50px;
+  padding: 6px 9px;
+  max-height: 180px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #0d1420;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  color: #c3d3ea;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.6;
+}
+.run-live {
+  position: sticky;
+  top: -9px;
+  z-index: 2;
+  margin: -9px -12px 8px;
+  padding: 8px 12px;
+  background: linear-gradient(180deg, #0f1926 0%, #0b1220 100%);
+  border-bottom: 1px solid #1d2c44;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.35);
+}
+.run-live-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--accent-2);
+  font-size: 11.5px;
+  margin-bottom: 5px;
+}
+.run-live-text {
+  margin: 0;
+  max-height: 150px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #d6e4fb;
+  font-family: var(--sans);
+  font-size: 12px;
+  line-height: 1.65;
+}
+.dot-ok {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ok);
+  flex: none;
 }
 .run-output {
   white-space: pre-wrap;

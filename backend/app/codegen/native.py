@@ -256,8 +256,9 @@ def _block_llm(node: Dict[str, Any]) -> str:
         f"def {fn}(state: AgentState) -> dict:\n"
         f'    """{node.get("label") or kind}"""\n'
         f"    model = {_llm_var(node)}.bind(temperature={temperature})\n"
-        f"    msg = model.invoke({prompt_var}.format_messages(input=state.get(\"data\", \"\")))\n"
-        f'    return {{"data": msg.content}}\n'
+        f"    text = _stream(model, {prompt_var}.format_messages(input=state.get(\"data\", \"\")),\n"
+        f"                   {_q(node['id'])}, {_q(node['name'])})\n"
+        f'    return {{"data": text}}\n'
     )
 
 
@@ -282,12 +283,16 @@ def _block_agent(node: Dict[str, Any]) -> str:
         f"        tools=TOOLS,\n"
         f"        system_prompt={_q(system)},\n"
         f"    )\n"
-        f"    result = agent.invoke(\n"
-        f'        {{"messages": [{{"role": "user", "content": task}}]}},\n'
-        f"        config={{\"recursion_limit\": {max_steps * 2 + 2}}},\n"
-        f"    )\n"
-        f"    messages = result.get(\"messages\") or []\n"
-        f"    answer = str(getattr(messages[-1], \"content\", \"\")) if messages else \"\"\n"
+        f"    try:\n"
+        f"        answer = _agent_stream(agent, task, {_q(node['id'])}, {_q(node['name'])},\n"
+        f"                               {max_steps * 2 + 2})\n"
+        f"    except Exception:  # noqa: BLE001\n"
+        f"        result = agent.invoke(\n"
+        f'            {{"messages": [{{"role": "user", "content": task}}]}},\n'
+        f"            config={{\"recursion_limit\": {max_steps * 2 + 2}}},\n"
+        f"        )\n"
+        f"        messages = result.get(\"messages\") or []\n"
+        f"        answer = str(getattr(messages[-1], \"content\", \"\")) if messages else \"\"\n"
         f'    return {{"data": answer, "answer": answer}}\n'
     )
 
@@ -457,6 +462,46 @@ def _brief(value: Any, limit: int = 1500) -> Any:
         return json.loads(json.dumps(value, ensure_ascii=False, default=str))
     except Exception:  # noqa: BLE001
         return str(value)[:limit]
+
+
+def _stream(model, messages, node_id: str = "", name: str = "", interval: float = 0.05) -> str:
+    """逐段调模型：边生成边把 token 推给运行面板，最后拼成完整文本。"""
+    parts: list = []
+    last = 0.0
+    try:
+        for chunk in model.stream(messages):
+            text = getattr(chunk, "content", "")
+            if not isinstance(text, str) or not text:
+                continue
+            parts.append(text)
+            now = time.time()
+            if now - last >= interval:
+                last = now
+                _emit({"event": "token", "node": node_id, "name": name, "text": text})
+    except Exception:  # noqa: BLE001
+        msg = model.invoke(messages)
+        return str(getattr(msg, "content", msg))
+    return "".join(parts)
+
+
+def _agent_stream(agent, task: str, node_id: str = "", name: str = "",
+                  recursion_limit: int = 14) -> str:
+    """跑 agent 并把生成片段推给运行面板，最后从 values 状态里取最终回答。"""
+    last_state: dict = {}
+    for mode, payload in agent.stream(
+        {"messages": [{"role": "user", "content": task}]},
+        config={"recursion_limit": recursion_limit},
+        stream_mode=["messages", "values"],
+    ):
+        if mode == "messages":
+            chunk, _meta = payload
+            text = getattr(chunk, "content", "")
+            if isinstance(text, str) and text:
+                _emit({"event": "token", "node": node_id, "name": name, "text": text})
+        elif mode == "values" and isinstance(payload, dict):
+            last_state = payload
+    messages = last_state.get("messages") or []
+    return str(getattr(messages[-1], "content", "")) if messages else ""
 
 
 def _track(fn, node_id: str, name: str = "", label: str = "", kind: str = "llm"):

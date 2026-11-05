@@ -180,6 +180,8 @@ export interface NodeTypeDef {
   outputs: string[]
   params: NodeParamDef[]
   language: string
+  /** 这个节点会不会调用大模型（由后端按代码判断），会的话允许单独配模型 */
+  uses_llm?: boolean
   /** 悬停说明：概念 / 解释 / 用途 / 编码建议 */
   doc?: NodeDoc
   native_code?: string

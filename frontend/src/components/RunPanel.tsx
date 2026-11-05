@@ -7,12 +7,23 @@ function timeOf(i: number): string {
   return d.toLocaleTimeString('zh-CN', { hour12: false })
 }
 
+function outText(v: any): string {
+  if (v === null || v === undefined) return ''
+  if (typeof v === 'string') return v
+  try {
+    return JSON.stringify(v, null, 2)
+  } catch {
+    return String(v)
+  }
+}
+
 export default function RunPanel() {
   const open = useStore((s) => s.runPanelOpen)
   const setOpen = useStore((s) => s.setRunPanelOpen)
   const running = useStore((s) => s.running)
   const events = useStore((s) => s.runEvents)
   const output = useStore((s) => s.runOutput)
+  const stream = useStore((s) => s.runStream)
   const error = useStore((s) => s.runError)
   const input = useStore((s) => s.runInput)
   const setInput = useStore((s) => s.setRunInput)
@@ -21,19 +32,35 @@ export default function RunPanel() {
   const canvas = useStore((s) => s.canvas)
 
   const [tab, setTab] = useState<'events' | 'output'>('events')
+  const [elapsed, setElapsed] = useState(0)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const startedRef = useRef(0)
+
+  useEffect(() => {
+    if (!running) {
+      startedRef.current = 0
+      setElapsed(0)
+      return
+    }
+    if (!startedRef.current) startedRef.current = Date.now()
+    const timer = setInterval(() => {
+      setElapsed((Date.now() - startedRef.current) / 1000)
+    }, 200)
+    return () => clearInterval(timer)
+  }, [running])
 
   useEffect(() => {
     if (scrollRef.current && tab === 'events') {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight
     }
-  }, [events, tab])
+  }, [events, stream, tab])
 
   useEffect(() => {
     if (output) setTab('output')
   }, [output])
 
   const rows = useMemo(() => events.filter((e) => e.event !== 'token'), [events])
+  const booting = running && !rows.some((e) => e.event === 'node_start')
 
   const renderEvent = (e: RunEvent, idx: number) => {
     const name = e.name || e.node || ''
@@ -49,19 +76,22 @@ export default function RunPanel() {
             </span>
           </div>
         )
-      case 'node_end':
+      case 'node_end': {
+        const text = outText(e.output).trim()
         return (
           <div key={idx} className="evt node-end">
-            <span className="time">{timeOf(idx)}</span>
-            <span className="tag">完成</span>
-            <span className="msg">
-              {name} · {e.duration_ms}ms
-              {typeof e.output === 'string' && e.output
-                ? ` → ${String(e.output).slice(0, 120).replace(/\n/g, ' ')}`
-                : ''}
-            </span>
+            <div className="evt-line">
+              <span className="time">{timeOf(idx)}</span>
+              <span className="tag">完成</span>
+              <span className="msg">
+                {name}
+                {typeof e.duration_ms === 'number' ? ` · ${(e.duration_ms / 1000).toFixed(2)}s` : ''}
+              </span>
+            </div>
+            {text && <pre className="evt-out">{text.slice(0, 3000)}</pre>}
           </div>
         )
+      }
       case 'error':
         return (
           <div key={idx} className="evt error">
@@ -83,7 +113,9 @@ export default function RunPanel() {
           <div key={idx} className="evt route">
             <span className="time">{timeOf(idx)}</span>
             <span className="tag">分支</span>
-            <span className="msg">走 {e.branch} → {e.target}</span>
+            <span className="msg">
+              走 {e.branch} → {e.target}
+            </span>
           </div>
         )
       case 'custom':
@@ -126,7 +158,7 @@ export default function RunPanel() {
             <span className="tag">结束</span>
             <span className="msg">
               {e.status === 'ok' ? '运行完成' : `运行失败：${e.error || e.message || ''}`}
-              {e.duration_ms ? ` · ${e.duration_ms}ms` : ''}
+              {e.duration_ms ? ` · ${(e.duration_ms / 1000).toFixed(2)}s` : ''}
             </span>
           </div>
         )
@@ -145,6 +177,7 @@ export default function RunPanel() {
         {running && (
           <span className="row small" style={{ gap: 6 }}>
             <span className="spin" /> 正在执行
+            <span className="dim mono">{elapsed.toFixed(1)}s</span>
           </span>
         )}
         <div style={{ flex: 1 }} />
@@ -193,8 +226,24 @@ export default function RunPanel() {
                 最终输出
               </div>
             </div>
+
             {tab === 'events' ? (
               <div className="run-scroll" ref={scrollRef}>
+                {(running || stream) && (
+                  <div className="run-live">
+                    <div className="run-live-head">
+                      <span className={running ? 'spin' : 'dot-ok'} />
+                      {booting
+                        ? '正在启动执行进程（首次启动需加载框架依赖，约 3–5 秒）'
+                        : running
+                          ? `正在执行：${stream?.name || stream?.node || '等待节点输出…'}`
+                          : `上一个节点：${stream?.name || stream?.node || ''}`}
+                    </div>
+                    <pre className="run-live-text">
+                      {stream?.text || (booting ? '准备中…' : '…')}
+                    </pre>
+                  </div>
+                )}
                 {rows.length === 0 && <div className="dim">还没有运行记录</div>}
                 {rows.map(renderEvent)}
               </div>
