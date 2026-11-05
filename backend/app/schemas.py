@@ -28,6 +28,9 @@ class FlowNode(BaseModel):
     type: str = "agent"
     position: Dict[str, float] = Field(default_factory=lambda: {"x": 0, "y": 0})
     data: FlowNodeData = Field(default_factory=FlowNodeData)
+    # 手动拖边框缩放后的尺寸（不填则按内容自适应）
+    width: Optional[float] = None
+    height: Optional[float] = None
 
 
 class FlowEdge(BaseModel):

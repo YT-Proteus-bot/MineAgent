@@ -1,4 +1,4 @@
-import { Handle, Position, type NodeProps } from '@xyflow/react'
+import { Handle, NodeResizer, Position, type NodeProps } from '@xyflow/react'
 import { useStore } from '../store'
 import { isAgentKind, type AgentNode as AgentNodeType, type AgentOrg } from '../types'
 
@@ -42,17 +42,29 @@ export default function AgentNode({ id, data, selected }: NodeProps<AgentNodeTyp
     peers: rawOrg.peers || [],
   }
   const nodeModel = (data.model || {}) as Record<string, any>
+  // 注意：NodeProps 的 width/height 是测量值，这里要用用户拖出来的显式尺寸
+  const resized = useStore((s) => {
+    const n = s.nodes.find((x) => x.id === id)
+    return !!n && (Number(n.width) > 0 || Number(n.height) > 0)
+  })
 
   return (
     <div
       className={`agent-node${selected ? ' selected' : ''} status-${status}${
         violated ? ' violated' : ''
-      }`}
+      }${resized ? ' resized' : ''}`}
       onDoubleClick={() => {
         setSelected(id)
         setInspectorTab('code')
       }}
     >
+      <NodeResizer
+        minWidth={190}
+        minHeight={84}
+        isVisible={selected}
+        lineClassName="node-resize-line"
+        handleClassName="node-resize-handle"
+      />
       <Handle type="target" position={Position.Left} id="in" style={{ left: -5 }} />
       <div className="node-head">
         <div className="node-icon" style={{ background: color }}>

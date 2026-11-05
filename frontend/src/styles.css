@@ -426,18 +426,25 @@ input[type='range'] {
 
 /* ---------------- 画布节点 ---------------- */
 .agent-node {
-  width: 216px;
+  width: 100%;
+  min-width: 216px;
+  height: 100%;
+  min-height: 84px;
+  display: flex;
+  flex-direction: column;
   border-radius: 11px;
   background: linear-gradient(180deg, #172033, #121a2a);
   border: 1px solid var(--border);
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.42);
   font-family: var(--sans);
-  transition: box-shadow 0.16s ease, border-color 0.16s ease, transform 0.16s ease;
-  overflow: hidden;
+  transition: box-shadow 0.16s ease, border-color 0.16s ease;
+  /* 关键：不能 hidden，否则会把伸在边界外的连接点和违规角标裁掉 */
+  overflow: visible;
 }
 .agent-node:hover {
   border-color: #3a4d78;
-  transform: translateY(-1px);
+  /* 不要用 transform：它会改变包含块，导致连接点在 hover 时被裁剪、指针闪烁 */
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.5);
 }
 .agent-node.selected {
   border-color: var(--accent);
@@ -478,6 +485,51 @@ input[type='range'] {
   display: grid;
   place-items: center;
   border: 2px solid #0f1420;
+}
+
+/* ---------------- 节点拖拽缩放 ---------------- */
+.agent-node .node-head {
+  flex: none;
+}
+.agent-node .node-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.agent-node .node-foot {
+  flex: none;
+}
+/* 拉大之后描述不再截断成两行，能多显示几行；再超出就裁掉 */
+.agent-node.resized .node-desc {
+  display: block;
+  -webkit-line-clamp: unset;
+  -webkit-box-orient: unset;
+  overflow: hidden;
+  white-space: pre-wrap;
+}
+.agent-node.resized .node-name,
+.agent-node.resized .node-label {
+  white-space: normal;
+  word-break: break-word;
+}
+/* 拉高之后让描述区吃掉剩余空间，多行文字能自然排下去 */
+.agent-node.resized .node-body {
+  justify-content: flex-start;
+}
+.agent-node.resized .node-desc {
+  flex: 1;
+  min-height: 0;
+}
+.node-resize-line {
+  border-color: rgba(109, 139, 255, 0.75) !important;
+  border-width: 1px !important;
+}
+.node-resize-handle {
+  width: 9px !important;
+  height: 9px !important;
+  border-radius: 2px !important;
+  background: var(--accent) !important;
+  border: 1px solid #0b1019 !important;
 }
 
 /* ---------------- 约束面板 ---------------- */
@@ -588,6 +640,7 @@ input[type='range'] {
   padding: 8px 10px;
   border-bottom: 1px solid var(--border-soft);
   background: rgba(255, 255, 255, 0.02);
+  border-radius: 11px 11px 0 0;
 }
 .node-icon {
   width: 22px;
@@ -656,6 +709,7 @@ input[type='range'] {
   color: var(--muted);
   border-top: 1px solid var(--border-soft);
   padding: 4px 10px;
+  border-radius: 0 0 11px 11px;
 }
 .node-kind {
   font-family: var(--mono);
@@ -751,13 +805,31 @@ input[type='range'] {
 }
 
 .react-flow__handle {
-  width: 10px;
-  height: 10px;
-  background: #33456d;
-  border: 2px solid #0f1420;
+  width: 13px;
+  height: 13px;
+  background: #5b74a8;
+  border: 2px solid #0b1019;
+  z-index: 6;
+  transition: transform 0.12s ease, background 0.12s ease, box-shadow 0.12s ease;
+}
+/* 透明命中区：视觉上还是个小点，但鼠标有 29px 的落点范围，不用瞄准 */
+.react-flow__handle::before {
+  content: '';
+  position: absolute;
+  inset: -8px;
+  border-radius: 50%;
+}
+.agent-node:hover .react-flow__handle {
+  background: #8098d0;
 }
 .react-flow__handle:hover {
   background: var(--accent);
+  transform: scale(1.45);
+  box-shadow: 0 0 0 4px rgba(109, 139, 255, 0.22);
+}
+.react-flow__handle.connectingfrom,
+.react-flow__handle.connectingto {
+  background: var(--accent-2) !important;
 }
 .react-flow__handle-connecting {
   background: var(--accent-2) !important;

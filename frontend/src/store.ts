@@ -69,6 +69,7 @@ interface AppState {
   onNodesChange: (changes: NodeChange<AgentNode>[]) => void
   onEdgesChange: (changes: EdgeChange<FlowEdge>[]) => void
   onConnect: (conn: Connection) => void
+  connectNodes: (source: string, target: string, sourceHandle?: string | null) => void
   setSelected: (id: string | null) => void
   setInspectorTab: (tab: 'props' | 'code') => void
   addNode: (kind: string, position: { x: number; y: number }) => void
@@ -78,6 +79,7 @@ interface AppState {
   clearNodeModel: (nodeId: string) => Promise<void>
   removeNode: (id: string) => void
   duplicateNode: (id: string) => void
+  resetNodeSize: (id: string) => void
   setViewport: (v: { x: number; y: number; zoom: number }) => void
 
   save: () => Promise<boolean>
@@ -418,8 +420,13 @@ export const useStore = create<AppState>((set, get) => ({
 
   onNodesChange: (changes) => {
     const next = applyNodeChanges<AgentNode>(changes as NodeChange<AgentNode>[], get().nodes)
-    // 尺寸测量、选中变化不算「改动了画布内容」
-    const meaningful = changes.some((c) => c.type !== 'dimensions' && c.type !== 'select')
+    // 选中变化、初始尺寸测量不算改动；用户手动拖边框缩放（resizing）要算
+    const meaningful = changes.some((c) => {
+      const anyChange = c as any
+      if (anyChange.type === 'select') return false
+      if (anyChange.type === 'dimensions') return !!anyChange.resizing
+      return true
+    })
     set({ nodes: next, dirty: meaningful ? true : get().dirty })
   },
 
@@ -445,6 +452,24 @@ export const useStore = create<AppState>((set, get) => ({
 
   setSelected: (id) => set({ selectedNodeId: id }),
   setInspectorTab: (tab) => set({ inspectorTab: tab }),
+
+  connectNodes: (source, target, sourceHandle) => {
+    if (source === target) {
+      get().toast('节点不能连到自己', 'err')
+      return
+    }
+    const handle = sourceHandle || 'out'
+    const dup = get().edges.some(
+      (e) => e.source === source && e.target === target && (e.sourceHandle || 'out') === handle,
+    )
+    if (dup) {
+      get().toast('这条连线已经存在了', 'info')
+      return
+    }
+    get().onConnect({ source, target, sourceHandle: handle, targetHandle: 'in' })
+    const targetNode = get().nodes.find((n) => n.id === target)
+    get().toast(`已连接到「${targetNode?.data.label || target}」`, 'ok')
+  },
 
   addNode: (kind, position) => {
     const meta = get().meta
@@ -554,6 +579,15 @@ export const useStore = create<AppState>((set, get) => ({
       data: { ...src.data, name: `${src.data.name}_copy`, status: 'idle' },
     }
     set({ nodes: [...get().nodes, copy], selectedNodeId: newId, dirty: true })
+  },
+
+  resetNodeSize: (id) => {
+    set({
+      nodes: get().nodes.map((n) =>
+        n.id === id ? { ...n, width: undefined, height: undefined } : n,
+      ),
+      dirty: true,
+    })
   },
 
   setViewport: (v) => {

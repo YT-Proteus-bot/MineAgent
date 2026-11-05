@@ -20,6 +20,24 @@ import { DEFAULT_BACKGROUND, isAgentKind } from '../types'
 
 const nodeTypes = { agent: AgentNode }
 
+const BRANCH_TEXT: Record<string, string> = {
+  out: '输出',
+  true: '是（true）',
+  false: '否（false）',
+  loop: '继续（loop）',
+  exit: '退出（exit）',
+  yes: '是',
+  no: '否',
+  approve: '通过',
+  reject: '拒绝',
+}
+
+type LinkerState = null | {
+  source: string
+  handle: string | null
+  step: 'branch' | 'target'
+}
+
 type MenuState =
   | null
   | { kind: 'pane'; x: number; y: number; flow: { x: number; y: number } }
@@ -35,6 +53,7 @@ export default function FlowCanvas() {
   const addNode = useStore((s) => s.addNode)
   const removeNode = useStore((s) => s.removeNode)
   const duplicateNode = useStore((s) => s.duplicateNode)
+  const resetNodeSize = useStore((s) => s.resetNodeSize)
   const updateNode = useStore((s) => s.updateNode)
   const canvas = useStore((s) => s.canvas)
   const meta = useStore((s) => s.meta)
@@ -53,6 +72,31 @@ export default function FlowCanvas() {
   const constraintPanelOpen = useStore((s) => s.constraintPanelOpen)
   const setConstraintPanelOpen = useStore((s) => s.setConstraintPanelOpen)
   const validateNow = useStore((s) => s.validateNow)
+  const connectNodes = useStore((s) => s.connectNodes)
+  const [linker, setLinker] = useState<LinkerState>(null)
+
+  const closeMenu = () => {
+    setLinker(null)
+    setMenu(null)
+  }
+
+  const startLinker = (nodeId: string) => {
+    const node = nodes.find((n) => n.id === nodeId)
+    if (!node) return
+    const def = meta?.nodes.find((x) => x.kind === node.data.kind)
+    const outs = def?.outputs || ['out']
+    setLinker({
+      source: nodeId,
+      handle: outs.length === 1 ? outs[0] : null,
+      step: outs.length === 1 ? 'target' : 'branch',
+    })
+  }
+
+  const finishLink = (targetId: string) => {
+    if (!linker) return
+    connectNodes(linker.source, targetId, linker.handle || 'out')
+    closeMenu()
+  }
 
   // 编辑过程中自动复查约束（停止操作 1.3 秒后）
   useEffect(() => {
@@ -164,6 +208,8 @@ export default function FlowCanvas() {
         maxZoom={2.2}
         deleteKeyCode={['Delete', 'Backspace']}
         zoomOnDoubleClick={false}
+        // 拖线时靠近目标节点就能吸附上去，不用精确点到小圆点
+        connectionRadius={48}
         proOptions={{ hideAttribution: true }}
         connectionLineStyle={{ stroke: '#22d3ee', strokeWidth: 2 }}
         defaultEdgeOptions={{ type: 'smoothstep' }}
@@ -238,8 +284,8 @@ export default function FlowCanvas() {
         </ContextMenu>
       )}
 
-      {menu?.kind === 'node' && (
-        <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)} minWidth={216}>
+      {menu?.kind === 'node' && !linker && (
+        <ContextMenu x={menu.x} y={menu.y} onClose={closeMenu} minWidth={216}>
           <div className="group-title" style={{ padding: '4px 9px 6px' }}>
             {nodes.find((n) => n.id === menu.nodeId)?.data.label}
           </div>
@@ -285,6 +331,12 @@ export default function FlowCanvas() {
           >
             <span className="ico">⧉</span> 复制节点
           </div>
+          <div
+            className="ctx-item"
+            onClick={() => startLinker(menu.nodeId)}
+          >
+            <span className="ico">➜</span> 连线到其它节点…
+          </div>
           {menuNodeIsAgent && (
             <div
               className="ctx-item"
@@ -296,6 +348,15 @@ export default function FlowCanvas() {
               <span className="ico">⚙</span> 配置模型 / API Key
             </div>
           )}
+          <div
+            className="ctx-item"
+            onClick={() => {
+              resetNodeSize(menu.nodeId)
+              setMenu(null)
+            }}
+          >
+            <span className="ico">⇲</span> 重置节点尺寸
+          </div>
           <div className="menu-sep" />
           <div
             className="ctx-item"
@@ -307,6 +368,60 @@ export default function FlowCanvas() {
           >
             <span className="ico">🗑</span> 删除节点
           </div>
+        </ContextMenu>
+      )}
+
+      {/* 右键连线：先选分支（多端口节点），再选目标节点 */}
+      {menu?.kind === 'node' && linker && (
+        <ContextMenu x={menu.x} y={menu.y} onClose={closeMenu} minWidth={272}>
+          <div className="ctx-search">
+            <div className="dim small" style={{ padding: '2px 4px' }}>
+              {linker.step === 'branch'
+                ? `从「${nodes.find((n) => n.id === linker.source)?.data.label}」的哪个出口连出？`
+                : `连到「${nodes.find((n) => n.id === linker.source)?.data.label}」的哪个节点？`}
+            </div>
+          </div>
+          {linker.step === 'branch'
+            ? ((meta?.nodes.find(
+                (x) => x.kind === nodes.find((n) => n.id === linker.source)?.data.kind,
+              )?.outputs || ['out']) as string[]).map((h) => (
+              <div
+                key={h}
+                className="ctx-item"
+                onClick={() => setLinker({ ...linker, handle: h, step: 'target' })}
+              >
+                <span className="ico">→</span> {BRANCH_TEXT[h] || h}
+              </div>
+            ))
+            : nodes
+                .filter((n) => n.id !== linker.source)
+                .map((n) => {
+                  const def = meta?.nodes.find((x) => x.kind === n.data.kind)
+                  return (
+                    <div key={n.id} className="ctx-item" onClick={() => finishLink(n.id)}>
+                      <span className="ico" style={{ color: def?.color || '#8b5cf6' }}>
+                        {def?.icon || '◆'}
+                      </span>
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {n.data.label}
+                      </span>
+                      <span className="hint">{n.data.name}</span>
+                    </div>
+                  )
+                })}
+          {linker.step === 'target' && nodes.filter((n) => n.id !== linker.source).length === 0 && (
+            <div className="ctx-item dim" style={{ cursor: 'default' }}>
+              画布上还没有其它节点
+            </div>
+          )}
+          {linker.step === 'target' && (
+            <>
+              <div className="menu-sep" />
+              <div className="ctx-item" onClick={() => setLinker({ ...linker, step: 'branch' })}>
+                <span className="ico">←</span> 换个出口
+              </div>
+            </>
+          )}
         </ContextMenu>
       )}
 
