@@ -3,7 +3,6 @@ import { api } from '../api'
 import { useStore } from '../store'
 import Modal from './Modal'
 import ModelNameField from './ModelNameField'
-import CommunityModal from './CommunityModal'
 import type { GlobalSettings, ModelConfig } from '../types'
 
 /** 默认服务商是 DeepSeek，其余按需切换 */
@@ -36,9 +35,6 @@ export function UserCenterModal({ onClose }: { onClose: () => void }) {
   const [key, setKey] = useState('')
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState('')
-  const [communityOpen, setCommunityOpen] = useState(false)
-  const refreshCanvases = useStore((s) => s.refreshCanvases)
-  const loadCanvas = useStore((s) => s.loadCanvas)
 
   useEffect(() => {
     api.getSettings().then(setForm).catch((e) => toast(String(e.message || e), 'err'))
@@ -56,7 +52,7 @@ export function UserCenterModal({ onClose }: { onClose: () => void }) {
       })
       setForm(next)
       setKey('')
-      toast('用户中心配置已保存', 'ok')
+      toast('模型配置已保存', 'ok')
     } catch (e: any) {
       toast(`保存失败：${e.message || e}`, 'err')
     }
@@ -81,15 +77,12 @@ export function UserCenterModal({ onClose }: { onClose: () => void }) {
 
   return (
     <Modal
-      title="用户中心"
-      subtitle="这里配置的是整个项目默认使用的大模型连接（编排与运行时的兜底配置）。单个画布可以在「模型」里单独覆盖。"
+      title="模型配置"
+      subtitle="整个项目默认使用的大模型连接（编排与运行时的兜底配置）。单个画布可以在「模型」里单独覆盖。"
       onClose={onClose}
       footer={
         <>
           <button onClick={onClose}>取消</button>
-          <button onClick={() => setCommunityOpen(true)} title="GitHub 登录、社区模板加载、上传配置">
-            🌐 社区模板
-          </button>
           <div style={{ flex: 1 }} />
           <button className="primary" onClick={save}>
             保存
@@ -159,16 +152,6 @@ export function UserCenterModal({ onClose }: { onClose: () => void }) {
         完全离线时可以用项目自带 mock 服务：Base URL 填 <code className="mono">http://127.0.0.1:8012/v1</code>，
         模型填 <code className="mono">mock-model</code>，key 随便填。
       </div>
-
-      {communityOpen && (
-        <CommunityModal
-          onClose={() => setCommunityOpen(false)}
-          onLoaded={async (id) => {
-            await refreshCanvases()
-            await loadCanvas(id)
-          }}
-        />
-      )}
     </Modal>
   )
 }
@@ -181,7 +164,7 @@ export function CanvasModelModal({ onClose }: { onClose: () => void }) {
   const [key, setKey] = useState('')
   const [fallback, setFallback] = useState<GlobalSettings | null>(null)
 
-  // 拉一次用户中心配置，好让用户看清「留空时实际会用哪一份」
+  // 拉一次全局模型配置，好让用户看清「留空时实际会用哪一份」
   useEffect(() => {
     api
       .getSettings()
@@ -209,7 +192,7 @@ export function CanvasModelModal({ onClose }: { onClose: () => void }) {
   return (
     <Modal
       title={`画布模型 · ${canvas.name}`}
-      subtitle="这个画布运行时优先使用这里的配置；留空则回退到「用户中心」里的全局配置。"
+      subtitle="这个画布运行时优先使用这里的配置；留空则回退到「模型配置」里的全局配置。"
       onClose={onClose}
       footer={
         <>
@@ -245,7 +228,7 @@ export function CanvasModelModal({ onClose }: { onClose: () => void }) {
         <span>Base URL</span>
         <input
           value={form.base_url}
-          placeholder="留空则使用用户中心的全局配置"
+          placeholder="留空则使用模型配置里的全局配置"
           onChange={(e) => setForm({ ...form, base_url: e.target.value })}
         />
       </label>
@@ -293,9 +276,9 @@ export function CanvasModelModal({ onClose }: { onClose: () => void }) {
         <code className="mono">{effectiveBase}</code>
         <br />
         {form.model || form.base_url ? (
-          <span style={{ color: 'var(--warn)' }}>↑ 用的是画布自己的配置（会覆盖用户中心）</span>
+          <span style={{ color: 'var(--warn)' }}>↑ 用的是画布自己的配置（会覆盖模型配置）</span>
         ) : (
-          <span style={{ color: 'var(--ok)' }}>↑ 画布没单独配，跟随「用户中心」</span>
+          <span style={{ color: 'var(--ok)' }}>↑ 画布没单独配，跟随「模型配置」</span>
         )}
         <br />
         运行时 key 通过环境变量注入子进程，不会明文写进项目文件夹。项目里也支持自己放
