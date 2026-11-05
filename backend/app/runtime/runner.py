@@ -27,6 +27,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+# 不生成 __pycache__：保证这个项目目录任何时候都干净，能直接打包 / 拷走
+sys.dont_write_bytecode = True
 
 import runtime_sdk  # noqa: E402
 from runtime_sdk import EVENT_PREFIX, NodeContext, ToolSpec, emit_event  # noqa: E402

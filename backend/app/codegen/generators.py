@@ -456,14 +456,102 @@ def main(user_input: str):
         f"MINEAGENT_MODEL={cfg['model']}\n"
     )
     write(".env.example", env_example)
-    write(".gitignore", ".env\n.store.db\noutputs/*\n__pycache__/\n")
+    write(".gitignore",
+          ".env\n.venv/\n.store.db\n__pycache__/\n*.pyc\n"
+          "outputs/*\n!outputs/.gitkeep\n")
+
+    # 空目录留占位文件，保证复制 / 打包 / git 之后目录结构不丢
+    write("skills/.gitkeep", "# 技能文件（skill 节点的 skill.md）放这里\n")
+    write("outputs/.gitkeep", "# 运行产物会写到这个目录\n")
+
+    # 一键运行脚本：拿到这个文件夹就能跑，不需要记命令
+    write("run.ps1", "\ufeff" + _RUN_PS1)
+    write("run.sh", _RUN_SH)
 
     write("README.md", _readme(name, slug, framework, spec))
 
     # 顺手把画布快照存一份，方便脱离数据库回溯
     write("canvas.snapshot.json", json.dumps(graph, ensure_ascii=False, indent=2))
 
+    _clean_caches(project_dir)
+
     return project_dir, written
+
+
+def _clean_caches(project_dir: Path) -> None:
+    """清掉运行留下的 __pycache__，让目录保持可直接打包的状态。"""
+    for cache in project_dir.rglob("__pycache__"):
+        shutil.rmtree(cache, ignore_errors=True)
+    for pyc in project_dir.rglob("*.pyc"):
+        try:
+            pyc.unlink()
+        except OSError:
+            pass
+
+
+_RUN_PS1 = '''<#
+  一键运行这个智能体项目。
+
+    .\\run.ps1 "帮我调研一下国产 Agent 框架"
+    .\\run.ps1                       # 不带参数会提示输入
+    .\\run.ps1 -UseFramework "..."   # 走框架原生入口（需先 -Install）
+    .\\run.ps1 -Install              # 只安装 requirements.txt 里的框架依赖
+
+  这个目录是自包含的：runtime_sdk.py / runner.py 都在这里，
+  换成任何一台装了 Python 3.9+ 的机器都能直接跑，不依赖 MineAgent 平台。
+#>
+param(
+    [switch]$Install,
+    [switch]$UseFramework,
+    [Parameter(ValueFromRemainingArguments = $true)][string[]]$InputArgs
+)
+
+$ErrorActionPreference = 'Stop'
+$Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+Set-Location $Root
+
+$python = 'python'
+if (Test-Path (Join-Path $Root '.venv\\Scripts\\python.exe')) {
+    $python = Join-Path $Root '.venv\\Scripts\\python.exe'
+}
+
+if ($Install) {
+    Write-Host '>>> 安装 requirements.txt…' -ForegroundColor Cyan
+    & $python -m pip install -r requirements.txt
+    if (-not $UseFramework) { exit 0 }
+}
+
+$entry = if ($UseFramework) { 'agent.py' } else { 'runner.py' }
+$text = if ($InputArgs -and $InputArgs.Count -gt 0) { $InputArgs -join ' ' }
+        else { Read-Host '请输入要交给智能体的任务' }
+if (-not $text) { Write-Host '没有输入，退出。' -ForegroundColor Yellow; exit 1 }
+
+Write-Host ">>> 用 $entry 开始运行" -ForegroundColor Cyan
+& $python $entry --input $text
+'''
+
+_RUN_SH = '''#!/usr/bin/env bash
+# 一键运行： ./run.sh "你的任务"
+#   ./run.sh --install          安装 requirements.txt 里的依赖
+#   ./run.sh --framework "..."  走框架原生入口
+set -e
+cd "$(dirname "$0")"
+PY=python3
+[ -x ".venv/bin/python" ] && PY=".venv/bin/python"
+
+if [ "$1" = "--install" ]; then
+  "$PY" -m pip install -r requirements.txt
+  exit 0
+fi
+
+ENTRY=runner.py
+if [ "$1" = "--framework" ]; then ENTRY=agent.py; shift; fi
+
+TEXT="${1:-}"
+[ -z "$TEXT" ] && TEXT="${MINEAGENT_INPUT:-}"
+echo ">>> 用 $ENTRY 开始运行"
+exec "$PY" "$ENTRY" --input "$TEXT"
+'''
 
 
 def _readme(name: str, slug: str, framework: str, spec: Dict[str, Any]) -> str:
@@ -475,12 +563,29 @@ def _readme(name: str, slug: str, framework: str, spec: Dict[str, Any]) -> str:
         f"- 框架：**{fw.get('label', framework)}**（{fw.get('badge', '自定义')}）",
         f"- 节点数：{len(spec['nodes'])}，连线数：{len(spec['edges'])}",
         "",
+        "## 这个目录是自包含的",
+        "",
+        "整个文件夹可以单独拷走、单独部署，不依赖 MineAgent 平台：",
+        "`runtime_sdk.py`、`runner.py` 都已经放在目录里，只用 Python 标准库；",
+        "只要有 Python 3.9+，换一台机器也能直接跑。",
+        "",
+        "- 不要把 `nodes/` 或 `runtime_sdk.py` 拆出去单独运行",
+        "- 项目目录内不要有 `__pycache__`（.gitignore 已忽略，执行器也不会生成）",
+        "",
         "## 运行",
         "",
+        "```powershell",
+        "# Windows：一键脚本（自动检查依赖、找不到 .venv 就用系统 Python）",
+        ".\\run.ps1 \"你的问题\"",
+        "",
+        "# 或者手动执行",
+        "python agent.py --input \"你的问题\"   # 框架原生入口，没装框架会自动回退",
+        "python runner.py --input \"你的问题\"  # 内置执行器，零依赖，任何画布都能跑",
+        "```",
+        "",
         "```bash",
-        "python agent.py --input \"你的问题\"",
-        "# 或只跑内置执行器",
-        "python runner.py --input \"你的问题\"",
+        "# macOS / Linux",
+        "./run.sh \"你的问题\"",
         "```",
         "",
         "## 配置模型",
@@ -495,10 +600,13 @@ def _readme(name: str, slug: str, framework: str, spec: Dict[str, Any]) -> str:
         "agent.py         # 框架原生入口",
         "runner.py        # 内置图执行器（任何画布都能跑）",
         "runtime_sdk.py   # 节点可用的全部能力（ctx.*）",
+        "run.ps1          # Windows 一键运行",
+        "run.sh           # macOS / Linux 一键运行",
         "nodes/           # 每个节点一个 .py，网页里编辑的就是这里",
         "skills/          # skill.md 技能文件",
         "config.json      # 模型配置（不含 key）",
         "outputs/         # 运行产物",
+        ".env.example     # 复制成 .env 填 key，脱离网页独立运行用",
         "```",
         "",
         "## 节点清单",

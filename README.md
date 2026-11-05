@@ -220,13 +220,16 @@ MineAgent/
 
 ### 一个生成出来的项目长什么样
 
-以 `projects/竞品调研智能体/` 为例：
+**`projects/` 下的每个文件夹都是一个完整的、可独立部署的 Agent 后端项目**：
+把自己那个文件夹整个拷走就能跑，不依赖 MineAgent 平台，也不依赖数据库。
 
 ```
 agent.json          # 画布图定义（节点、连线、参数），保存时自动覆盖
 agent.py            # 框架原生入口：LangGraph / AutoGen / CrewAI 真实 API
 runner.py           # 内置图执行器，任何画布都能跑（不需要装框架）
-runtime_sdk.py      # 节点里 ctx.* 的全部能力
+runtime_sdk.py      # 节点里 ctx.* 的全部能力（只用标准库）
+run.ps1             # Windows 一键运行
+run.sh              # macOS / Linux 一键运行
 config.json         # 模型配置（不含 key）
 .env.example        # 想脱离网页独立运行时，复制成 .env 填 key
 nodes/
@@ -236,19 +239,35 @@ nodes/
   search_tool.py
   observation_5.py
   ...
-skills/             # skill.md 技能文件（skill 节点粘贴的内容会落到这里）
-outputs/            # 运行产物（artifact_writer 节点写这里）
-requirements.txt    # 该框架需要的依赖
+skills/             # skill.md 技能文件（带 .gitkeep，打包不会丢目录）
+outputs/            # 运行产物（artifact_builder 节点写这里）
+requirements.txt    # 该框架需要的依赖（不用框架时为空）
+.gitignore          # 已忽略 .env / .venv / .store.db / outputs / __pycache__
 README.md           # 这个项目自己的说明
 ```
+
+自包含这块做了几件具体的事：
+
+- `runtime_sdk.py` 与 `runner.py` 都复制进项目目录，只用 Python 标准库，
+  **只要机器上有 Python 3.9+ 就能跑**，不需要 pip 装任何东西
+- 执行器设置了 `sys.dont_write_bytecode`，跑完目录里不会冒 `__pycache__`
+- 每次保存都会清掉残留的 `__pycache__`，目录始终是可直接打包的状态
+- `skills/`、`outputs/` 带 `.gitkeep`，进 git 或压缩后目录结构不会丢
 
 单独运行：
 
 ```powershell
 cd "projects\竞品调研智能体"
-python agent.py --input "帮我调研一下国产 Agent 编排平台"
-python runner.py --input "..."      # 不依赖框架的执行器
+.\run.ps1 "帮我调研一下国产 Agent 编排平台"      # 一键（默认走零依赖 runner）
+
+python runner.py --input "..."                  # 或者手动
+python agent.py --input "..."                   # 框架原生入口（没装框架会自动回退）
+.\run.ps1 -Install                              # 需要原生框架时再装依赖
+.\run.ps1 -UseFramework "..."                   # 装完依赖走框架原生入口
 ```
+
+实测：把整个目录拷到别的路径、用系统 Python（不带本项目的 .venv）执行
+`run.ps1`，可以直接跑通。
 
 ---
 
