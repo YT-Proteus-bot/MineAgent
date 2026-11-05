@@ -34,6 +34,7 @@ export default function AgentNode({ id, data, selected, dragging }: NodeProps<Ag
   const icon = def?.icon ?? '◆'
   const status = (data.status || 'idle') as string
   const violated = useStore((s) => s.violatedNodeIds.includes(id))
+  const highlighted = useStore((s) => s.highlightedNodeIds.includes(id))
   const isAgent = isAgentKind(data.kind)
   const mode = ((data.params || {}).mode as string) || 'react'
   const rawOrg = (data.org || {}) as Partial<AgentOrg>
@@ -59,7 +60,7 @@ export default function AgentNode({ id, data, selected, dragging }: NodeProps<Ag
     <div
       className={`agent-node${selected ? ' selected' : ''} status-${status}${
         violated ? ' violated' : ''
-      }${resized ? ' resized' : ''}`}
+      }${resized ? ' resized' : ''}${highlighted ? ' highlighted' : ''}`}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       onDoubleClick={() => openNodePanel(id, 'code')}

@@ -181,6 +181,7 @@ interface AppState {
   selectedNodeId: string | null
   inspectorTab: 'props' | 'code'
   rightTab: 'assistant' | 'node'
+  highlightedNodeIds: string[]
   dirty: boolean
   saving: boolean
   lastSaved: string
@@ -225,6 +226,10 @@ interface AppState {
   setInspectorTab: (tab: 'props' | 'code') => void
   setRightTab: (tab: 'assistant' | 'node') => void
   openNodePanel: (id: string, tab?: 'props' | 'code') => void
+  setHighlightedNodes: (ids: string[]) => void
+  updateEdgeData: (edgeId: string, patch: Record<string, any>) => void
+  updateEdgeEndpoint: (edgeId: string, which: 'source' | 'target', nodeId: string) => void
+  removeEdge: (edgeId: string) => void
   addNode: (kind: string, position: { x: number; y: number }) => void
   updateNode: (id: string, patch: Partial<FlowNodeData>) => void
   updateNodeOrg: (nodeId: string, patch: Partial<AgentOrg>) => void
@@ -354,6 +359,7 @@ export const useStore = create<AppState>((set, get) => ({
   selectedNodeId: null,
   inspectorTab: 'props',
   rightTab: 'assistant',
+  highlightedNodeIds: [],
   dirty: false,
   saving: false,
   lastSaved: '',
@@ -673,6 +679,61 @@ export const useStore = create<AppState>((set, get) => ({
   setRightTab: (tab) => set({ rightTab: tab }),
   openNodePanel: (id, tab = 'props') =>
     set({ selectedNodeId: id, rightTab: 'node', inspectorTab: tab }),
+
+  setHighlightedNodes: (ids) => set({ highlightedNodeIds: ids }),
+
+  updateEdgeData: (edgeId, patch) => {
+    set({
+      edges: get().edges.map((e) =>
+        e.id === edgeId ? { ...e, data: { ...(e.data || {}), ...patch } } : e,
+      ),
+      dirty: true,
+    })
+  },
+
+  updateEdgeEndpoint: (edgeId, which, nodeId) => {
+    const edges = get().edges
+    const edge = edges.find((e) => e.id === edgeId)
+    if (!edge) return
+    const nodes = get().nodes
+    const src = which === 'source' ? nodeId : edge.source
+    const dst = which === 'target' ? nodeId : edge.target
+    const kindOf = (id: string) => nodes.find((n) => n.id === id)?.data.kind || ''
+    const labelOf = (id: string) => nodes.find((n) => n.id === id)?.data.label || id
+
+    if (src === dst) {
+      get().toast('连线两端不能是同一个节点', 'err')
+      return
+    }
+    if (kindOf(src) === 'output') {
+      get().toast('输出节点不能作为连线起点', 'err')
+      return
+    }
+    if (kindOf(dst) === 'input') {
+      get().toast('输入节点不能作为连线终点', 'err')
+      return
+    }
+    if (edges.some((e) => e.id !== edgeId && e.source === src && e.target === dst)) {
+      get().toast('这两个节点之间已经有连线了', 'info')
+      return
+    }
+
+    set({
+      edges: edges.map((e) => (e.id === edgeId ? { ...e, [which]: nodeId } : e)),
+      highlightedNodeIds: [src, dst],
+      dirty: true,
+    })
+    get().toast(
+      which === 'source'
+        ? `起点已改为「${labelOf(nodeId)}」`
+        : `终点已改为「${labelOf(nodeId)}」`,
+      'ok',
+    )
+  },
+
+  removeEdge: (edgeId) => {
+    set({ edges: get().edges.filter((e) => e.id !== edgeId), dirty: true })
+  },
 
   connectNodes: (source, target, sourceHandle) => {
     if (source === target) {

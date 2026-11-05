@@ -61,7 +61,13 @@ export type NodeStatus = 'idle' | 'running' | 'done' | 'error' | 'skipped'
 
 export type AgentNode = Node<FlowNodeData, 'agent'>
 
-export type FlowEdge = Edge<{ branch?: string } & Record<string, unknown>>
+export type FlowEdge = Edge<
+  {
+    branch?: string
+    /** 拖动连线时产生的人工弯曲偏移，不改 source / target */
+    controlOffset?: { x: number; y: number }
+  } & Record<string, unknown>
+>
 
 export interface GraphPayload {
   nodes: AgentNode[]

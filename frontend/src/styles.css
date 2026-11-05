@@ -1000,6 +1000,42 @@ input[type='range'] {
   white-space: nowrap;
   font-family: var(--sans);
 }
+
+/* 连线中点的手柄，按住可调整弯曲走向 */
+.edge-drag {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #16223a;
+  border: 1px solid #4a6ea8;
+  display: grid;
+  place-items: center;
+  cursor: grab;
+  pointer-events: all;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+.edge-drag:hover {
+  border-color: var(--accent);
+  background: #1e2d4c;
+}
+.edge-drag:active {
+  cursor: grabbing;
+}
+.edge-drag span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+/* 点击连线时，两端节点高亮 */
+.agent-node.highlighted {
+  border-color: var(--accent-2);
+  box-shadow: 0 0 0 2px rgba(34, 211, 238, 0.38), 0 0 24px rgba(34, 211, 238, 0.28);
+}
+.agent-node.highlighted .node-label {
+  color: #a8f0ff;
+}
 .react-flow__attribution {
   display: none;
 }

@@ -77,6 +77,33 @@ export default function FlowCanvas() {
   const validateNow = useStore((s) => s.validateNow)
   const connectNodes = useStore((s) => s.connectNodes)
   const autoLayout = useStore((s) => s.autoLayout)
+  const setHighlightedNodes = useStore((s) => s.setHighlightedNodes)
+  const updateEdgeData = useStore((s) => s.updateEdgeData)
+  const updateEdgeEndpoint = useStore((s) => s.updateEdgeEndpoint)
+  const removeEdge = useStore((s) => s.removeEdge)
+
+  const [edgeMenu, setEdgeMenu] = useState<null | {
+    x: number
+    y: number
+    edgeId: string
+    mode: 'root' | 'source' | 'target'
+  }>(null)
+
+  const handleEdgeClick = useCallback(
+    (_evt: React.MouseEvent, edge: any) => {
+      setHighlightedNodes([edge.source, edge.target])
+    },
+    [setHighlightedNodes],
+  )
+
+  const handleEdgeContextMenu = useCallback(
+    (evt: React.MouseEvent, edge: any) => {
+      evt.preventDefault()
+      setHighlightedNodes([edge.source, edge.target])
+      setEdgeMenu({ x: evt.clientX, y: evt.clientY, edgeId: edge.id, mode: 'root' })
+    },
+    [setHighlightedNodes],
+  )
   const [linker, setLinker] = useState<LinkerState>(null)
 
   const closeMenu = () => {
@@ -214,9 +241,12 @@ export default function FlowCanvas() {
           // 单击不打开详情：节点信息看 hover 浮层，右键 / 双击才进详情面板
           setSelected(node.id)
         }}
+        onEdgeClick={handleEdgeClick}
+        onEdgeContextMenu={handleEdgeContextMenu}
         onPaneClick={() => {
           setSelected(null)
           setMenu(null)
+          setHighlightedNodes([])
         }}
         onNodeContextMenu={handleNodeContextMenu}
         onPaneContextMenu={handlePaneContextMenu}
@@ -460,6 +490,101 @@ export default function FlowCanvas() {
 
       {modelNodeId && (
         <NodeModelModal nodeId={modelNodeId} onClose={() => setModelNodeId(null)} />
+      )}
+
+      {/* 连线右键菜单：改起点 / 改终点 / 重置弯曲 / 删除 */}
+      {edgeMenu && (
+        <ContextMenu
+          x={edgeMenu.x}
+          y={edgeMenu.y}
+          onClose={() => setEdgeMenu(null)}
+          minWidth={230}
+        >
+          {edgeMenu.mode === 'root' ? (
+            <>
+              <div className="group-title" style={{ padding: '4px 9px 6px' }}>
+                这条连线
+              </div>
+              <div
+                className="ctx-item"
+                onClick={() => setEdgeMenu({ ...edgeMenu, mode: 'source' })}
+              >
+                <span className="ico">⇤</span> 修改起点
+              </div>
+              <div
+                className="ctx-item"
+                onClick={() => setEdgeMenu({ ...edgeMenu, mode: 'target' })}
+              >
+                <span className="ico">⇥</span> 修改终点
+              </div>
+              <div
+                className="ctx-item"
+                onClick={() => {
+                  updateEdgeData(edgeMenu.edgeId, { controlOffset: { x: 0, y: 0 } })
+                  setEdgeMenu(null)
+                }}
+              >
+                <span className="ico">↺</span> 重置弯曲
+              </div>
+              <div className="menu-sep" />
+              <div
+                className="ctx-item"
+                style={{ color: 'var(--err)' }}
+                onClick={() => {
+                  removeEdge(edgeMenu.edgeId)
+                  setHighlightedNodes([])
+                  setEdgeMenu(null)
+                }}
+              >
+                <span className="ico">🗑</span> 删除这条线
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="ctx-search">
+                <div className="dim small" style={{ padding: '2px 4px' }}>
+                  选择新的{edgeMenu.mode === 'source' ? '起点' : '终点'}
+                </div>
+              </div>
+              {nodes
+                .filter((n) => {
+                  const kind = n.data.kind
+                  if (edgeMenu.mode === 'source' && kind === 'output') return false
+                  if (edgeMenu.mode === 'target' && kind === 'input') return false
+                  return true
+                })
+                .map((n) => {
+                  const def = meta?.nodes.find((x) => x.kind === n.data.kind)
+                  return (
+                    <div
+                      key={n.id}
+                      className="ctx-item"
+                      onClick={() => {
+                        updateEdgeEndpoint(
+                          edgeMenu.edgeId,
+                          edgeMenu.mode as 'source' | 'target',
+                          n.id,
+                        )
+                        setEdgeMenu(null)
+                      }}
+                    >
+                      <span className="ico" style={{ color: def?.color || '#8b5cf6' }}>
+                        {def?.icon || '◆'}
+                      </span>
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {n.data.label}
+                      </span>
+                      <span className="hint">{n.data.name}</span>
+                    </div>
+                  )
+                })}
+              <div className="menu-sep" />
+              <div className="ctx-item" onClick={() => setEdgeMenu({ ...edgeMenu, mode: 'root' })}>
+                <span className="ico">←</span> 返回
+              </div>
+            </>
+          )}
+        </ContextMenu>
       )}
     </div>
   )
