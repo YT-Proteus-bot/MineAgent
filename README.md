@@ -11,6 +11,13 @@
 - 存储：SQLite 存画布与配置；`projects/<画布名>/` 存生成出来的 Agent 项目
 - 启动：双击 `start.bat`（或 `.\start.ps1`），一个端口，一个地址
 
+最近新增：
+
+- 🧩 **社区模板**：一键把画布提成 GitHub PR，也能在应用里加载别人分享的模板
+- ⚡ **流式运行**：模型输出逐 token 回显，执行到哪个节点哪个节点高亮，每个节点的输出都留在运行日志里
+- 🎯 **33 个推理模式模板**：选一个模式直接生成对应架构，不用从空白画布搭
+- 🎨 画布默认改成**纸白**底色，长时间看画布不刺眼
+
 ---
 
 ## 快速开始
@@ -37,7 +44,7 @@
 .\.venv\Scripts\python.exe tools\mock_llm.py --port 8012
 ```
 
-然后在「用户中心」把 Base URL 填 `http://127.0.0.1:8012/v1`、模型填 `mock-model`、Key 随便填，
+然后在「用户中心 → 模型配置」把 Base URL 填 `http://127.0.0.1:8012/v1`、模型填 `mock-model`、Key 随便填，
 整条链路（画布 → 代码 → 运行 → 事件流）就能完整跑起来。
 
 ---
@@ -50,7 +57,9 @@
 
 ![节点代码编辑](docs/screenshots/03-code-editor.png)
 
-点运行后，每个节点的执行过程、耗时、分支走向会实时回显，最终结果单独展示：
+点运行后，执行到哪个节点，哪个节点就会实时高亮（脉冲边框 +「运行中」角标）；
+运行面板逐条打印「执行到哪个节点、耗时多少、输出什么」，模型输出逐 token 流式回显，
+最终结果单独展示：
 
 ![运行面板](docs/screenshots/05-run.png)
 
@@ -68,7 +77,8 @@
 | 右上角「选择模式」 | 框架**左边**的下拉，列出该框架支持的推理模式（ReAct / CoT / Plan-and-Execute / 群聊…），选中后作为画布默认，新建 agent 节点会用它 |
 | 右上角下拉 | 选择 Agent 框架（LangChain/LangGraph、AutoGen、CrewAI…），切换后重建架构图 |
 | 右上角「模型」 | 配置**这个画布**用的大模型与 API Key |
-| 右上角「用户中心」 | 配置**整个项目**的全局 API Key（画布没单独配置时回退到这里） |
+| 右上角「用户中心」 | 账户与配置下拉：GitHub 账户 / 模型配置 / 公共模板 |
+| 运行按钮右侧「☁ 上传模板」 | 把当前画布和项目文件贡献成社区模板，自动创建 GitHub PR（不含任何密钥） |
 | 右键空白画布 | 弹出节点面板，110 种细粒度节点任选（带搜索）；新增后**按约束自动连线** |
 | 鼠标划过节点面板条目 | 右侧弹出该节点的「概念 / 解释 / 用途 / 编码建议」 |
 | 右键任意节点 | 编辑代码逻辑 / 编辑属性参数 / 重命名标识 / 复制 / 删除 |
@@ -81,7 +91,7 @@
 | 单击节点 | 只选中（用于连线和缩放），**不会**切换右侧面板 |
 | 右键任意节点 | 打开右侧「节点详情」并弹出操作菜单 |
 | 双击节点 | 直接打开代码编辑器 |
-| 右侧「AI 助手」 | 常驻对话面板，用用户中心的 key 解答框架 / 编排问题 |
+| 右侧「AI 助手」 | 常驻对话面板，用「用户中心 → 模型配置」的 key 解答框架 / 编排问题 |
 | 节点属性「推理模式」 | 每个 agent 单独选 ReAct / Plan-and-Execute / Goal / Reflexion / ToolCall / Simple |
 | 节点属性「组织关系」 | 指定上级、下级、平级 agent，改一边另一端自动同步 |
 | 右键 agent →「配置模型」 | 给单个 agent 配独立模型与 API Key（key 加密入库，不写进项目文件） |
@@ -123,7 +133,7 @@
 
 ### 画布背景
 
-画布默认是**透明**的（露出页面底色），也可以换成任意底色，或者上传自己的背景图：
+画布默认是**纸白**色（`#f8fafc`），配浅灰点阵网格；也可以换成任意底色，或者上传自己的背景图：
 
 ![画布背景](docs/screenshots/06-background.png)
 
@@ -167,9 +177,42 @@ ctx.delegate("名字", 任务)   # 把活派给某个 agent，等它返回结果
 所以画一张 supervisor + 若干 worker、勾好上下级，就能直接跑出一套分层协作。
 
 **节点级模型**：右键 agent 节点 →「配置模型 / API Key」，可以给这个 agent 单独指定
-服务商、Base URL、模型名和 Key。它优先于画布配置，画布配置又优先于用户中心的全局配置。
+服务商、Base URL、模型名和 Key。它优先于画布配置，画布配置又优先于「模型配置」里的全局配置。
 Key 加密存在本机 `agent_models` 表，运行时通过环境变量 `MINEAGENT_KEY_<节点ID>` 注入子进程，
 不会出现在 `agent.json` 或任何项目文件里。
+
+### 社区模板（GitHub 分享）
+
+画布可以像配置文件一样分享：把自己的作品提 PR 到社区仓库，别人在应用里一键加载成新画布。
+入口都在右上角「用户中心」下拉里：
+
+![用户中心下拉](docs/screenshots/13-user-center.png)
+
+**上传自己的模板**：点运行按钮右侧的「☁ 上传模板」，填名称、描述、标签和署名。
+提交后后端会调 GitHub API 自动 fork / 建分支 / 提交文件 / 创建 Pull Request，
+由仓库维护者审批合并。
+
+![上传为社区模板](docs/screenshots/16-upload.png)
+
+**加载别人的模板**：用户中心 →「公共模板」，列表来自社区仓库的 `templates/` 目录，
+点「加载」会自动新建一张画布，把节点、连线、参数和代码一起下载进来。
+
+![社区模板](docs/screenshots/15-community.png)
+
+**连接 GitHub**：用户中心 →「GitHub 账户」，填模板仓库 `owner/repo` 和 OAuth App 的
+Client ID / Secret，点「连接 GitHub」跳转网页授权（`public_repo` + `read:user`），
+回调后 token 加密存在本机。OAuth App 的 Authorization callback URL 要填
+`http://127.0.0.1:8000/api/github/callback`（页面里会显示当前地址）。
+
+![GitHub 账户](docs/screenshots/14-github.png)
+
+上传内容与安全：
+
+- 会上传：`templates/<slug>/meta.json`、脱敏后的 `canvas.json`，以及 `project/` 下的白名单文件
+  （`agent.py`、`agent.json`、`config.json`、README、requirements、run 脚本、skills）
+- **不会上传**：任何 API Key、`api_key_cipher`、OAuth token、`.env`、本机背景图路径；
+  发布前统一递归剔除，`config.json` 的 `api_key_env` 会重置为 `MINEAGENT_API_KEY`
+- 模板仓库需要是**公开仓库**（申请的是 `public_repo` 权限），第一次上传前先初始化一个 README
 
 ### 内置 AI 助手
 
@@ -177,13 +220,13 @@ Key 加密存在本机 `agent_models` 表，运行时通过环境变量 `MINEAGE
 
 ![AI 助手](docs/screenshots/11-assistant.png)
 
-- 用的是**你在「用户中心」里配的 key**，不需要额外配置
+- 用的是**你在「用户中心 → 模型配置」里配的 key**，不需要额外配置
 - 默认带上画布上下文：画布名、框架、节点清单、约束未通过的项、最近一次运行的报错、
   当前选中节点——所以可以直接问「我这张画布为什么跑不起来」
 - 流式输出，可随时停止；「＋ 新对话」开一轮新的
 - 它只做问答，不会替你改画布
 
-没配 key 时面板会提示去用户中心配置，不会静默失败。
+没配 key 时面板会提示去「用户中心 → 模型配置」，不会静默失败。
 
 ### 编排约束
 
@@ -442,6 +485,8 @@ python agent.py --input "..."
 
 顶部「选择模式」下拉会按当前框架列出可选模式，33 个模式按框架的能力挑配：
 
+![模式选择](docs/screenshots/12-modes.png)
+
 | 框架 | 模式（个数） |
 | --- | --- |
 | LangChain / LangGraph | 单次调用、CoT、函数调用、ReAct、Plan-and-Execute、ReWOO、反思、目标驱动、自洽投票、Tree-of-Thoughts、主管调度、分治汇总（12） |
@@ -517,7 +562,7 @@ python agent.py --input "..."
 
 1. **节点级**：右键 agent 节点 →「配置模型 / API Key」（只影响这个 agent）；
 2. **画布级**：右上角「模型」→ 填 Base URL / 模型名 / API Key（只影响这个画布）；
-3. **全局**：右上角「用户中心」→ 配置整个项目默认使用的 key（兜底）；
+3. **全局**：右上角「用户中心 → 模型配置」→ 配置整个项目默认使用的 key（兜底）；
 4. **项目文件**：在 `projects/<画布>/.env` 里写 `MINEAGENT_API_KEY=sk-xxx`（脱离网页独立运行时用）。
 
 填好可点「测试连接」立即验证。Key 加密存在本机 `backend/data/mineagent.db`，
@@ -525,7 +570,7 @@ python agent.py --input "..."
 节点级的 key 存在 `agent_models` 表，运行时只以 `MINEAGENT_KEY_<节点ID>` 环境变量的形式注入子进程。
 
 **模型名不用手敲**：填完 Base URL 和 API Key 后，点输入框右边的「⟳ 获取列表」，
-会调服务商的 `/v1/models` 把可用模型拉下来填进下拉候选（三处配置都支持：用户中心 / 画布模型 / 节点模型）。
+会调服务商的 `/v1/models` 把可用模型拉下来填进下拉候选（三处配置都支持：模型配置 / 画布模型 / 节点模型）。
 如果服务商不提供这个接口，会提示你直接手填，输入框始终可以自由输入。
 
 常见服务商的 Base URL 内置在预设里（**DeepSeek 是默认**、OpenAI、通义千问、智谱、月之暗面、Ollama 本地、自定义兼容地址）。
