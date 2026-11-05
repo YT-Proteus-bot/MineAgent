@@ -114,6 +114,7 @@ export interface CanvasDetail extends CanvasSummary {
   graph: GraphPayload
   llm_config: ModelConfig
   background: CanvasBackground
+  rules: CustomRule[]
 }
 
 export interface Category {
@@ -149,6 +150,56 @@ export interface AgentModeDef {
   desc: string
 }
 
+/* ---------------- 编排约束 ---------------- */
+export interface ConstraintViolation {
+  rule: string
+  title: string
+  level: 'error' | 'warn' | 'info'
+  category: string
+  message: string
+  hint: string
+  nodes: string[]
+}
+
+export interface ConstraintReport {
+  ok: boolean
+  errors: ConstraintViolation[]
+  warnings: ConstraintViolation[]
+  infos: ConstraintViolation[]
+  violations: ConstraintViolation[]
+  counts: { error: number; warn: number; info: number }
+  node_ids: string[]
+  checked_rules: number
+}
+
+export interface ConstraintRuleDef {
+  id: string
+  label: string
+  level: string
+  category: string
+  desc: string
+}
+
+export interface CustomRuleType {
+  type: string
+  label: string
+  desc: string
+}
+
+export type CustomRuleTypeId = 'order' | 'require_kind' | 'forbid_kind' | 'max_count'
+
+export interface CustomRule {
+  id: string
+  type: CustomRuleTypeId
+  label?: string
+  level?: 'error' | 'warn'
+  node?: string
+  anchor?: string
+  mode?: 'after' | 'before'
+  kind?: string
+  count?: number
+}
+
 export interface FrameworkDef {
   id: string
   label: string
@@ -164,6 +215,8 @@ export interface Meta {
   nodes: NodeTypeDef[]
   frameworks: FrameworkDef[]
   agent_modes: AgentModeDef[]
+  constraint_rules: ConstraintRuleDef[]
+  custom_rule_types: CustomRuleType[]
   version: string
 }
 

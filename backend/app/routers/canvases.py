@@ -10,11 +10,12 @@ from fastapi import APIRouter, HTTPException
 
 from ..codegen import generate_project, unique_slug
 from ..config import BACKGROUND_DIR, PROJECTS_DIR
+from ..constraints import validate as validate_graph
 from ..db import get_conn, get_setting, now_iso, set_setting
 from ..framework_templates import FRAMEWORK_INDEX, build_graph
 from ..schemas import (AgentNodeModel, CanvasBackground, CanvasCreate, CanvasDetail,
-                       CanvasSummary, CanvasUpdate, GlobalSettings, Graph, ModelConfig,
-                       SaveResult)
+                       CanvasSummary, CanvasUpdate, ConstraintReport, GlobalSettings, Graph,
+                       ModelConfig, SaveResult)
 from ..security import decrypt, encrypt, mask
 
 router = APIRouter(prefix="/api/canvases", tags=["canvases"])
@@ -48,6 +49,14 @@ def _row_to_background(row) -> Dict[str, Any]:
     base = CanvasBackground().model_dump()
     base.update({k: v for k, v in raw.items() if k in base})
     return base
+
+
+def _row_to_rules(row) -> List[Dict[str, Any]]:
+    try:
+        raw = json.loads(row["rules"] or "[]")
+        return raw if isinstance(raw, list) else []
+    except Exception:
+        return []
 
 
 def _node_key_env(node_id: str) -> str:
@@ -99,6 +108,7 @@ def _detail(row) -> CanvasDetail:
         graph=Graph(**graph),
         llm_config=ModelConfig(**_row_to_config(row)),
         background=CanvasBackground(**_row_to_background(row)),
+        rules=_row_to_rules(row),
     )
 
 
@@ -256,6 +266,9 @@ def update_canvas(canvas_id: str, payload: CanvasUpdate):
         if payload.background is not None:
             fields["background"] = json.dumps(payload.background.model_dump(), ensure_ascii=False)
 
+        if payload.rules is not None:
+            fields["rules"] = json.dumps(payload.rules, ensure_ascii=False)
+
         if not fields:
             return _detail(row)
 
@@ -280,10 +293,13 @@ def update_canvas(canvas_id: str, payload: CanvasUpdate):
 
 
 @router.post("/{canvas_id}/save", response_model=SaveResult)
-def save_canvas_endpoint(canvas_id: str, graph: Graph):
+def save_canvas_endpoint(canvas_id: str, graph: Graph, force: bool = False):
     with get_conn() as conn:
         row = _fetch(conn, canvas_id)
+        rules = _row_to_rules(row)
         graph_dict = graph.model_dump()
+        # 保存不拦人（可能只是编辑中间态），但把违规项一并返回，前端据此提示
+        report = validate_graph(graph_dict, rules)
         conn.execute(
             "UPDATE canvases SET graph = ?, background = ?, updated_at = ? WHERE id = ?",
             (json.dumps(graph_dict, ensure_ascii=False),
@@ -296,7 +312,34 @@ def save_canvas_endpoint(canvas_id: str, graph: Graph):
             raise HTTPException(500, f"落盘失败：{exc}") from exc
         row = _fetch(conn, canvas_id)
     return SaveResult(ok=True, canvas=_detail(row),
-                      project_dir=result["project_dir"], written_files=result["files"])
+                      project_dir=result["project_dir"], written_files=result["files"],
+                      constraints=ConstraintReport(**report))
+
+
+@router.post("/{canvas_id}/validate", response_model=ConstraintReport)
+def validate_canvas(canvas_id: str, graph: Optional[Graph] = None):
+    """校验当前画布。
+
+    传 graph 就校验这份（用于边编辑边检查，不用先保存）；
+    不传或传空图则校验数据库里已保存的那份。
+    """
+    with get_conn() as conn:
+        row = _fetch(conn, canvas_id)
+        rules = _row_to_rules(row)
+    if graph is not None and (graph.nodes or graph.edges):
+        target = graph.model_dump()
+    else:
+        target = json.loads(row["graph"] or "{}")
+    return ConstraintReport(**validate_graph(target, rules))
+
+
+@router.put("/{canvas_id}/rules")
+def set_canvas_rules(canvas_id: str, rules: List[Dict[str, Any]]):
+    with get_conn() as conn:
+        _fetch(conn, canvas_id)
+        conn.execute("UPDATE canvases SET rules = ?, updated_at = ? WHERE id = ?",
+                     (json.dumps(rules, ensure_ascii=False), now_iso(), canvas_id))
+    return {"ok": True, "rules": rules}
 
 
 @router.put("/{canvas_id}/nodes/{node_id}/model")

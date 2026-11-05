@@ -32,6 +32,7 @@ export default function AgentNode({ id, data, selected }: NodeProps<AgentNodeTyp
   const color = def?.color ?? '#8b5cf6'
   const icon = def?.icon ?? '◆'
   const status = (data.status || 'idle') as string
+  const violated = useStore((s) => s.violatedNodeIds.includes(id))
   const isAgent = isAgentKind(data.kind)
   const mode = ((data.params || {}).mode as string) || 'react'
   const rawOrg = (data.org || {}) as Partial<AgentOrg>
@@ -44,7 +45,9 @@ export default function AgentNode({ id, data, selected }: NodeProps<AgentNodeTyp
 
   return (
     <div
-      className={`agent-node${selected ? ' selected' : ''} status-${status}`}
+      className={`agent-node${selected ? ' selected' : ''} status-${status}${
+        violated ? ' violated' : ''
+      }`}
       onDoubleClick={() => {
         setSelected(id)
         setInspectorTab('code')

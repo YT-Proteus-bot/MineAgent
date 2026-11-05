@@ -15,6 +15,8 @@ import type {
   CanvasBackground,
   CanvasDetail,
   CanvasSummary,
+  ConstraintReport,
+  CustomRule,
   FlowEdge,
   FlowNodeData,
   Meta,
@@ -45,6 +47,9 @@ interface AppState {
   runPanelOpen: boolean
   toasts: Toast[]
   loading: boolean
+  constraintReport: ConstraintReport | null
+  violatedNodeIds: string[]
+  constraintPanelOpen: boolean
 
   init: () => Promise<void>
   loadCanvas: (id: string) => Promise<void>
@@ -56,6 +61,10 @@ interface AppState {
   setBackground: (patch: Partial<CanvasBackground>) => Promise<void>
   uploadBackground: (file: File) => Promise<void>
   removeBackgroundImage: () => Promise<void>
+  validateNow: () => Promise<void>
+  setConstraintPanelOpen: (v: boolean) => void
+  addRule: (rule: CustomRule) => Promise<void>
+  removeRule: (ruleId: string) => Promise<void>
 
   onNodesChange: (changes: NodeChange<AgentNode>[]) => void
   onEdgesChange: (changes: EdgeChange<FlowEdge>[]) => void
@@ -199,6 +208,9 @@ export const useStore = create<AppState>((set, get) => ({
   runPanelOpen: false,
   toasts: [],
   loading: true,
+  constraintReport: null,
+  violatedNodeIds: [],
+  constraintPanelOpen: false,
 
   init: async () => {
     if (initStarted) return
@@ -232,7 +244,10 @@ export const useStore = create<AppState>((set, get) => ({
         runEvents: [],
         runOutput: '',
         runError: '',
+        constraintReport: null,
+        violatedNodeIds: [],
       })
+      get().validateNow()
     } catch (err: any) {
       get().toast(`打开画布失败：${err.message || err}`, 'err')
     }
@@ -251,8 +266,11 @@ export const useStore = create<AppState>((set, get) => ({
         runEvents: [],
         runOutput: '',
         runError: '',
+        constraintReport: null,
+        violatedNodeIds: [],
       })
       get().toast(`已创建画布「${detail.name}」`, 'ok')
+      get().validateNow()
     } catch (err: any) {
       get().toast(`创建失败：${err.message || err}`, 'err')
     }
@@ -350,6 +368,51 @@ export const useStore = create<AppState>((set, get) => ({
       get().toast('背景图已移除', 'ok')
     } catch (err: any) {
       get().toast(`移除失败：${err.message || err}`, 'err')
+    }
+  },
+
+  validateNow: async () => {
+    const canvas = get().canvas
+    if (!canvas) return
+    try {
+      const report = await api.validateCanvas(canvas.id, {
+        nodes: get().nodes,
+        edges: get().edges,
+        viewport: canvas.graph.viewport || { x: 0, y: 0, zoom: 1 },
+        background: canvas.background,
+      })
+      set({ constraintReport: report, violatedNodeIds: report.node_ids || [] })
+    } catch {
+      /* 校验失败不影响画布编辑 */
+    }
+  },
+
+  setConstraintPanelOpen: (v) => set({ constraintPanelOpen: v }),
+
+  addRule: async (rule) => {
+    const canvas = get().canvas
+    if (!canvas) return
+    const next = [...(canvas.rules || []), rule]
+    try {
+      const res = await api.setRules(canvas.id, next)
+      set({ canvas: { ...get().canvas!, rules: res.rules } })
+      await get().validateNow()
+      get().toast('约束规则已添加', 'ok')
+    } catch (err: any) {
+      get().toast(`添加规则失败：${err.message || err}`, 'err')
+    }
+  },
+
+  removeRule: async (ruleId) => {
+    const canvas = get().canvas
+    if (!canvas) return
+    const next = (canvas.rules || []).filter((r) => r.id !== ruleId)
+    try {
+      const res = await api.setRules(canvas.id, next)
+      set({ canvas: { ...get().canvas!, rules: res.rules } })
+      await get().validateNow()
+    } catch (err: any) {
+      get().toast(`删除规则失败：${err.message || err}`, 'err')
     }
   },
 
@@ -530,9 +593,14 @@ export const useStore = create<AppState>((set, get) => ({
         edges: res.canvas.graph.edges,
         dirty: false,
         lastSaved: new Date().toLocaleTimeString('zh-CN'),
+        constraintReport: res.constraints ?? get().constraintReport,
+        violatedNodeIds: res.constraints?.node_ids ?? get().violatedNodeIds,
       })
       await get().refreshCanvases()
       get().toast(`已保存：${res.written_files.length} 个文件写入 ${res.project_dir.split(/[\\/]/).pop()}`, 'ok')
+      if (res.constraints && res.constraints.counts.error > 0) {
+        get().toast(`注意：还有 ${res.constraints.counts.error} 条约束未满足，运行时会被拦下`, 'err')
+      }
       return true
     } catch (err: any) {
       get().toast(`保存失败：${err.message || err}`, 'err')
@@ -616,6 +684,28 @@ export const useStore = create<AppState>((set, get) => ({
       (msg) => {
         set({ running: false, runError: msg })
         get().toast(msg, 'err')
+      },
+      (detail) => {
+        // 约束不满足被拦下：直接打开约束面板，让人看到差在哪
+        set({
+          running: false,
+          runError: detail.message,
+          constraintPanelOpen: true,
+          constraintReport: {
+            ok: false,
+            errors: detail.violations as any,
+            warnings: [],
+            infos: [],
+            violations: detail.violations as any,
+            counts: { error: detail.violations.length, warn: 0, info: 0 },
+            node_ids: [
+              ...new Set(detail.violations.flatMap((v: any) => v.nodes || [])),
+            ] as string[],
+            checked_rules: 0,
+          },
+        })
+        set({ violatedNodeIds: get().constraintReport?.node_ids || [] })
+        get().toast(detail.message, 'err')
       },
     )
   },

@@ -2,6 +2,8 @@ import type {
   CanvasBackground,
   CanvasDetail,
   CanvasSummary,
+  ConstraintReport,
+  CustomRule,
   GlobalSettings,
   GraphPayload,
   Meta,
@@ -50,10 +52,23 @@ export const api = {
       body: JSON.stringify(patch),
     }),
   saveCanvas: (id: string, graph: GraphPayload) =>
-    request<{ ok: boolean; canvas: CanvasDetail; project_dir: string; written_files: string[] }>(
-      `/api/canvases/${id}/save`,
-      { method: 'POST', body: JSON.stringify(graph) },
-    ),
+    request<{
+      ok: boolean
+      canvas: CanvasDetail
+      project_dir: string
+      written_files: string[]
+      constraints: ConstraintReport | null
+    }>(`/api/canvases/${id}/save`, { method: 'POST', body: JSON.stringify(graph) }),
+  validateCanvas: (id: string, graph?: GraphPayload) =>
+    request<ConstraintReport>(`/api/canvases/${id}/validate`, {
+      method: 'POST',
+      body: JSON.stringify(graph || {}),
+    }),
+  setRules: (id: string, rules: CustomRule[]) =>
+    request<{ ok: boolean; rules: CustomRule[] }>(`/api/canvases/${id}/rules`, {
+      method: 'PUT',
+      body: JSON.stringify(rules),
+    }),
   deleteCanvas: (id: string) =>
     request<{ ok: boolean }>(`/api/canvases/${id}`, { method: 'DELETE' }),
   setCanvasModel: (id: string, cfg: ModelConfig) =>
@@ -138,6 +153,7 @@ export async function runCanvas(
   input: string,
   onEvent: (evt: RunEvent) => void,
   onError: (message: string) => void,
+  onConstraintBlocked?: (detail: { message: string; violations: any[] }) => void,
 ): Promise<RunHandle> {
   const controller = new AbortController()
   const run = async () => {
@@ -151,6 +167,15 @@ export async function runCanvas(
       })
     } catch (err: any) {
       if (err?.name !== 'AbortError') onError(String(err?.message || err))
+      return
+    }
+    if (resp.status === 409) {
+      const body = await resp.json().catch(() => ({}) as any)
+      const detail = body?.detail || {}
+      onConstraintBlocked?.({
+        message: detail.message || '画布不满足约束，已阻止运行',
+        violations: detail.violations || [],
+      })
       return
     }
     if (!resp.ok || !resp.body) {

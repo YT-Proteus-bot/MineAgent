@@ -79,6 +79,7 @@ class CanvasUpdate(BaseModel):
     graph: Optional[Graph] = None
     llm_config: Optional[ModelConfig] = None
     background: Optional[CanvasBackground] = None
+    rules: Optional[List[Dict[str, Any]]] = None
 
 
 class CanvasSummary(BaseModel):
@@ -95,6 +96,28 @@ class CanvasDetail(CanvasSummary):
     graph: Graph
     llm_config: ModelConfig
     background: CanvasBackground = Field(default_factory=CanvasBackground)
+    rules: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class ConstraintViolation(BaseModel):
+    rule: str
+    title: str = ""
+    level: str = "warn"
+    category: str = ""
+    message: str = ""
+    hint: str = ""
+    nodes: List[str] = Field(default_factory=list)
+
+
+class ConstraintReport(BaseModel):
+    ok: bool
+    errors: List[ConstraintViolation] = Field(default_factory=list)
+    warnings: List[ConstraintViolation] = Field(default_factory=list)
+    infos: List[ConstraintViolation] = Field(default_factory=list)
+    violations: List[ConstraintViolation] = Field(default_factory=list)
+    counts: Dict[str, int] = Field(default_factory=dict)
+    node_ids: List[str] = Field(default_factory=list)
+    checked_rules: int = 0
 
 
 class SaveResult(BaseModel):
@@ -102,11 +125,13 @@ class SaveResult(BaseModel):
     canvas: CanvasDetail
     project_dir: str
     written_files: List[str]
+    constraints: Optional[ConstraintReport] = None
 
 
 class RunRequest(BaseModel):
     input: str = ""
     stream: bool = True
+    force: bool = False
 
 
 class GlobalSettings(BaseModel):

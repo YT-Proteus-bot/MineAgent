@@ -27,6 +27,8 @@ export default function TopBar({ onOpenUserCenter, onOpenCanvasModel }: Props) {
   const changeFramework = useStore((s) => s.changeFramework)
   const createCanvas = useStore((s) => s.createCanvas)
   const toast = useStore((s) => s.toast)
+  const report = useStore((s) => s.constraintReport)
+  const setConstraintPanelOpen = useStore((s) => s.setConstraintPanelOpen)
 
   const [prompt, setPrompt] = useState<null | 'new' | 'rename'>(null)
 
@@ -146,6 +148,23 @@ export default function TopBar({ onOpenUserCenter, onOpenCanvasModel }: Props) {
       >
         {saving ? <span className="spin" /> : <span>💾</span>}
         {dirty ? '保存' : lastSaved ? `已保存 ${lastSaved}` : '已保存'}
+      </button>
+
+      <button
+        onClick={() => setConstraintPanelOpen(true)}
+        title="检查编排约束（入口出口、连通性、自定义规则…）"
+      >
+        <span>⚠</span> 约束
+        {report && report.counts.error > 0 && (
+          <span className="badge err" style={{ padding: '0 5px' }}>
+            {report.counts.error}
+          </span>
+        )}
+        {report && report.counts.error === 0 && report.counts.warn > 0 && (
+          <span className="badge warn" style={{ padding: '0 5px' }}>
+            {report.counts.warn}
+          </span>
+        )}
       </button>
 
       <button className="primary" onClick={handleRun} disabled={running || !canvas}>

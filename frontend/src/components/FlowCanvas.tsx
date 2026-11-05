@@ -12,6 +12,7 @@ import {
 import '@xyflow/react/dist/style.css'
 import AgentNode from './AgentNode'
 import BackgroundPanel from './BackgroundPanel'
+import ConstraintPanel from './ConstraintPanel'
 import NodeModelModal from './NodeModelModal'
 import { ContextMenu, NodePicker } from './ContextMenu'
 import { useStore } from '../store'
@@ -48,6 +49,17 @@ export default function FlowCanvas() {
   const menuNodeIsAgent =
     menu?.kind === 'node' &&
     isAgentKind(nodes.find((n) => n.id === menu.nodeId)?.data.kind)
+
+  const constraintPanelOpen = useStore((s) => s.constraintPanelOpen)
+  const setConstraintPanelOpen = useStore((s) => s.setConstraintPanelOpen)
+  const validateNow = useStore((s) => s.validateNow)
+
+  // 编辑过程中自动复查约束（停止操作 1.3 秒后）
+  useEffect(() => {
+    if (!canvasId) return
+    const timer = setTimeout(() => validateNow(), 1300)
+    return () => clearTimeout(timer)
+  }, [nodes, edges, canvasId, validateNow])
 
   // 切换画布后自动把整张图放进视野
   useEffect(() => {
@@ -202,6 +214,9 @@ export default function FlowCanvas() {
       </div>
 
       {bgPanelOpen && <BackgroundPanel onClose={() => setBgPanelOpen(false)} />}
+      {constraintPanelOpen && (
+        <ConstraintPanel onClose={() => setConstraintPanelOpen(false)} />
+      )}
 
       {nodes.length === 0 && (
         <div className="empty-state">

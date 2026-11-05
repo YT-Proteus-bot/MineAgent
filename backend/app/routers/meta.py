@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
+from ..constraints import CUSTOM_RULE_TYPES, rule_catalog
 from ..framework_templates import FRAMEWORKS, FRAMEWORK_INDEX, build_graph
 from ..node_registry import AGENT_MODES, CATEGORIES, NODE_TYPES
 
@@ -17,6 +18,8 @@ def meta():
         "nodes": NODE_TYPES,
         "frameworks": FRAMEWORKS,
         "agent_modes": AGENT_MODES,
+        "constraint_rules": rule_catalog(),
+        "custom_rule_types": CUSTOM_RULE_TYPES,
         "version": "1.0.0",
     }
 

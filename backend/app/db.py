@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS canvases (
     graph         TEXT NOT NULL,
     model_config  TEXT NOT NULL DEFAULT '{}',
     background    TEXT NOT NULL DEFAULT '{}',
+    rules         TEXT NOT NULL DEFAULT '[]',
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL
 );
@@ -83,6 +84,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     cols = {row["name"] for row in conn.execute("PRAGMA table_info(canvases)")}
     if "background" not in cols:
         conn.execute("ALTER TABLE canvases ADD COLUMN background TEXT NOT NULL DEFAULT '{}'")
+    if "rules" not in cols:
+        conn.execute("ALTER TABLE canvases ADD COLUMN rules TEXT NOT NULL DEFAULT '[]'")
 
 
 def get_setting(key: str, default: str = "") -> str:

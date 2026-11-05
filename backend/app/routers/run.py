@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
 from ..config import PROJECTS_DIR, RUN_LOG_DIR, RUN_TIMEOUT
+from ..constraints import validate as validate_graph
 from ..db import get_conn, now_iso
 from ..schemas import RunRequest
 from ..security import decrypt
@@ -83,9 +84,22 @@ async def run_canvas(canvas_id: str, payload: RunRequest):
             (canvas_id,),
         ).fetchall()
         try:
-            project_dir, _files = save_canvas(row, graph_dict)
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(500, f"运行前落盘失败：{exc}") from exc
+            rules = json.loads(row["rules"] or "[]")
+        except Exception:  # noqa: BLE001
+            rules = []
+
+    # 运行前先过一遍约束：error 级直接拦下，除非显式 force
+    report = validate_graph(graph_dict, rules)
+    if report["errors"] and not payload.force:
+        raise HTTPException(409, detail={
+            "message": f"画布有 {len(report['errors'])} 条约束未满足，已阻止运行",
+            "violations": report["errors"],
+            "warnings": report["warnings"],
+        })
+
+    with get_conn() as conn:
+        row = _fetch(conn, canvas_id)
+        project_dir, _files = save_canvas(row, graph_dict)
 
     run_id = uuid.uuid4().hex
     env = os.environ.copy()
