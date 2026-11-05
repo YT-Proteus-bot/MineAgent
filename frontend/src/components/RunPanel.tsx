@@ -2,8 +2,14 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useStore } from '../store'
 import type { RunEvent } from '../types'
 
-function timeOf(i: number): string {
-  const d = new Date()
+/**
+ * 日志前面的时间用事件自身的产生时间（后端发过来时带 at），
+ * 不能用 new Date()——那样每渲染一次都会变成"现在"。
+ */
+function timeOf(e: RunEvent | undefined): string {
+  const iso = (e as any)?.at as string | undefined
+  const d = iso ? new Date(iso) : null
+  if (!d || Number.isNaN(d.getTime())) return '--:--:--'
   return d.toLocaleTimeString('zh-CN', { hour12: false })
 }
 
@@ -68,7 +74,7 @@ export default function RunPanel() {
       case 'node_start':
         return (
           <div key={idx} className="evt node-start">
-            <span className="time">{timeOf(idx)}</span>
+            <span className="time">{timeOf(e)}</span>
             <span className="tag">执行</span>
             <span className="msg">
               {e.label ? `${e.label}（${name}）` : name}
@@ -81,7 +87,7 @@ export default function RunPanel() {
         return (
           <div key={idx} className="evt node-end">
             <div className="evt-line">
-              <span className="time">{timeOf(idx)}</span>
+              <span className="time">{timeOf(e)}</span>
               <span className="tag">完成</span>
               <span className="msg">
                 {name}
@@ -95,7 +101,7 @@ export default function RunPanel() {
       case 'error':
         return (
           <div key={idx} className="evt error">
-            <span className="time">{timeOf(idx)}</span>
+            <span className="time">{timeOf(e)}</span>
             <span className="tag">错误</span>
             <span className="msg">{e.message}</span>
           </div>
@@ -103,7 +109,7 @@ export default function RunPanel() {
       case 'log':
         return (
           <div key={idx} className="evt log">
-            <span className="time">{timeOf(idx)}</span>
+            <span className="time">{timeOf(e)}</span>
             <span className="tag">{e.level === 'warn' ? '警告' : '日志'}</span>
             <span className="msg">{e.message}</span>
           </div>
@@ -111,7 +117,7 @@ export default function RunPanel() {
       case 'route':
         return (
           <div key={idx} className="evt route">
-            <span className="time">{timeOf(idx)}</span>
+            <span className="time">{timeOf(e)}</span>
             <span className="tag">分支</span>
             <span className="msg">
               走 {e.branch} → {e.target}
@@ -121,7 +127,7 @@ export default function RunPanel() {
       case 'custom':
         return (
           <div key={idx} className="evt log">
-            <span className="time">{timeOf(idx)}</span>
+            <span className="time">{timeOf(e)}</span>
             <span className="tag">{e.type}</span>
             <span className="msg">{JSON.stringify(e.payload).slice(0, 220)}</span>
           </div>
@@ -129,7 +135,7 @@ export default function RunPanel() {
       case 'tool_call':
         return (
           <div key={idx} className="evt log">
-            <span className="time">{timeOf(idx)}</span>
+            <span className="time">{timeOf(e)}</span>
             <span className="tag">工具</span>
             <span className="msg">
               {e.tool}({JSON.stringify(e.args).slice(0, 120)}) → {String(e.result).slice(0, 160)}
@@ -139,7 +145,7 @@ export default function RunPanel() {
       case 'prepared':
         return (
           <div key={idx} className="evt log">
-            <span className="time">{timeOf(idx)}</span>
+            <span className="time">{timeOf(e)}</span>
             <span className="tag">准备</span>
             <span className="msg">
               {e.framework} · {e.model || '未配置模型'} · {e.has_api_key ? '已配置 key' : '未配置 key'}
@@ -154,7 +160,7 @@ export default function RunPanel() {
       case 'run_end':
         return (
           <div key={idx} className={`evt ${e.status === 'ok' ? 'node-end' : 'error'}`}>
-            <span className="time">{timeOf(idx)}</span>
+            <span className="time">{timeOf(e)}</span>
             <span className="tag">结束</span>
             <span className="msg">
               {e.status === 'ok' ? '运行完成' : `运行失败：${e.error || e.message || ''}`}

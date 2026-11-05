@@ -7,6 +7,7 @@ import os
 import sys
 import time
 import uuid
+from datetime import datetime
 from typing import Any, AsyncIterator, Dict, List
 
 from fastapi import APIRouter, HTTPException
@@ -30,7 +31,10 @@ DEPENDENCY_HINTS = {
 
 
 def _sse(obj: Dict[str, Any]) -> str:
-    return "data: " + json.dumps(obj, ensure_ascii=False, default=str) + "\n\n"
+    """给每个事件打上产生时间，前端显示的就是这条日志真正的时刻。"""
+    evt = dict(obj)
+    evt.setdefault("at", now_iso())
+    return "data: " + json.dumps(evt, ensure_ascii=False, default=str) + "\n\n"
 
 
 def _deps_status(framework: str) -> Dict[str, bool]:
@@ -186,6 +190,8 @@ async def run_canvas(canvas_id: str, payload: RunRequest):
                     except json.JSONDecodeError:
                         continue
                     evt.setdefault("run_id", run_id)
+                    # 给每个事件盖上本地产生时间，运行面板用它显示日志时间
+                    evt.setdefault("at", datetime.now().astimezone().isoformat(timespec="seconds"))
                     # token 事件只做实时推送，不进日志/落库，避免日志被撑爆
                     if evt.get("event") != "token":
                         collected.append(evt)

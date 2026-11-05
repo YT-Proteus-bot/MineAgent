@@ -274,6 +274,8 @@ export interface Meta {
 
 export interface RunEvent {
   event: string
+  /** 事件产生时间（后端发出时打的），日志前面的时间显示的就是它 */
+  at?: string
   node?: string
   name?: string
   kind?: string
