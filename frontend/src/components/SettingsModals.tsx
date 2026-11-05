@@ -3,6 +3,7 @@ import { api } from '../api'
 import { useStore } from '../store'
 import Modal from './Modal'
 import ModelNameField from './ModelNameField'
+import CommunityModal from './CommunityModal'
 import type { GlobalSettings, ModelConfig } from '../types'
 
 /** 默认服务商是 DeepSeek，其余按需切换 */
@@ -35,6 +36,9 @@ export function UserCenterModal({ onClose }: { onClose: () => void }) {
   const [key, setKey] = useState('')
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState('')
+  const [communityOpen, setCommunityOpen] = useState(false)
+  const refreshCanvases = useStore((s) => s.refreshCanvases)
+  const loadCanvas = useStore((s) => s.loadCanvas)
 
   useEffect(() => {
     api.getSettings().then(setForm).catch((e) => toast(String(e.message || e), 'err'))
@@ -83,6 +87,10 @@ export function UserCenterModal({ onClose }: { onClose: () => void }) {
       footer={
         <>
           <button onClick={onClose}>取消</button>
+          <button onClick={() => setCommunityOpen(true)} title="GitHub 登录、社区模板加载、上传配置">
+            🌐 社区模板
+          </button>
+          <div style={{ flex: 1 }} />
           <button className="primary" onClick={save}>
             保存
           </button>
@@ -151,6 +159,16 @@ export function UserCenterModal({ onClose }: { onClose: () => void }) {
         完全离线时可以用项目自带 mock 服务：Base URL 填 <code className="mono">http://127.0.0.1:8012/v1</code>，
         模型填 <code className="mono">mock-model</code>，key 随便填。
       </div>
+
+      {communityOpen && (
+        <CommunityModal
+          onClose={() => setCommunityOpen(false)}
+          onLoaded={async (id) => {
+            await refreshCanvases()
+            await loadCanvas(id)
+          }}
+        />
+      )}
     </Modal>
   )
 }

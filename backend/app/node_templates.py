@@ -36,7 +36,11 @@ T["output"] = '''from runtime_sdk import NodeContext
 
 def run(ctx: NodeContext):
     """出口：终止流程并返回最终答案给用户。"""
+    source = ctx.params.get("source", "auto")
     answer = ctx.text
+    if source in ("auto", "agent"):
+        # auto：链路里出现过 agent 就优先返回它的回答，避免被下游格式化节点覆盖
+        answer = ctx.state.get("answer") or ctx.text
     ctx.emit("final", {"answer": answer})
     return answer
 '''
@@ -133,6 +137,12 @@ def run(ctx: NodeContext):
         system="你只输出 true 或 false，不要解释。",
     ).strip().lower()
     branch = "true" if verdict.startswith("true") else "false"
+    rounds = int(ctx.state.get("loop_count") or 0) + 1
+    max_loops = int(ctx.params.get("max_loops", 0) or 0)
+    if branch == "false" and rounds > max_loops:
+        branch = "true"
+        ctx.log(f"已到循环上限 {max_loops} 次，强制收敛", "warn")
+    ctx.state["loop_count"] = rounds
     ctx.emit("route", {"branch": branch})
     return branch
 '''

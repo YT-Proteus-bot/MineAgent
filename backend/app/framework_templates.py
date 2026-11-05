@@ -144,7 +144,10 @@ def _langchain() -> tuple[list, list]:
         _mk("tool", 4, "工具：search", {"name": "search", "query": ""}, name="search_tool"),
         _mk("observation", 5),
         _mk("review_observation", 6),
-        _mk("router", 7, "继续 or 收敛", {"question": "观察是否已足够回答用户问题？"}),
+        _mk("router", 7, "够不够，决定收敛还是继续",
+            {"question": "现有观察是否已经足够给出最终回答、不需要再执行一轮？"
+                         "如果只是寒暄、闲聊，或已有明确答案，就回答 true（收敛）。",
+             "max_loops": 0}),
         _mk("format_observations", 8),
         _mk("formatter", 9),
         _mk("output", 10),
@@ -156,8 +159,8 @@ def _langchain() -> tuple[list, list]:
         _edge("n4", "n5"),
         _edge("n5", "n6"),
         _edge("n6", "n7"),
-        _edge("n7", "n3", "true", "继续循环"),
-        _edge("n7", "n8", "false", "已收敛"),
+        _edge("n7", "n8", "true", "已收敛"),
+        _edge("n7", "n3", "false", "继续循环"),
         _edge("n8", "n9"),
         _edge("n9", "n10"),
     ]

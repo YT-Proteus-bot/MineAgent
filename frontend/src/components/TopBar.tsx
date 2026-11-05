@@ -3,6 +3,8 @@ import { api } from '../api'
 import { useStore } from '../store'
 import Popover from './Popover'
 import PromptModal from './PromptModal'
+import CommunityModal from './CommunityModal'
+import UploadTemplateModal from './UploadTemplateModal'
 
 interface Props {
   onOpenUserCenter: () => void
@@ -35,6 +37,9 @@ export default function TopBar({ onOpenUserCenter, onOpenCanvasModel }: Props) {
   const redo = useStore((s) => s.redo)
 
   const [prompt, setPrompt] = useState<null | 'new' | 'rename'>(null)
+  const [uploadOpen, setUploadOpen] = useState(false)
+  const [communityOpen, setCommunityOpen] = useState(false)
+  const refreshCanvases = useStore((s) => s.refreshCanvases)
 
   const currentFw = meta?.frameworks.find((f) => f.id === canvas?.framework)
   // 当前框架支持的模式；没选过就用默认的第一个
@@ -234,6 +239,21 @@ export default function TopBar({ onOpenUserCenter, onOpenCanvasModel }: Props) {
         {running ? '运行中' : '运行'}
       </button>
 
+      <button
+        onClick={async () => {
+          if (!canvas) return
+          if (dirty) {
+            const ok = await save()
+            if (!ok) return
+          }
+          setUploadOpen(true)
+        }}
+        disabled={!canvas}
+        title="把当前画布和项目文件贡献为社区模板（自动创建 GitHub PR，不含任何密钥）"
+      >
+        <span>☁</span> 上传模板
+      </button>
+
       <div className="spacer" />
 
       {dirty && <span className="badge warn">未保存</span>}
@@ -342,6 +362,28 @@ export default function TopBar({ onOpenUserCenter, onOpenCanvasModel }: Props) {
       <button onClick={onOpenUserCenter} title="全局 API Key（编排用）">
         <span>👤</span> 用户中心
       </button>
+
+      {uploadOpen && canvas && (
+        <UploadTemplateModal
+          canvasId={canvas.id}
+          canvasName={canvas.name}
+          onClose={() => setUploadOpen(false)}
+          onOpenCommunity={() => {
+            setUploadOpen(false)
+            setCommunityOpen(true)
+          }}
+        />
+      )}
+
+      {communityOpen && (
+        <CommunityModal
+          onClose={() => setCommunityOpen(false)}
+          onLoaded={async (id) => {
+            await refreshCanvases()
+            await loadCanvas(id)
+          }}
+        />
+      )}
 
       {prompt === 'new' && (
         <PromptModal

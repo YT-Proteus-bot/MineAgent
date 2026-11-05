@@ -2,6 +2,8 @@ import type {
   CanvasBackground,
   CanvasDetail,
   CanvasSummary,
+  CommunityConfig,
+  CommunityTemplate,
   ConstraintReport,
   CustomRule,
   GlobalSettings,
@@ -184,6 +186,42 @@ export const api = {
       summary: string
       mode: string
     }>(`/api/meta/modes/${mode}?framework=${encodeURIComponent(framework)}`),
+
+  // ---- 社区模板 ----
+  communityConfig: () => request<CommunityConfig>('/api/community/config'),
+  saveCommunityConfig: (payload: Record<string, any>) =>
+    request<{ ok: boolean }>('/api/community/config', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+  communityAuthUrl: () =>
+    request<{ url: string; state: string }>('/api/community/auth/url'),
+  communityDisconnect: () =>
+    request<{ ok: boolean }>('/api/community/disconnect', { method: 'POST' }),
+  publishTemplate: (payload: {
+    canvas_id: string
+    name: string
+    description: string
+    tags: string[]
+    author: string
+  }) =>
+    request<{
+      ok: boolean
+      pr_url: string
+      pr_number: number
+      branch: string
+      slug: string
+      files: string[]
+    }>('/api/community/publish', { method: 'POST', body: JSON.stringify(payload) }),
+  communityTemplates: () =>
+    request<{ ok: boolean; configured: boolean; templates: CommunityTemplate[] }>(
+      '/api/community/templates',
+    ),
+  loadCommunityTemplate: (slug: string) =>
+    request<{ ok: boolean; canvas: CanvasDetail }>('/api/community/load', {
+      method: 'POST',
+      body: JSON.stringify({ slug }),
+    }),
 
   assistantStatus: () =>
     request<{ ready: boolean; model: string; base_url: string; hint: string }>(

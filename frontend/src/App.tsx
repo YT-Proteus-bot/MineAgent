@@ -19,6 +19,7 @@ export default function App() {
   const setRightTab = useStore((s) => s.setRightTab)
   const undo = useStore((s) => s.undo)
   const redo = useStore((s) => s.redo)
+  const toast = useStore((s) => s.toast)
 
   const [userCenterOpen, setUserCenterOpen] = useState(false)
   const [canvasModelOpen, setCanvasModelOpen] = useState(false)
@@ -26,6 +27,24 @@ export default function App() {
   useEffect(() => {
     init()
   }, [init])
+
+  // GitHub OAuth 回调：?github=connected / ?github=error&reason=...
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const status = params.get('github')
+    if (!status) return
+    const reason = params.get('reason')
+    if (status === 'connected') toast('GitHub 已连接', 'ok')
+    else toast(`GitHub 连接失败${reason ? `（${reason}）` : ''}`, 'err')
+    params.delete('github')
+    params.delete('reason')
+    const query = params.toString()
+    window.history.replaceState(
+      {},
+      '',
+      `${window.location.pathname}${query ? `?${query}` : ''}`,
+    )
+  }, [toast])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

@@ -408,16 +408,21 @@ class NodeContext:
                     "name": self.node_name, "mode": mode})
 
         if mode == "simple":
-            return self.llm(task, system=base_system)
+            return self._remember_answer(self.llm(task, system=base_system))
         if mode == "tool_call":
-            return self._agent_tool_call(task, tools, base_system)
+            return self._remember_answer(self._agent_tool_call(task, tools, base_system))
         if mode == "plan_execute":
-            return self._agent_plan_execute(task, tools, base_system, max_steps)
+            return self._remember_answer(self._agent_plan_execute(task, tools, base_system, max_steps))
         if mode == "goal":
-            return self._agent_goal(task, tools, base_system, max_steps)
+            return self._remember_answer(self._agent_goal(task, tools, base_system, max_steps))
         if mode == "reflexion":
-            return self._agent_reflexion(task, tools, base_system, max_steps)
-        return self._agent_react(task, tools, base_system, max_steps)
+            return self._remember_answer(self._agent_reflexion(task, tools, base_system, max_steps))
+        return self._remember_answer(self._agent_react(task, tools, base_system, max_steps))
+
+    def _remember_answer(self, answer: str) -> str:
+        """把 agent 的回答留在 state 里，output 节点可以优先取它。"""
+        self.state["answer"] = answer
+        return answer
 
     def _tool_desc(self, tools: List[ToolSpec]) -> str:
         return "\n".join(f"- {t.name}: {t.description}" for t in tools) or "（无可用工具）"
