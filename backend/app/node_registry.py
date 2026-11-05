@@ -133,7 +133,7 @@ _DEFS: List[tuple] = [
     # ---------------- 多智能体协作 ----------------
     ("supervisor", "主管 Supervisor", "collab", "♔", "按组织关系把任务分派给下级 agent，并汇总它们的结果。", ["out"],
      [P("mode", "协作模式", "react", options=_MODE_OPTIONS),
-      P("workers", "指定下级（名称，逗号分隔）", ["worker_a"])], "python"),
+      P("workers", "指定下级（agent 名称）", ["worker_a"])], "python"),
     ("worker", "工作者 Worker", "collab", "♟", "执行被分派的子任务。", ["out"],
      [P("mode", "推理模式", "react", options=_MODE_OPTIONS), P("role", "角色", "")], "python"),
     ("group_chat", "群聊 GroupChat", "collab", "◍◍", "多角色轮流发言，主持人汇总共识。", ["out"], [P("rounds", "轮数", 2)], "python"),
