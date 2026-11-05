@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Handle, NodeResizer, Position, type NodeProps } from '@xyflow/react'
 import { useStore } from '../store'
+import NodeDocCard from './NodeDocCard'
 import { isAgentKind, type AgentNode as AgentNodeType, type AgentOrg } from '../types'
 
 const BRANCH_LABEL: Record<string, string> = {
@@ -144,48 +145,20 @@ export default function AgentNode({ id, data, selected, dragging }: NodeProps<Ag
 
       {hovered && !dragging && (
         <div className="node-tip">
-          <div className="tip-title">{data.label}</div>
-          <div className="tip-name">{data.name}</div>
-          {data.description && <div className="tip-desc">{data.description}</div>}
-          <div className="tip-row">
-            <span className="tip-key">类型</span>
-            <span className="tip-val">{def?.label || data.kind}（{data.kind}）</span>
-          </div>
-          {isAgent && (
-            <div className="tip-row">
-              <span className="tip-key">模式</span>
-              <span className="tip-val">
-                {MODE_LABEL[mode] || mode}
-                {nodeModel.model ? ` · ${nodeModel.model}` : ''}
-                {nodeModel.has_key ? ' · 独立 Key' : ''}
-              </span>
-            </div>
-          )}
-          {isAgent && (org.superior || org.subordinates.length > 0 || org.peers.length > 0) && (
-            <div className="tip-row">
-              <span className="tip-key">组织</span>
-              <span className="tip-val">
-                {org.superior ? '有上级' : '顶层'}
-                {org.subordinates.length > 0 ? ` · 下级 ${org.subordinates.length}` : ''}
-                {org.peers.length > 0 ? ` · 平级 ${org.peers.length}` : ''}
-              </span>
-            </div>
-          )}
-          {paramEntries.length > 0 && (
-            <div className="tip-row">
-              <span className="tip-key">参数</span>
-              <span className="tip-val">
-                {paramEntries
-                  .map(([k, v]) => `${k}=${String(v).slice(0, 24)}`)
-                  .join('，')}
-              </span>
-            </div>
-          )}
-          <div className="tip-row">
-            <span className="tip-key">出口</span>
-            <span className="tip-val">{outputs.map((o) => BRANCH_LABEL[o] || o).join(' / ')}</span>
-          </div>
-          <div className="tip-hint">双击打开代码 · 右键查看与编辑</div>
+          <NodeDocCard
+            label={data.label}
+            kind={data.kind}
+            doc={def?.doc}
+            footer={
+              <>
+                {isAgent ? `${MODE_LABEL[mode] || mode} · 最多 ${data.params?.max_steps ?? 6} 步` : null}
+                {isAgent ? ' · ' : ''}
+                出口 {outputs.map((o) => BRANCH_LABEL[o] || o).join(' / ')}
+                <br />
+                双击打开代码 · 右键查看与编辑
+              </>
+            }
+          />
         </div>
       )}
     </div>

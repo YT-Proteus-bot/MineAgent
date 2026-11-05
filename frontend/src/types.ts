@@ -161,6 +161,13 @@ export interface NodeParamDef {
   help?: string
 }
 
+export interface NodeDoc {
+  concept: string
+  explain: string
+  usage: string
+  tips: string
+}
+
 export interface NodeTypeDef {
   kind: string
   label: string
@@ -171,6 +178,11 @@ export interface NodeTypeDef {
   outputs: string[]
   params: NodeParamDef[]
   language: string
+  /** 悬停说明：概念 / 解释 / 用途 / 编码建议 */
+  doc?: NodeDoc
+  native_code?: string
+  default_code?: string
+  agent_modes?: string[]
 }
 
 export interface AgentModeDef {

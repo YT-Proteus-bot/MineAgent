@@ -155,9 +155,22 @@ def _block_input(node: Dict[str, Any]) -> str:
 
 def _block_output(node: Dict[str, Any]) -> str:
     fn = _pyid(node["name"])
+    source = _text(_params(node), "source", "auto") or "auto"
     return (
         f"def {fn}(state: AgentState) -> dict:\n"
         f'    """{node.get("label") or "输出"} —— 智能体的出口，把结果交给调用方。"""\n'
+        f"    source = {_q(source)}\n"
+        f'    if source == "data":\n'
+        f'        return {{"data": state.get("data", "")}}\n'
+        f'    if source in ("answer", "agent", "auto"):\n'
+        f'        answer = state.get("answer")\n'
+        f'        if answer not in (None, ""):\n'
+        f'            return {{"data": answer}}\n'
+        f'        if source == "answer":\n'
+        f'            return {{"data": ""}}\n'
+        f'    for item in reversed(list(state.get("trace") or [])):\n'
+        f'        if item.get("node") == source or item.get("kind") == source:\n'
+        f'            return {{"data": item.get("output", "")}}\n'
         f'    return {{"data": state.get("data", "")}}\n'
     )
 
@@ -219,9 +232,10 @@ def _block_llm(node: Dict[str, Any]) -> str:
     if not system:
         defaults = {
             "planner": "你是一个任务规划专家。把目标拆成有序、可执行的步骤，每行一步。",
-            "observation": "把工具返回的结果压缩成 3 条以内的关键观察。",
+            "observation": "把工具返回的结果压缩成 3 条以内的关键观察；没有工具结果时保留原始回答的要点。",
             "review_observation": "判断现有观察是否足够支撑结论，指出还缺什么。",
-            "formatter": "把内容整理成用户需要的格式，直接输出结果本身。",
+            "formatter": "你是格式化工具：只做格式转换，不增删事实、不编造结构；内容不足时原样返回。",
+            "format_observations": "把多轮观察归并成结构化上下文：只做合并与去重，不新增事实、不编造标题。",
             "summarize": "把内容压缩成要点，保留关键数字与结论。",
             "translate": "按要求翻译内容，保持原意与语气。",
             "classify": "判断输入属于哪一类，只输出类别名。",
@@ -267,24 +281,32 @@ def _block_agent(node: Dict[str, Any]) -> str:
         f"    )\n"
         f"    messages = result.get(\"messages\") or []\n"
         f"    answer = str(getattr(messages[-1], \"content\", \"\")) if messages else \"\"\n"
-        f'    return {{"data": answer}}\n'
+        f'    return {{"data": answer, "answer": answer}}\n'
     )
 
 
 def _block_router(node: Dict[str, Any]) -> str:
     fn = _pyid(node["name"])
     p = _params(node)
-    expr = _text(p, "expression") or _text(p, "condition") or _text(p, "rule")
-    if not expr:
-        expr = "最终答案" 
+    question = (
+        _text(p, "expression") or _text(p, "condition") or _text(p, "rule")
+        or _text(p, "question") or "该请求是否需要调用工具？"
+    )
+    llm_var = _llm_var(node)
+    name = _q(node["name"])
     return (
         f"def {fn}(state: AgentState) -> dict:\n"
-        f'    """{node.get("label") or "分支"} —— 根据内容判定走哪个出口。"""\n'
+        f'    """{node.get("label") or "分支"} —— 按判别问题决定走 true 还是 false。"""\n'
         f'    text = str(state.get("data", ""))\n'
-        f"    # 判定条件：{expr}\n"
-        f"    if \"最终答案\" in text or \"Final Answer\" in text:\n"
-        f'        return {{"data": text, "route": "true"}}\n'
-        f'    return {{"data": text, "route": "false"}}\n'
+        f"    question = {_q(question)}\n"
+        f"    verdict = {llm_var}.bind(temperature=0).invoke([\n"
+        f'        {{"role": "system", "content": "你只输出 true 或 false，不要解释。"}},\n'
+        f'        {{"role": "user", "content": f"判别问题：{{question}}\\n\\n待判内容：\\n{{text}}\\n\\n只回答 true 或 false。"}},\n'
+        f"    ]).content.strip().lower()\n"
+        f'    branch = "true" if verdict.startswith("true") else "false"\n'
+        f'    _emit({{"event": "route", "node": {name}, "name": {name},\n'
+        f'           "branch": branch, "reason": _brief(verdict, 120)}})\n'
+        f'    return {{"data": text, "route": branch}}\n'
     )
 
 
@@ -380,6 +402,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -401,6 +424,50 @@ llm = ChatOpenAI(
     max_tokens=CFG.get("max_tokens", 2048),
 )
 
+# ── 运行事件：每个节点执行前后的输入/输出都回传给网页运行面板 ──────
+EVENT_PREFIX = "@@EVENT@@"
+
+
+def _emit(event: dict) -> None:
+    try:
+        print(EVENT_PREFIX + json.dumps(event, ensure_ascii=False, default=str), flush=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _brief(value: Any, limit: int = 1500) -> Any:
+    if isinstance(value, str):
+        return value[:limit]
+    try:
+        return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+    except Exception:  # noqa: BLE001
+        return str(value)[:limit]
+
+
+def _track(fn, name: str, label: str = "", kind: str = "llm"):
+    """包一层：把节点执行前后的状态推给运行面板，并累计执行轨迹 trace。"""
+
+    def wrapped(state):
+        started = time.time()
+        _emit({"event": "node_start", "node": name, "name": name,
+               "label": label, "kind": kind})
+        try:
+            out = fn(state)
+        except Exception as exc:  # noqa: BLE001
+            _emit({"event": "error", "node": name, "name": name, "message": str(exc)})
+            raise
+        data = out.get("data", "") if isinstance(out, dict) else out
+        trace = list(state.get("trace") or [])
+        trace.append({"node": name, "kind": kind, "output": _brief(data)})
+        _emit({"event": "node_end", "node": name, "name": name, "kind": kind,
+               "duration_ms": int((time.time() - started) * 1000),
+               "output": _brief(data)})
+        if isinstance(out, dict):
+            out["trace"] = trace[-40:]
+        return out
+
+    return wrapped
+
 
 class AgentState(TypedDict, total=False):
     """整张图共享的状态：data 在节点之间流动，route 承载分支信号。"""
@@ -408,6 +475,8 @@ class AgentState(TypedDict, total=False):
     data: Any
     route: str
     history: list
+    trace: list
+    answer: Any
 
 
 '''
@@ -568,7 +637,11 @@ def _graph_section(spec: Dict[str, Any], framework: str) -> str:
             if _kind_of(node) in TOOL_KINDS:
                 # 工具节点本身不是图里的执行步骤，工具在 agent 内部被调用
                 continue
-            lines.append(f"builder.add_node({_q(node['name'])}, {fn})")
+            lines.append(
+                f"builder.add_node({_q(node['name'])}, "
+                f"_track({fn}, {_q(node['name'])}, {_q(node.get('label') or '')}, "
+                f"{_q(_kind_of(node))}))"
+            )
         lines.append("")
 
         # 普通边 / 条件边（tool 节点已被压缩掉）
@@ -675,7 +748,9 @@ def _main_section(spec: Dict[str, Any], framework: str) -> str:
     if framework == "langchain":
         body = (
             f'    result = graph.invoke({{"data": user_input, "route": ""}})\n'
-            f'    return result.get("data", "")\n'
+            f'    data = result.get("data", "")\n'
+            f'    _emit({{"event": "final", "output": _brief(data)}})\n'
+            f'    return data\n'
         )
     elif framework == "autogen":
         body = (
@@ -688,12 +763,7 @@ def _main_section(spec: Dict[str, Any], framework: str) -> str:
             f'    return str(result)\n'
         )
 
-    return (
-        "def main(user_input: str) -> str:\n"
-        f'    """入口：把用户输入交给 {entry_name}，一路跑完整张图。"""\n'
-        f"{body}"
-        "\n"
-        "\n"
+    run_main = (
         'if __name__ == "__main__":\n'
         "    import argparse\n"
         "\n"
@@ -701,10 +771,34 @@ def _main_section(spec: Dict[str, Any], framework: str) -> str:
         '    parser.add_argument("--input", "-i", default="", help="交给智能体的任务")\n'
         "    args = parser.parse_args()\n"
         "    text = args.input or input(\"请输入任务：\").strip()\n"
-        "    answer = main(text)\n"
-        "    print(\"\")\n"
-        '    print("=" * 16, "最终结果", "=" * 16)\n'
-        "    print(answer)\n"
+    )
+    if framework == "langchain":
+        run_main += (
+            "    try:\n"
+            "        answer = main(text)\n"
+            "    except Exception as exc:  # noqa: BLE001\n"
+            '        _emit({"event": "run_end", "status": "error", "message": str(exc), "output": ""})\n'
+            "        raise\n"
+            "    print(\"\")\n"
+            '    print("=" * 16, "最终结果", "=" * 16)\n'
+            "    print(answer)\n"
+            '    _emit({"event": "run_end", "status": "ok", "output": _brief(answer)})\n'
+        )
+    else:
+        run_main += (
+            "    answer = main(text)\n"
+            "    print(\"\")\n"
+            '    print("=" * 16, "最终结果", "=" * 16)\n'
+            "    print(answer)\n"
+        )
+
+    return (
+        "def main(user_input: str) -> str:\n"
+        f'    """入口：把用户输入交给 {entry_name}，一路跑完整张图。"""\n'
+        f"{body}"
+        "\n"
+        "\n"
+        f"{run_main}"
     )
 
 
@@ -730,10 +824,10 @@ def render_agent_full(spec: Dict[str, Any], framework: str) -> tuple:
     返回 (agent.py 全文, {node_id: 该节点的代码块})。
     节点块会被写回画布数据，网页上「代码逻辑」显示的就是这段。
     """
-    header = HEADERS.get(framework, _HEADER_LANGCHAIN).format(
-        name=spec["name"],
-        framework_label=spec.get("framework_label", framework),
-    )
+    # 用 replace 而不是 str.format：模板里现在有大量代码花括号
+    header = HEADERS.get(framework, _HEADER_LANGCHAIN)
+    header = header.replace("{framework_label}", str(spec.get("framework_label", framework)))
+    header = header.replace("{name}", str(spec["name"]))
     order = topo_order(spec)
     nodes = {n["id"]: n for n in spec["nodes"]}
 

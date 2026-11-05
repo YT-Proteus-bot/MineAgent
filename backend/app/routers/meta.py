@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException
 from ..constraints import CUSTOM_RULE_TYPES, rule_catalog
 from ..framework_templates import FRAMEWORKS, FRAMEWORK_INDEX, build_graph
 from ..codegen.native import default_block
+from ..node_docs import node_doc
 from ..node_registry import AGENT_MODES, CATEGORIES, NODE_TYPES
 
 router = APIRouter(prefix="/api/meta", tags=["meta"])
@@ -23,6 +24,8 @@ def meta():
         item["native_code"] = default_block(
             n["kind"], n.get("label", ""), n.get("description", ""), params,
         )
+        # 悬停说明：概念 / 解释 / 用途 / 编码建议
+        item["doc"] = node_doc(n["kind"], n.get("category", ""))
         nodes.append(item)
     return {
         "categories": CATEGORIES,

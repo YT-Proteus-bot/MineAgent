@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useStore } from '../store'
-import type { NodeTypeDef } from '../types'
+import type { NodeDoc, NodeTypeDef } from '../types'
+import NodeDocCard from './NodeDocCard'
 
 export function ContextMenu({
   x,
@@ -69,6 +70,14 @@ export function ContextMenu({
 export function NodePicker({ onPick }: { onPick: (kind: string) => void }) {
   const meta = useStore((s) => s.meta)
   const [q, setQ] = useState('')
+  // 悬停时在右侧弹出的说明卡片
+  const [hover, setHover] = useState<{
+    kind: string
+    label: string
+    doc?: NodeDoc
+    top: number
+    left: number
+  } | null>(null)
 
   const categories = meta?.categories ?? []
   const grouped = useMemo(() => {
@@ -85,6 +94,15 @@ export function NodePicker({ onPick }: { onPick: (kind: string) => void }) {
       .map((c) => ({ cat: c, items: nodes.filter((n) => n.category === c.id) }))
       .filter((g) => g.items.length > 0)
   }, [meta, q, categories])
+
+  const showDoc = (e: React.MouseEvent<HTMLDivElement>, n: NodeTypeDef) => {
+    if (!n.doc) return
+    const r = e.currentTarget.getBoundingClientRect()
+    const width = 300
+    const left = r.right + 12 + width > window.innerWidth ? r.left - width - 12 : r.right + 12
+    const top = Math.max(12, Math.min(r.top - 8, window.innerHeight - 320))
+    setHover({ kind: n.kind, label: n.label, doc: n.doc, top, left })
+  }
 
   return (
     <>
@@ -116,7 +134,13 @@ export function NodePicker({ onPick }: { onPick: (kind: string) => void }) {
             {g.cat.label}
           </div>
           {g.items.map((n) => (
-            <div key={n.kind} className="ctx-item" onClick={() => onPick(n.kind)}>
+            <div
+              key={n.kind}
+              className="ctx-item"
+              onClick={() => onPick(n.kind)}
+              onMouseEnter={(e) => showDoc(e, n)}
+              onMouseLeave={() => setHover(null)}
+            >
               <span className="ico" style={{ color: n.color }}>
                 {n.icon}
               </span>
@@ -126,6 +150,12 @@ export function NodePicker({ onPick }: { onPick: (kind: string) => void }) {
           ))}
         </div>
       ))}
+
+      {hover && (
+        <div className="node-doc" style={{ position: 'fixed', top: hover.top, left: hover.left, width: 300 }}>
+          <NodeDocCard label={hover.label} kind={hover.kind} doc={hover.doc} />
+        </div>
+      )}
     </>
   )
 }
