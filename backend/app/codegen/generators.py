@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Tuple
 from ..config import PROJECTS_DIR
 from ..framework_templates import FRAMEWORK_INDEX
 from ..node_registry import get_node_type
+from .native import render_agent_py
 
 RUNTIME_DIR = Path(__file__).resolve().parents[1] / "runtime"
 
@@ -95,9 +96,13 @@ def build_spec(name: str, slug: str, framework: str, graph: Dict[str, Any]) -> D
             "kind": kind,
             "name": node_name,
             "label": data.get("label") or meta["label"],
+            "description": data.get("description") or meta.get("description", ""),
             "file": f"{node_name}.py",
             "outputs": meta["outputs"],
             "params": data.get("params") or {},
+            # 平台内零依赖预览时执行的就是这段 run(ctx)；
+            # agent.py 里则是同一节点的框架原生写法
+            "code": data.get("code") or meta.get("default_code", ""),
             "position": node.get("position") or {"x": 0, "y": 0},
             "org": _node_org(data.get("org")),
             "model": _node_model(data.get("model")),
@@ -393,48 +398,30 @@ def generate_project(name: str, slug: str, framework: str, graph: Dict[str, Any]
 
     write("agent.json", json.dumps(spec, ensure_ascii=False, indent=2))
 
-    # 节点代码
-    keep = set()
+    # 不再生成 nodes/*.py：节点代码内联在 agent.py 里，agent.json 也存了一份
+    # 旧的 nodes 目录直接清掉，避免两份代码打架
+    if nodes_dir.exists():
+        for old in nodes_dir.glob("*.py"):
+            old.unlink(missing_ok=True)
+        try:
+            nodes_dir.rmdir()
+        except OSError:
+            pass
+
+    # skill 节点的内容单独落一个 md，方便用编辑器改
     for node, src in zip(spec["nodes"], graph.get("nodes", [])):
         data = src.get("data") or {}
-        code = data.get("code") or get_node_type(node["kind"])["default_code"]
-        write(f"nodes/{node['file']}", code.rstrip() + "\n")
-        keep.add(node["file"])
-        # skill 节点的内联内容单独落一个 md，方便用编辑器改
         skill_text = (data.get("params") or {}).get("skill_text") or ""
-        if node["kind"] == "skill" and skill_text.strip():
-            write(f"skills/{node['name']}.md", skill_text.rstrip() + "\n")
-    for old in nodes_dir.glob("*.py"):
-        if old.name not in keep:
-            old.unlink(missing_ok=True)
+        if node["kind"] == "skill" and str(skill_text).strip():
+            write(f"skills/{node['name']}.md", str(skill_text).rstrip() + "\n")
 
     # 运行时
     for fname in ("runtime_sdk.py", "runner.py"):
         shutil.copyfile(RUNTIME_DIR / fname, project_dir / fname)
         written.append(fname)
 
-    # 框架入口
-    tmpl = AGENT_PY.get(framework)
-    if tmpl:
-        content = (tmpl
-                   .replace("__PROJECT_NAME__", name)
-                   .replace("__FRAMEWORK_LABEL__",
-                            FRAMEWORK_INDEX.get(framework, {}).get("label", framework)))
-        write("agent.py", content + _MAIN_TAIL)
-    else:
-        write("agent.py", _AGENT_PY_COMMON
-              .replace("__PROJECT_NAME__", name)
-              .replace("__FRAMEWORK_LABEL__", framework)
-              + '''
-
-def main(user_input: str):
-    from runner import GraphRunner
-    out = GraphRunner(SPEC).run(user_input)
-    print("")
-    print("===== 最终结果 =====")
-    print(out if isinstance(out, str) else json.dumps(out, ensure_ascii=False, indent=2, default=str))
-    return out
-''' + _MAIN_TAIL)
+    # 框架入口：一整个 agent.py，就是这份画布的框架原生代码
+    write("agent.py", render_agent_py(spec, framework))
 
     # 模型配置（不含 key）
     cfg = {

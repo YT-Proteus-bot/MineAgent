@@ -17,11 +17,11 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import sys
 import time
 import traceback
+import types
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -71,21 +71,29 @@ class GraphRunner:
 
     # ---------------- 模块加载 ----------------
     def load_module(self, node: Dict[str, Any]):
-        path = NODES_DIR / node.get("file", f"{node['name']}.py")
-        key = str(path)
+        """节点代码直接内联在 agent.json 里（不再有 nodes/*.py）。"""
+        key = node["id"]
         if key in self.module_cache:
             return self.module_cache[key]
-        if not path.exists():
-            raise FileNotFoundError(f"节点文件不存在：{path.name}")
-        name = f"ma_node_{node['id']}"
-        spec = importlib.util.spec_from_file_location(name, path)
-        if spec is None or spec.loader is None:
-            raise ImportError(f"无法加载 {path.name}")
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[name] = module
-        spec.loader.exec_module(module)
+
+        code = (node.get("code") or "").strip()
+        if not code:
+            raise ValueError(f"节点 {node.get('name')} 没有可用代码")
+
+        # 兼容旧项目：agent.json 没存代码时回退到 nodes/<file>
+        if not code.startswith(("from", "import", "def", "#", '"""', "'''")):
+            path = NODES_DIR / node.get("file", f"{node['name']}.py")
+            if path.exists():
+                code = path.read_text(encoding="utf-8")
+
+        module = types.ModuleType(f"ma_node_{node['id']}")
+        module.__dict__["__file__"] = f"<node:{node['id']}>"
+        try:
+            exec(compile(code, f"<node:{node['id']}>", "exec"), module.__dict__)
+        except SyntaxError as exc:
+            raise SyntaxError(f"节点 {node.get('name')} 代码有语法错误：第 {exc.lineno} 行") from exc
         if not hasattr(module, "run"):
-            raise AttributeError(f"{path.name} 缺少 run(ctx) 函数")
+            raise AttributeError(f"节点 {node.get('name')} 缺少 run(ctx) 函数")
         self.module_cache[key] = module
         return module
 

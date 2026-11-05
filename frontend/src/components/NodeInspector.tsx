@@ -374,11 +374,18 @@ export default function NodeInspector() {
               <br />
               输出端口：{(def?.outputs || ['out']).join(' / ')}
               <br />
-              保存后会写入 <code className="mono">projects/{canvas?.slug}/nodes/{data.name}.py</code>
+              保存后在 <code className="mono">projects/{canvas?.slug}/agent.py</code> 里生成这个节点的
+              <strong> 框架原生写法</strong>（LangGraph / AutoGen / CrewAI 的真实代码）
             </div>
           </>
         ) : (
           <>
+            <div className="hint-box" style={{ marginBottom: 10 }}>
+              这段 <code className="mono">run(ctx)</code> 是平台内**零依赖预览**用的执行代码；
+              <br />
+              保存后项目里的 <code className="mono">agent.py</code> 会把这个节点写成框架原生代码
+              （例如 <code className="mono">@tool</code> / <code className="mono">create_react_agent</code>）。
+            </div>
             <div className="row" style={{ marginBottom: 8 }}>
               <span className="badge">{data.language === 'markdown' ? 'Markdown / Skill' : 'Python'}</span>
               <div style={{ flex: 1 }} />

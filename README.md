@@ -251,32 +251,60 @@ MineAgent/
 把自己那个文件夹整个拷走就能跑，不依赖 MineAgent 平台，也不依赖数据库。
 
 ```
-agent.json          # 画布图定义（节点、连线、参数），保存时自动覆盖
-agent.py            # 框架原生入口：LangGraph / AutoGen / CrewAI 真实 API
-runner.py           # 内置图执行器，任何画布都能跑（不需要装框架）
-runtime_sdk.py      # 节点里 ctx.* 的全部能力（只用标准库）
-run.ps1             # Windows 一键运行
-run.sh              # macOS / Linux 一键运行
+agent.py            # ← 核心：这一整张画布的框架原生代码
+agent.json          # 画布图定义（节点、连线、参数、节点代码）
+runner.py           # 零依赖预览执行器（不装框架也能在这里跑一遍）
+runtime_sdk.py      # runner 用的运行时（只用标准库）
+run.ps1 / run.sh    # 一键运行
 config.json         # 模型配置（不含 key）
-.env.example        # 想脱离网页独立运行时，复制成 .env 填 key
-nodes/
-  input_1.py        # ← 网页里编辑的代码就是这个文件
-  planner_2.py
-  agent_3.py
-  search_tool.py
-  observation_5.py
-  ...
-skills/             # skill.md 技能文件（带 .gitkeep，打包不会丢目录）
-outputs/            # 运行产物（artifact_builder 节点写这里）
-requirements.txt    # 该框架需要的依赖（不用框架时为空）
-.gitignore          # 已忽略 .env / .venv / .store.db / outputs / __pycache__
-README.md           # 这个项目自己的说明
+.env.example        # 脱离网页独立运行时，复制成 .env 填 key
+skills/             # skill.md 技能文件
+outputs/            # 运行产物
+requirements.txt    # 该框架需要的依赖
 ```
+
+**没有 `nodes/` 目录**。每个节点不是单独一个 `.py` 文件，而是 `agent.py` 里一个带
+`═══` 标记的代码块——打开 `agent.py` 看到的就是这个 Agent 的完整实现：
+
+```python
+# ═══════════════════════════════════════════════════════════════
+# 节点：Agent（ReAct）  (agent_3)  类型：agent
+# ═══════════════════════════════════════════════════════════════
+
+AGENT_3_PROMPT = PromptTemplate.from_template("""你可以使用以下工具：...""")
+
+def agent_3(state: AgentState) -> dict:
+    """Agent（ReAct） —— 推理模式：react，最多 6 步。"""
+    agent = create_react_agent(llm, TOOLS, AGENT_3_PROMPT)
+    executor = AgentExecutor(agent=agent, tools=TOOLS, max_iterations=6,
+                             handle_parsing_errors=True)
+    result = executor.invoke({"input": state.get("data", "")})
+    return {"data": result.get("output", "")}
+```
+
+不同类型节点对应不同的原生写法：
+
+| 节点类型 | `agent.py` 里的写法 |
+| --- | --- |
+| `tool` / `web_search` | `@tool def xxx(query: str)`，自动汇总进 `TOOLS` |
+| `agent` | `create_react_agent(llm, TOOLS, PROMPT)` + `AgentExecutor` |
+| `planner` / `observation` / `formatter` | `ChatPromptTemplate` + `llm.invoke(...)` |
+| `router` | 返回 `{"route": "true"/"false"}`，图里接 `add_conditional_edges` |
+| `retriever` | `vectorstore.as_retriever(...)` 的骨架代码 |
+| `memory` | `ConversationBufferMemory` |
+| `input` / `output` | 图的首尾函数 |
+
+图本身用 **LangGraph 的 `StateGraph`** 组装：`builder.add_node(...)`、
+`add_edge(...)`、`add_conditional_edges(...)`、`builder.compile()`——
+和你手写一个 LangGraph 项目没有区别。
+
+AutoGen / CrewAI 两个框架同理：会生成 `AssistantAgent` + `GroupChat`、
+`Agent` + `Task` + `Crew` 的原生写法。
 
 自包含这块做了几件具体的事：
 
 - `runtime_sdk.py` 与 `runner.py` 都复制进项目目录，只用 Python 标准库，
-  **只要机器上有 Python 3.9+ 就能跑**，不需要 pip 装任何东西
+  **只要机器上有 Python 3.9+ 就能零依赖预览运行**，不需要 pip 装任何东西
 - 执行器设置了 `sys.dont_write_bytecode`，跑完目录里不会冒 `__pycache__`
 - 每次保存都会清掉残留的 `__pycache__`，目录始终是可直接打包的状态
 - `skills/`、`outputs/` 带 `.gitkeep`，进 git 或压缩后目录结构不会丢
@@ -285,12 +313,16 @@ README.md           # 这个项目自己的说明
 
 ```powershell
 cd "projects\竞品调研智能体"
-.\run.ps1 "帮我调研一下国产 Agent 编排平台"      # 一键（默认走零依赖 runner）
 
-python runner.py --input "..."                  # 或者手动
-python agent.py --input "..."                   # 框架原生入口（没装框架会自动回退）
-.\run.ps1 -Install                              # 需要原生框架时再装依赖
-.\run.ps1 -UseFramework "..."                   # 装完依赖走框架原生入口
+# ① 零依赖预览：不装任何框架，用 runner 按图跑一遍
+.\run.ps1 "帮我调研一下国产 Agent 编排平台"
+
+# ② 真正跑原生代码：先装框架依赖，再走 agent.py
+.\run.ps1 -Install
+.\run.ps1 -UseFramework "帮我调研一下国产 Agent 编排平台"
+
+# 或者手动
+python agent.py --input "..."
 ```
 
 实测：把整个目录拷到别的路径、用系统 Python（不带本项目的 .venv）执行
