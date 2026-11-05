@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Tuple
 
 from ..config import PROJECTS_DIR
 from ..framework_templates import FRAMEWORK_INDEX
-from ..node_registry import get_node_type
+from ..node_registry import detect_llm_usage, get_node_type
 from .native import render_agent_full
 
 RUNTIME_DIR = Path(__file__).resolve().parents[1] / "runtime"
@@ -439,6 +439,10 @@ def generate_project(name: str, slug: str, framework: str, graph: Dict[str, Any]
         # 降级预览用的 run(ctx)：老画布没有就按节点类型补一份
         if not data.get("preview_code"):
             data["preview_code"] = get_node_type(node["kind"]).get("default_code", "")
+        # 动态扫描这段源码，判断它到底会不会调用大模型；
+        # 只看实际写进 agent.py 的那段（用户改过就是用户的），
+        # 不要拿 preview_code 兜底，否则用户删掉模型调用也会被模板判回 True
+        data["uses_llm"] = detect_llm_usage(block or data.get("code") or "", node["kind"])
 
     # 模型配置（不含 key）
     cfg = {

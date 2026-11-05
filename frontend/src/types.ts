@@ -70,6 +70,8 @@ export type FlowNodeData = {
   code_touched?: boolean
   /** 这段代码是从 agent.py 同步回来的 */
   code_generated?: boolean
+  /** 保存时扫描源码得出：这个节点会不会调用大模型 */
+  uses_llm?: boolean
   /** 零依赖预览用的 run(ctx) 代码（装框架前 runner 执行它） */
   preview_code?: string
   language: string
@@ -294,6 +296,30 @@ export interface GlobalSettings {
   orchestrator_model: string
   orchestrator_api_key?: string | null
   orchestrator_api_key_mask: string
+}
+
+export interface CommunityConfig {
+  repo: string
+  branch: string
+  dir: string
+  client_id: string
+  client_secret_mask: string
+  connected: boolean
+  login: string
+  configured: boolean
+  callback_url: string
+}
+
+export interface CommunityTemplate {
+  slug: string
+  name: string
+  description: string
+  tags: string[]
+  author: string
+  framework: string
+  node_count: number
+  created_at: string
+  mode?: string
 }
 
 export interface ProjectFileEntry {

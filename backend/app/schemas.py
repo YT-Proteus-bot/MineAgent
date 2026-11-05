@@ -18,6 +18,10 @@ class FlowNodeData(BaseModel):
     code_touched: bool = False
     # 这段代码是从 agent.py 同步回来的
     code_generated: bool = False
+    # 保存时扫描源码得出：这个节点会不会调用大模型
+    uses_llm: bool = False
+    # 零依赖预览用的 run(ctx) 代码
+    preview_code: str = ""
     language: str = "python"
     params: Dict[str, Any] = Field(default_factory=dict)
     status: str = "idle"

@@ -288,11 +288,45 @@ LLM_CALL_MARKERS = (
     "ctx.describe_image", "ctx.transcribe", "ctx.rerank",
 )
 
+# 更细的正则版：用于扫描用户自己改过的节点代码
+import re as _re
 
-def _uses_llm(kind: str, code: str) -> bool:
+_LLM_PATTERNS = [
+    _re.compile(r"\bctx\.llm(_stream)?\s*\("),
+    _re.compile(r"\bctx\.json_prompt\s*\("),
+    _re.compile(r"\bctx\.agent\s*\("),
+    _re.compile(r"\bctx\.delegate\s*\("),
+    _re.compile(r"\bctx\.describe_image\s*\("),
+    _re.compile(r"\bctx\.transcribe\s*\("),
+    _re.compile(r"\bctx\.rerank\s*\("),
+    # 原生块写法
+    _re.compile(r"\bChatOpenAI\s*\("),
+    _re.compile(r"\bcreate_agent\s*\("),
+    _re.compile(r"\bcreate_react_agent\s*\("),
+    _re.compile(r"\bAgentExecutor\s*\("),
+    _re.compile(r"\bllm\.(invoke|bind|stream|batch)\s*\("),
+    _re.compile(r"\bmodel\.(invoke|bind|stream)\s*\("),
+]
+
+
+def detect_llm_usage(code: str, kind: str = "") -> bool:
+    """扫描一段节点源码，判断它会不会调用大模型。
+
+    保存时会用它重新判定每个节点，用户手改了代码（加了或去掉了模型调用）
+    之后，右键里的「配置模型」入口会跟着变。
+    """
     if kind in ("llm", "agent", "supervisor", "worker", "group_chat", "debate"):
         return True
-    return any(m in (code or "") for m in LLM_CALL_MARKERS)
+    text = code or ""
+    if not text:
+        return False
+    if any(m in text for m in LLM_CALL_MARKERS):
+        return True
+    return any(p.search(text) for p in _LLM_PATTERNS)
+
+
+def _uses_llm(kind: str, code: str) -> bool:
+    return detect_llm_usage(code, kind)
 
 
 for kind, label, cat, icon, desc, outputs, params, language in _DEFS:

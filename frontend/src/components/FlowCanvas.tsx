@@ -73,9 +73,11 @@ export default function FlowCanvas() {
       ? nodes.find((n) => n.id === menu.nodeId)?.data.kind
       : undefined
   const menuNodeIsAgent = isAgentKind(menuNodeKind)
-  // 以服务端判断为准（它看的是真实代码模板），避免前端写死的清单漏掉 critic 这类节点
+  // 优先用保存时扫描源码得出的结论；还没保存过才退回按节点类型判断
+  const menuNode = menu?.kind === 'node' ? nodes.find((n) => n.id === menu.nodeId) : undefined
   const menuNodeDef = meta?.nodes.find((n) => n.kind === menuNodeKind)
-  const menuNodeUsesLLM = menuNodeDef?.uses_llm ?? usesLLM(menuNodeKind)
+  const menuNodeUsesLLM =
+    menuNode?.data.uses_llm ?? menuNodeDef?.uses_llm ?? usesLLM(menuNodeKind)
 
   const constraintPanelOpen = useStore((s) => s.constraintPanelOpen)
   const setConstraintPanelOpen = useStore((s) => s.setConstraintPanelOpen)
