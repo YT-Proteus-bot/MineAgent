@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import FRONTEND_DIST, HOST, PORT, ensure_dirs
 from .db import init_db
-from .routers import meta, projects, run, canvases, settings
+from .routers import backgrounds, canvases, meta, projects, run, settings
 
 
 @asynccontextmanager
@@ -34,6 +34,7 @@ app.add_middleware(
 )
 
 app.include_router(canvases.router)
+app.include_router(backgrounds.router)
 app.include_router(run.router)
 app.include_router(projects.router)
 app.include_router(settings.router)

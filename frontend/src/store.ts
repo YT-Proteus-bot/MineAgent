@@ -11,6 +11,7 @@ import {
 import { api, runCanvas, type RunHandle } from './api'
 import type {
   AgentNode,
+  CanvasBackground,
   CanvasDetail,
   CanvasSummary,
   FlowEdge,
@@ -20,6 +21,7 @@ import type {
   NodeTypeDef,
   RunEvent,
 } from './types'
+import { DEFAULT_BACKGROUND } from './types'
 
 export type Toast = { id: number; text: string; kind: 'ok' | 'err' | 'info' }
 
@@ -50,6 +52,9 @@ interface AppState {
   deleteCanvas: () => Promise<void>
   changeFramework: (framework: string) => Promise<void>
   refreshCanvases: () => Promise<void>
+  setBackground: (patch: Partial<CanvasBackground>) => Promise<void>
+  uploadBackground: (file: File) => Promise<void>
+  removeBackgroundImage: () => Promise<void>
 
   onNodesChange: (changes: NodeChange<AgentNode>[]) => void
   onEdgesChange: (changes: EdgeChange<FlowEdge>[]) => void
@@ -221,6 +226,43 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
+  setBackground: async (patch) => {
+    const canvas = get().canvas
+    if (!canvas) return
+    const next: CanvasBackground = { ...DEFAULT_BACKGROUND, ...canvas.background, ...patch }
+    // 背景是即改即存的显示设置，不参与「未保存」计数
+    set({ canvas: { ...get().canvas!, background: next } })
+    try {
+      await api.setBackground(canvas.id, next)
+    } catch (err: any) {
+      get().toast(`背景保存失败：${err.message || err}`, 'err')
+    }
+  },
+
+  uploadBackground: async (file) => {
+    const canvas = get().canvas
+    if (!canvas) return
+    try {
+      const res = await api.uploadBackground(canvas.id, file)
+      set({ canvas: { ...get().canvas!, background: res.background } })
+      get().toast(`背景图已更新（${Math.max(1, Math.round(res.size / 1024))} KB）`, 'ok')
+    } catch (err: any) {
+      get().toast(`上传失败：${err.message || err}`, 'err')
+    }
+  },
+
+  removeBackgroundImage: async () => {
+    const canvas = get().canvas
+    if (!canvas) return
+    try {
+      const res = await api.deleteBackground(canvas.id)
+      set({ canvas: { ...get().canvas!, background: res.background } })
+      get().toast('背景图已移除', 'ok')
+    } catch (err: any) {
+      get().toast(`移除失败：${err.message || err}`, 'err')
+    }
+  },
+
   onNodesChange: (changes) => {
     const next = applyNodeChanges<AgentNode>(changes as NodeChange<AgentNode>[], get().nodes)
     // 尺寸测量、选中变化不算「改动了画布内容」
@@ -338,6 +380,7 @@ export const useStore = create<AppState>((set, get) => ({
         nodes: cleanNodes,
         edges,
         viewport: canvas.graph.viewport || { x: 0, y: 0, zoom: 1 },
+        background: canvas.background,
       })
       set({
         canvas: res.canvas,

@@ -1,3 +1,3 @@
-from . import canvases, meta, projects, run, settings
+from . import backgrounds, canvases, meta, projects, run, settings
 
-__all__ = ["canvases", "meta", "projects", "run", "settings"]
+__all__ = ["backgrounds", "canvases", "meta", "projects", "run", "settings"]

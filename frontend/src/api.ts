@@ -1,4 +1,5 @@
 import type {
+  CanvasBackground,
   CanvasDetail,
   CanvasSummary,
   GlobalSettings,
@@ -60,6 +61,41 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify({ llm_config: cfg }),
     }),
+  setBackground: (id: string, bg: CanvasBackground) =>
+    request<CanvasDetail>(`/api/canvases/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ background: bg }),
+    }),
+  uploadBackground: async (id: string, file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    const resp = await fetch(`/api/canvases/${id}/background-image`, {
+      method: 'POST',
+      body: form,
+    })
+    if (!resp.ok) {
+      let detail = `${resp.status} ${resp.statusText}`
+      try {
+        const body = await resp.json()
+        detail = body.detail || detail
+      } catch {
+        /* ignore */
+      }
+      throw new Error(detail)
+    }
+    return (await resp.json()) as {
+      ok: boolean
+      filename: string
+      url: string
+      background: CanvasBackground
+      size: number
+    }
+  },
+  deleteBackground: (id: string) =>
+    request<{ ok: boolean; background: CanvasBackground }>(
+      `/api/canvases/${id}/background-image`,
+      { method: 'DELETE' },
+    ),
 
   env: (id: string) => request<Record<string, any>>(`/api/canvases/${id}/env`),
   listFiles: (id: string) =>

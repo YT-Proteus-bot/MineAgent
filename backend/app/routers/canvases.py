@@ -8,11 +8,11 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException
 
 from ..codegen import generate_project, unique_slug
-from ..config import PROJECTS_DIR
+from ..config import BACKGROUND_DIR, PROJECTS_DIR
 from ..db import get_conn, get_setting, now_iso, set_setting
 from ..framework_templates import FRAMEWORK_INDEX, build_graph
-from ..schemas import (CanvasCreate, CanvasDetail, CanvasSummary, CanvasUpdate,
-                       GlobalSettings, Graph, ModelConfig, SaveResult)
+from ..schemas import (CanvasBackground, CanvasCreate, CanvasDetail, CanvasSummary,
+                       CanvasUpdate, GlobalSettings, Graph, ModelConfig, SaveResult)
 from ..security import decrypt, encrypt, mask
 
 router = APIRouter(prefix="/api/canvases", tags=["canvases"])
@@ -38,6 +38,16 @@ def _row_to_config(row) -> Dict[str, Any]:
     }
 
 
+def _row_to_background(row) -> Dict[str, Any]:
+    try:
+        raw = json.loads(row["background"] or "{}")
+    except Exception:
+        raw = {}
+    base = CanvasBackground().model_dump()
+    base.update({k: v for k, v in raw.items() if k in base})
+    return base
+
+
 def _summary(row) -> CanvasSummary:
     graph = json.loads(row["graph"] or "{}")
     return CanvasSummary(
@@ -53,6 +63,7 @@ def _detail(row) -> CanvasDetail:
         **_summary(row).model_dump(),
         graph=Graph(**graph),
         llm_config=ModelConfig(**_row_to_config(row)),
+        background=CanvasBackground(**_row_to_background(row)),
     )
 
 
@@ -128,6 +139,7 @@ def create_canvas(payload: CanvasCreate):
     framework = payload.framework if payload.framework in FRAMEWORK_INDEX else "langchain"
     name = (payload.name or "").strip() or "未命名画布"
     graph = build_graph(framework)
+    graph["background"] = CanvasBackground().model_dump()
     canvas_id = __import__("uuid").uuid4().hex
 
     with get_conn() as conn:
@@ -142,10 +154,11 @@ def create_canvas(payload: CanvasCreate):
             "max_tokens": 2048,
         }
         conn.execute(
-            "INSERT INTO canvases(id,name,slug,framework,graph,model_config,created_at,updated_at)"
-            " VALUES(?,?,?,?,?,?,?,?)",
+            "INSERT INTO canvases(id,name,slug,framework,graph,model_config,background,"
+            "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
             (canvas_id, name, slug, framework, json.dumps(graph, ensure_ascii=False),
-             json.dumps(default_model, ensure_ascii=False), ts, ts),
+             json.dumps(default_model, ensure_ascii=False),
+             json.dumps(graph["background"], ensure_ascii=False), ts, ts),
         )
         row = _fetch(conn, canvas_id)
         try:
@@ -205,6 +218,9 @@ def update_canvas(canvas_id: str, payload: CanvasUpdate):
             new["api_key_cipher"] = cipher
             fields["model_config"] = json.dumps(new, ensure_ascii=False)
 
+        if payload.background is not None:
+            fields["background"] = json.dumps(payload.background.model_dump(), ensure_ascii=False)
+
         if not fields:
             return _detail(row)
 
@@ -233,8 +249,12 @@ def save_canvas_endpoint(canvas_id: str, graph: Graph):
     with get_conn() as conn:
         row = _fetch(conn, canvas_id)
         graph_dict = graph.model_dump()
-        conn.execute("UPDATE canvases SET graph = ?, updated_at = ? WHERE id = ?",
-                     (json.dumps(graph_dict, ensure_ascii=False), now_iso(), canvas_id))
+        conn.execute(
+            "UPDATE canvases SET graph = ?, background = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(graph_dict, ensure_ascii=False),
+             json.dumps(graph.background.model_dump(), ensure_ascii=False),
+             now_iso(), canvas_id),
+        )
         try:
             result = _persist(conn, canvas_id, graph_dict, touch=False)
         except Exception as exc:  # noqa: BLE001
@@ -253,4 +273,19 @@ def delete_canvas(canvas_id: str):
     target = (PROJECTS_DIR / row["slug"]).resolve()
     if target.parent == PROJECTS_DIR.resolve() and target.exists():
         shutil.rmtree(target, ignore_errors=True)
+    remove_background_files(canvas_id)
     return {"ok": True}
+
+
+def remove_background_files(canvas_id: str) -> int:
+    """删掉这个画布上传过的所有背景图（文件名以画布 id 开头）。"""
+    if not BACKGROUND_DIR.exists():
+        return 0
+    removed = 0
+    for path in BACKGROUND_DIR.glob(f"{canvas_id}_*"):
+        try:
+            path.unlink()
+            removed += 1
+        except OSError:
+            pass
+    return removed

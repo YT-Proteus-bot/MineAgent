@@ -36,10 +36,22 @@ class FlowEdge(BaseModel):
     data: Dict[str, Any] = Field(default_factory=dict)
 
 
+class CanvasBackground(BaseModel):
+    """画布背景。默认全透明，只保留很淡的点阵网格作为编辑参考。"""
+
+    color: str = ""            # 空字符串 = 透明
+    image: str = ""            # 背景图文件名（存 backend/data/backgrounds/）
+    image_fit: str = "cover"   # cover / contain / repeat / center
+    image_opacity: float = 1.0
+    grid: bool = True          # 是否显示点阵网格
+    grid_color: str = "#1d2740"
+
+
 class Graph(BaseModel):
     nodes: List[FlowNode] = Field(default_factory=list)
     edges: List[FlowEdge] = Field(default_factory=list)
     viewport: Dict[str, float] = Field(default_factory=lambda: {"x": 0, "y": 0, "zoom": 1})
+    background: CanvasBackground = Field(default_factory=CanvasBackground)
 
 
 class ModelConfig(BaseModel):
@@ -62,6 +74,7 @@ class CanvasUpdate(BaseModel):
     framework: Optional[str] = None
     graph: Optional[Graph] = None
     llm_config: Optional[ModelConfig] = None
+    background: Optional[CanvasBackground] = None
 
 
 class CanvasSummary(BaseModel):
@@ -77,6 +90,7 @@ class CanvasSummary(BaseModel):
 class CanvasDetail(CanvasSummary):
     graph: Graph
     llm_config: ModelConfig
+    background: CanvasBackground = Field(default_factory=CanvasBackground)
 
 
 class SaveResult(BaseModel):

@@ -72,9 +72,23 @@
 | 拖动节点本身 | 调整位置（吸附 16px 网格） |
 | 选中后按 Delete | 删除节点或连线 |
 | 双击节点 | 直接打开代码编辑器 |
+| 画布左上「🎨 背景」 | 底色（含透明）、上传背景图、填充方式与透明度、点阵网格 |
 
 画布支持缩放、平移、框选、MiniMap 导航。每个智能体强制要求一个 `input` 和一个 `output` 方块，
 缺少时保存会被拦下并提示。
+
+### 画布背景
+
+画布默认是**透明**的（露出页面底色），也可以换成任意底色，或者上传自己的背景图：
+
+![画布背景](docs/screenshots/06-background.png)
+
+- **底色**：11 个预设色 + 取色器，随时「恢复透明」
+- **背景图片**：PNG / JPG / WebP / GIF / BMP，≤ 12MB；四种填充方式（铺满 / 适应 / 平铺 / 居中），
+  透明度 5%–100%，可随时移除
+- **点阵网格**：可开关、可换颜色，只在编辑时做对齐参考
+- 背景是「即改即存」的显示设置，改完立刻生效，不占用「未保存」标记；
+  图片存在本机 `backend/data/backgrounds/`，不进 git，删除画布时一并清理
 
 ---
 
@@ -97,7 +111,7 @@ MineAgent/
 │  │  │  ├─ runtime_sdk.py      # 节点可用的 ctx 能力（会被复制进每个项目）
 │  │  │  └─ runner.py           # 内置图执行器（会被复制进每个项目）
 │  │  └─ routers/               # canvases / run / projects / settings / meta
-│  ├─ data/                     # mineagent.db、master.key、运行日志（不入库）
+│  ├─ data/                     # mineagent.db、master.key、运行日志、背景图（不入库）
 │  └─ requirements.txt
 ├─ frontend/
 │  ├─ src/                      # React 应用

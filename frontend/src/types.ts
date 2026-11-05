@@ -24,6 +24,7 @@ export interface GraphPayload {
   nodes: AgentNode[]
   edges: FlowEdge[]
   viewport: { x: number; y: number; zoom: number }
+  background?: CanvasBackground
 }
 
 export interface ModelConfig {
@@ -34,6 +35,26 @@ export interface ModelConfig {
   max_tokens: number
   api_key?: string | null
   api_key_mask: string
+}
+
+export interface CanvasBackground {
+  /** 空字符串表示透明 */
+  color: string
+  /** 背景图文件名（存在后端的 data/backgrounds 下） */
+  image: string
+  image_fit: 'cover' | 'contain' | 'repeat' | 'center'
+  image_opacity: number
+  grid: boolean
+  grid_color: string
+}
+
+export const DEFAULT_BACKGROUND: CanvasBackground = {
+  color: '',
+  image: '',
+  image_fit: 'cover',
+  image_opacity: 1,
+  grid: true,
+  grid_color: '#1d2740',
 }
 
 export interface CanvasSummary {
@@ -49,6 +70,7 @@ export interface CanvasSummary {
 export interface CanvasDetail extends CanvasSummary {
   graph: GraphPayload
   llm_config: ModelConfig
+  background: CanvasBackground
 }
 
 export interface Category {

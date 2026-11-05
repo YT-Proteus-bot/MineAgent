@@ -11,8 +11,10 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import AgentNode from './AgentNode'
+import BackgroundPanel from './BackgroundPanel'
 import { ContextMenu, NodePicker } from './ContextMenu'
 import { useStore } from '../store'
+import { DEFAULT_BACKGROUND } from '../types'
 
 const nodeTypes = { agent: AgentNode }
 
@@ -38,6 +40,7 @@ export default function FlowCanvas() {
 
   const { screenToFlowPosition, fitView } = useReactFlow()
   const [menu, setMenu] = useState<MenuState>(null)
+  const [bgPanelOpen, setBgPanelOpen] = useState(false)
   const setInspectorTab = useStore((s) => s.setInspectorTab)
   const canvasId = canvas?.id
 
@@ -96,8 +99,33 @@ export default function FlowCanvas() {
   const frameworkLabel =
     meta?.frameworks.find((f) => f.id === canvas?.framework)?.label || canvas?.framework || '-'
 
+  const bg = { ...DEFAULT_BACKGROUND, ...(canvas?.background || {}) }
+  const imageStyle = bg.image
+    ? {
+        backgroundImage: `url(/api/backgrounds/${bg.image})`,
+        backgroundSize:
+          bg.image_fit === 'cover'
+            ? 'cover'
+            : bg.image_fit === 'contain'
+              ? 'contain'
+              : bg.image_fit === 'repeat'
+                ? 'auto'
+                : 'auto',
+        backgroundRepeat: bg.image_fit === 'repeat' ? 'repeat' : 'no-repeat',
+        backgroundPosition: 'center',
+        opacity: bg.image_opacity,
+      }
+    : undefined
+
   return (
     <div className="canvas-area">
+      <div
+        className="canvas-bg"
+        style={{ background: bg.color || 'transparent' }}
+        aria-hidden
+      />
+      {bg.image && <div className="canvas-bg-image" style={imageStyle} aria-hidden />}
+
       <ReactFlow
         nodes={nodes}
         edges={styledEdges}
@@ -125,7 +153,14 @@ export default function FlowCanvas() {
         snapToGrid
         snapGrid={[16, 16]}
       >
-        <Background variant={BackgroundVariant.Dots} gap={22} size={1} color="#1d2740" />
+        {bg.grid && (
+          <Background
+            variant={BackgroundVariant.Dots}
+            gap={22}
+            size={1}
+            color={bg.grid_color || '#1d2740'}
+          />
+        )}
         <Controls showInteractive={false} />
         <MiniMap
           pannable
@@ -150,8 +185,18 @@ export default function FlowCanvas() {
         <div className="hud-chip">
           {nodes.length} 个节点 · {edges.length} 条连线
         </div>
+        <button
+          className={`hud-chip hud-btn${bgPanelOpen ? ' active' : ''}`}
+          onClick={() => setBgPanelOpen((v) => !v)}
+          title="调整画布底色、上传背景图"
+        >
+          🎨 背景
+          {bg.image ? <span className="badge" style={{ padding: '0 4px' }}>图</span> : null}
+        </button>
         <div className="hud-chip dim">右键画布新增节点 · 右键节点编辑</div>
       </div>
+
+      {bgPanelOpen && <BackgroundPanel onClose={() => setBgPanelOpen(false)} />}
 
       {nodes.length === 0 && (
         <div className="empty-state">
