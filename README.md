@@ -73,6 +73,7 @@
 | 顶部「保存」 | 把画布落库，并实时生成 `projects/<画布>/` 下的全部代码（`Ctrl/Cmd + S`） |
 | 顶部「↶ / ↷」 | 撤销 / 重做画布改动（`Ctrl+Z` / `Ctrl+Shift+Z` 或 `Ctrl+Y`），连续拖动合并成一步 |
 | 顶部「⚠ 约束」 | 编排约束面板：内置规则 + 自定义规则，违规节点在画布上标红 |
+| 顶部「⚙ 服务」 | 画布级服务设置：入口 / 会话并发 / 可观测 / 安全；保存后编译进生成项目的服务文件 |
 | 顶部「运行」 | 编译并真实执行当前画布，执行过程流式回显到节点和运行面板 |
 | 右上角「选择模式」 | 框架**左边**的下拉，列出该框架支持的推理模式（ReAct / CoT / Plan-and-Execute / 群聊…），选中后作为画布默认，新建 agent 节点会用它 |
 | 右上角下拉 | 选择 Agent 框架（LangChain/LangGraph、AutoGen、CrewAI…），切换后重建架构图 |
@@ -181,6 +182,17 @@ ctx.delegate("名字", 任务)   # 把活派给某个 agent，等它返回结果
 Key 加密存在本机 `agent_models` 表，运行时通过环境变量 `MINEAGENT_KEY_<节点ID>` 注入子进程，
 不会出现在 `agent.json` 或任何项目文件里。
 
+**节点可靠性**：每个节点的属性面板里还有一组「可靠性」开关——超时、失败重试次数、
+重试退避、每分钟调用上限、失败策略、执行沙箱、工具调用幂等。
+
+它们不是画布上的节点，而是节点属性：重试、超时、限流都是「怎么跑」的执行约束，
+做成节点会诱导你把控制流当业务流。生成代码里由统一的 `_track` 包装执行：
+超时用线程超时、只对网络/限流/超时类错误重试、超过每分钟上限就等待。
+
+**错误出口**：每个节点右下角有一个红色小端口，拖出来的边是红色虚线「错误」边。
+节点失败时，接了错误边走错误分支继续跑，没接才中断整条流程；
+失败策略选「走 error 连线」后，原生模式会生成 `conditional_edges` 做分流。
+
 ### 社区模板（GitHub 分享）
 
 画布可以像配置文件一样分享：把自己的作品提 PR 到社区仓库，别人在应用里一键加载成新画布。
@@ -263,6 +275,32 @@ Client ID / Secret，点「连接 GitHub」跳转网页授权（`public_repo` + 
 
 ---
 
+### 服务设置（画布级契约）
+
+顶部「⚙ 服务」把整张画布当成一个后端服务来配置，**不改变流程图本身**：
+
+![服务设置](docs/screenshots/17-service.png)
+
+| 组 | 配什么 |
+| --- | --- |
+| ① 服务入口 | 暴露方式（HTTP / SSE / 两者）、接口路径、鉴权（无 / API Key / OIDC）、CORS |
+| ② 会话与并发 | 会话存储（无 / SQLite / Postgres）、最大轮数、会话 TTL、并发上限、排队上限、整条 run 超时、断点续跑 |
+| ③ 可观测 | 日志级别、JSON 日志、`/metrics` 开关、trace 采样率、预算上限 |
+| ④ 安全 | 默认执行沙箱、护栏默认策略、PII 脱敏、审计 |
+
+保存后配置写进画布的 `graph.service`，并编译进生成项目：
+
+- `settings.py` 按它生成默认值，运行时全部可以用环境变量覆盖；
+- `server.py` 按它生成 `/chat`、`/chat/stream`、`/health`、`/ready`、`/metrics` 和鉴权；
+- `checkpoint.py` 按「会话存储」选择 SQLite / Postgres 的 checkpointer；
+- `telemetry.py` 按「可观测」决定 JSON 日志与 metrics。
+
+**会话存储**解决的是「多轮对话能不能接着上一轮」：一次运行结束后状态默认只在内存里，
+存下来之后，同一个 `thread_id` 的下次请求会从上次的状态继续。它和 `memory` 节点不是一回事——
+前者是运行时层的「存档读档」，后者是 Agent 逻辑层的「日记本」。
+
+一句话：**流程图表达「做什么」，服务设置表达「怎么跑、怎么上线」。**
+
 ## 目录结构
 
 ```
@@ -278,6 +316,7 @@ MineAgent/
 │  │  ├─ node_templates.py      # 每种节点的默认代码模板
 │  │  ├─ framework_templates.py # 10 个框架 + 各自的架构图模板 + 自动布局
 │  │  ├─ codegen/generators.py  # 画布 → 独立 Agent 项目的代码生成
+│  │  ├─ codegen/production.py  # 服务设置 → server.py / Dockerfile / CI 等生产化文件
 │  │  ├─ runtime/
 │  │  │  ├─ runtime_sdk.py      # 节点可用的 ctx 能力（会被复制进每个项目）
 │  │  │  └─ runner.py           # 内置图执行器（会被复制进每个项目）
@@ -303,6 +342,14 @@ MineAgent/
 
 ```
 agent.py            # ← 核心：这一整张画布的框架原生代码
+server.py           # FastAPI 服务入口：/chat、/chat/stream、/health、/ready、/metrics
+settings.py         # 服务配置（环境变量驱动，默认值来自画布的「服务设置」）
+telemetry.py        # 结构化日志 + 轻量 metrics
+checkpoint.py       # 会话持久化（SQLite / Postgres 的 LangGraph checkpointer）
+Dockerfile          # 容器镜像
+docker-compose.yml  # 一条命令起服务
+.github/workflows/ci.yml   # 编译 + 冒烟测试
+tests/              # pytest 冒烟测试（不需要真实模型）
 agent.json          # 画布图定义（节点、连线、参数、节点代码）
 runner.py           # 零依赖预览执行器（不装框架也能在这里跑一遍）
 runtime_sdk.py      # runner 用的运行时（只用标准库）
@@ -311,7 +358,7 @@ config.json         # 模型配置（不含 key）
 .env.example        # 脱离网页独立运行时，复制成 .env 填 key
 skills/             # skill.md 技能文件
 outputs/            # 运行产物
-requirements.txt    # 该框架需要的依赖
+requirements.txt    # 该框架需要的依赖（含服务化依赖）
 ```
 
 **没有 `nodes/` 目录**。每个节点不是单独一个 `.py` 文件，而是 `agent.py` 里一个带
@@ -424,9 +471,14 @@ python agent.py --input "..."
    - 多入边节点会先把**还没执行过的上游分支补齐**，再合并输入（fan-in）；
    - 返回 `true` / `false` / `loop` / `exit` 的多端口节点视为**路由节点**：
      走对应出边，且输入原样透传给下游（不改数据），这是循环与分支的基础；
+   - 节点失败时，如果接了红色「错误出口」边就走错误分支继续，否则中断整条 run；
+   - 每个节点执行前后都会回传 `node_start` / `node_end`（含耗时、输出、重试次数），
+     模型输出逐 token 回传 `token` 事件，运行面板据此实时高亮与滚动；
    - 走回边按循环处理，每个节点最多访问 8 次（`agent.json` 里 `max_visits` 可调）。
 4. **模型 key 从不落盘到项目目录**：运行时通过 `MINEAGENT_API_KEY` 环境变量注入子进程，
    `config.json` 里只有地址和模型名。
+5. **保存时按「服务设置」生成生产化文件**：`server.py` / `settings.py` / `telemetry.py` /
+   `checkpoint.py` / Dockerfile / compose / CI / tests，全部随项目一起走。
 
 ---
 
