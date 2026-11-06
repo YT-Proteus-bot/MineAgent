@@ -144,6 +144,16 @@ export default function AgentNode({ id, data, selected, dragging }: NodeProps<Ag
         />
       ))}
 
+      {/* 错误出口：节点失败（且失败策略选了「走 error 连线」）时走这条边 */}
+      <Handle
+        type="source"
+        position={Position.Right}
+        id="error"
+        className="handle-error"
+        title="错误出口（失败时走这条线）"
+        style={{ right: -5, top: 'calc(100% - 16px)' }}
+      />
+
       {hovered && !dragging && (
         <div className="node-tip">
           <NodeDocCard

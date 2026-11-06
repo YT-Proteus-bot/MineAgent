@@ -313,7 +313,24 @@ class GraphRunner:
                 payload = self.merged_input(cur)
 
             self.state["__last_payload__"] = payload
-            result = self.execute_node(cur, payload)
+            try:
+                result = self.execute_node(cur, payload)
+            except Exception as exc:  # noqa: BLE001
+                # 节点失败：如果画布上接了「错误出口」，走错误分支继续；否则照旧中断
+                err_edges = [e for e in self.out_edges.get(cur, [])
+                             if str(e.get("sourceHandle") or "") == "error"]
+                if not err_edges:
+                    raise
+                self.state["last_error"] = str(exc)
+                target = err_edges[0]["target"]
+                emit_event({"event": "route", "node": cur, "branch": "error",
+                            "target": target})
+                emit_event({"event": "log", "level": "warn", "node": cur,
+                            "name": node.get("name"),
+                            "message": f"节点失败，转错误分支：{exc}"})
+                cur = target
+                payload = {"error": str(exc), "node": node.get("name")}
+                continue
 
             handles = node.get("outputs") or ["out"]
             is_router = len(handles) > 1 and isinstance(result, str) \

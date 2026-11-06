@@ -263,6 +263,16 @@ textarea {
   padding: 11px 13px 14px;
   overflow-y: auto;
 }
+/* 服务设置：固定右上角抽屉，比背景面板宽一些 */
+.service-panel {
+  position: fixed;
+  top: 58px;
+  right: 14px;
+  left: auto;
+  width: 392px;
+  max-height: calc(100vh - 92px);
+  z-index: 60;
+}
 .bg-section-title {
   font-size: 10.5px;
   color: var(--muted);
@@ -1239,6 +1249,22 @@ input[type='range'] {
 }
 .react-flow__handle-connecting {
   background: var(--accent-2) !important;
+}
+/* 错误出口：红色小端口，平时低存在感，悬停才亮 */
+.react-flow__handle.handle-error {
+  width: 10px;
+  height: 10px;
+  background: #7f2b2b;
+  border-color: #1a0d0d;
+  opacity: 0.55;
+}
+.agent-node:hover .react-flow__handle.handle-error {
+  opacity: 1;
+  background: #f87171;
+}
+.react-flow__handle.handle-error:hover {
+  background: #f87171;
+  box-shadow: 0 0 0 4px rgba(248, 113, 113, 0.22);
 }
 .react-flow__edge-path {
   stroke: #4a5c80;

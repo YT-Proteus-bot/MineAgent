@@ -369,6 +369,112 @@ export default function NodeInspector() {
               />
             ))}
 
+            <div className="dim small" style={{ margin: '16px 0 8px', letterSpacing: 0.4 }}>
+              可靠性
+            </div>
+            <div className="row" style={{ gap: 10 }}>
+              <label className="field" style={{ flex: 1 }}>
+                <span>超时（秒，0 不限）</span>
+                <input
+                  type="number"
+                  min={0}
+                  value={Number(data.params?.timeout_s ?? 120)}
+                  onChange={(e) =>
+                    updateNode(node.id, {
+                      params: { ...(data.params || {}), timeout_s: Number(e.target.value) },
+                    })
+                  }
+                />
+              </label>
+              <label className="field" style={{ flex: 1 }}>
+                <span>失败重试次数</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={5}
+                  value={Number(data.params?.max_retries ?? 0)}
+                  onChange={(e) =>
+                    updateNode(node.id, {
+                      params: { ...(data.params || {}), max_retries: Number(e.target.value) },
+                    })
+                  }
+                />
+              </label>
+              <label className="field" style={{ flex: 1 }}>
+                <span>重试退避（秒）</span>
+                <input
+                  type="number"
+                  min={0}
+                  step={0.5}
+                  value={Number(data.params?.retry_backoff_s ?? 2)}
+                  onChange={(e) =>
+                    updateNode(node.id, {
+                      params: { ...(data.params || {}), retry_backoff_s: Number(e.target.value) },
+                    })
+                  }
+                />
+              </label>
+            </div>
+            <label className="field">
+              <span>每分钟调用上限（0 不限）</span>
+              <input
+                type="number"
+                min={0}
+                value={Number(data.params?.rate_per_minute ?? 0)}
+                onChange={(e) =>
+                  updateNode(node.id, {
+                    params: { ...(data.params || {}), rate_per_minute: Number(e.target.value) },
+                  })
+                }
+              />
+            </label>
+            <label className="field">
+              <span>失败策略</span>
+              <select
+                value={String(data.params?.on_error ?? 'block')}
+                onChange={(e) =>
+                  updateNode(node.id, {
+                    params: { ...(data.params || {}), on_error: e.target.value },
+                  })
+                }
+              >
+                <option value="block">阻断流程（默认）</option>
+                <option value="edge">走 error 连线（失败不中断，交给错误分支）</option>
+              </select>
+            </label>
+            <label className="field">
+              <span>执行沙箱</span>
+              <select
+                value={String(data.params?.sandbox ?? 'inherit')}
+                onChange={(e) =>
+                  updateNode(node.id, {
+                    params: { ...(data.params || {}), sandbox: e.target.value },
+                  })
+                }
+              >
+                <option value="inherit">跟随画布默认</option>
+                <option value="none">不限制</option>
+                <option value="restricted">受限（目录白名单 + 资源限制）</option>
+                <option value="container">容器隔离</option>
+              </select>
+            </label>
+            <label className="row" style={{ gap: 8 }}>
+              <input
+                type="checkbox"
+                checked={!!data.params?.idempotent}
+                onChange={(e) =>
+                  updateNode(node.id, {
+                    params: { ...(data.params || {}), idempotent: e.target.checked },
+                  })
+                }
+                style={{ width: 15, height: 15 }}
+              />
+              <span className="small">工具调用幂等（同一次运行内重复执行不产生重复副作用）</span>
+            </label>
+            <div className="hint-box">
+              这些是「怎么跑」的执行约束，不改变流程本身；保存后写进生成项目的节点配置。
+            </div>
+
             <div className="hint-box" style={{ marginTop: 14 }}>
               节点类型 <code className="mono">{data.kind}</code>
               <br />

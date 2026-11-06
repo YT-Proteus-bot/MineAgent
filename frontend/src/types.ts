@@ -99,6 +99,30 @@ export interface GraphPayload {
   edges: FlowEdge[]
   viewport: { x: number; y: number; zoom: number }
   background?: CanvasBackground
+  service?: ServiceConfig
+}
+
+/** 画布级「服务设置」：入口 / 会话与并发 / 可观测 / 安全 */
+export interface ServiceConfig {
+  entry: { mode: string; path: string; auth: string; cors: string }
+  session: { store: string; max_turns: number; ttl_minutes: number }
+  runtime: { max_concurrency: number; queue_limit: number; run_timeout_s: number; resume: boolean }
+  observability: {
+    log_level: string
+    json_logs: boolean
+    metrics: boolean
+    trace_sample: number
+    budget_usd: number
+  }
+  security: { sandbox: string; guardrail: string; pii: boolean; audit: boolean }
+}
+
+export const DEFAULT_SERVICE: ServiceConfig = {
+  entry: { mode: 'both', path: '/chat', auth: 'none', cors: '*' },
+  session: { store: 'sqlite', max_turns: 20, ttl_minutes: 1440 },
+  runtime: { max_concurrency: 4, queue_limit: 100, run_timeout_s: 600, resume: false },
+  observability: { log_level: 'info', json_logs: true, metrics: true, trace_sample: 1, budget_usd: 0 },
+  security: { sandbox: 'restricted', guardrail: 'log', pii: false, audit: true },
 }
 
 export interface ModelConfig {

@@ -6,6 +6,7 @@ import PromptModal from './PromptModal'
 import CommunityModal from './CommunityModal'
 import GitHubAccountModal from './GitHubAccountModal'
 import UploadTemplateModal from './UploadTemplateModal'
+import ServicePanel from './ServicePanel'
 
 interface Props {
   onOpenUserCenter: () => void
@@ -40,6 +41,7 @@ export default function TopBar({ onOpenUserCenter, onOpenCanvasModel }: Props) {
   const [prompt, setPrompt] = useState<null | 'new' | 'rename'>(null)
   const [uploadOpen, setUploadOpen] = useState(false)
   const [communityOpen, setCommunityOpen] = useState(false)
+  const [serviceOpen, setServiceOpen] = useState(false)
   const [githubOpen, setGithubOpen] = useState(false)
   const refreshCanvases = useStore((s) => s.refreshCanvases)
 
@@ -236,6 +238,13 @@ export default function TopBar({ onOpenUserCenter, onOpenCanvasModel }: Props) {
         )}
       </button>
 
+      <button
+        onClick={() => setServiceOpen(true)}
+        title="服务入口 / 会话并发 / 可观测 / 安全（画布级配置）"
+      >
+        <span>⚙</span> 服务
+      </button>
+
       <button className="primary" onClick={handleRun} disabled={running || !canvas}>
         {running ? <span className="spin" /> : <span>▶</span>}
         {running ? '运行中' : '运行'}
@@ -419,6 +428,8 @@ export default function TopBar({ onOpenUserCenter, onOpenCanvasModel }: Props) {
       </Popover>
 
       {githubOpen && <GitHubAccountModal onClose={() => setGithubOpen(false)} />}
+
+      {serviceOpen && <ServicePanel onClose={() => setServiceOpen(false)} />}
 
       {uploadOpen && canvas && (
         <UploadTemplateModal

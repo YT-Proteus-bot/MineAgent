@@ -67,6 +67,8 @@ class Graph(BaseModel):
     edges: List[FlowEdge] = Field(default_factory=list)
     viewport: Dict[str, float] = Field(default_factory=lambda: {"x": 0, "y": 0, "zoom": 1})
     background: CanvasBackground = Field(default_factory=CanvasBackground)
+    # 画布级「服务设置」：入口 / 会话并发 / 可观测 / 安全
+    service: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ModelConfig(BaseModel):

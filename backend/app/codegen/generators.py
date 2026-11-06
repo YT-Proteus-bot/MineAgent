@@ -11,6 +11,7 @@ from ..config import PROJECTS_DIR
 from ..framework_templates import FRAMEWORK_INDEX
 from ..node_registry import detect_llm_usage, get_node_type
 from .native import render_agent_full
+from .production import render_production_files, render_requirements_extra
 
 RUNTIME_DIR = Path(__file__).resolve().parents[1] / "runtime"
 
@@ -455,7 +456,14 @@ def generate_project(name: str, slug: str, framework: str, graph: Dict[str, Any]
     }
     write("config.json", json.dumps(cfg, ensure_ascii=False, indent=2))
 
-    write("requirements.txt", REQUIREMENTS.get(framework, "# 无额外依赖（使用内置 runner）\n"))
+    write("requirements.txt",
+          REQUIREMENTS.get(framework, "# 无额外依赖（使用内置 runner）\n").rstrip()
+          + "\n\n# 服务化依赖（server.py）\n" + render_requirements_extra())
+
+    # 生产化文件：把画布的「服务设置」编译成 server / settings / telemetry / checkpoint
+    # 以及 Dockerfile、compose、CI、冒烟测试（只对可运行的框架生成）
+    for rel, content in render_production_files(spec, graph, framework).items():
+        write(rel, content)
 
     env_example = (
         "# 复制为 .env 并填入你的 key（网页上配置过的话可以不填）\n"

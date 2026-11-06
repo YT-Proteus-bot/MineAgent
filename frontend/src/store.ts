@@ -214,6 +214,7 @@ interface AppState {
   changeFramework: (framework: string) => Promise<void>
   refreshCanvases: () => Promise<void>
   setBackground: (patch: Partial<CanvasBackground>) => Promise<void>
+  setServiceConfig: (service: any) => void
   uploadBackground: (file: File) => Promise<void>
   removeBackgroundImage: () => Promise<void>
   validateNow: () => Promise<void>
@@ -353,6 +354,7 @@ function normalize(nodes: AgentNode[]): AgentNode[] {
 
 function edgeLabelFromHandle(handle?: string | null): string | undefined {
   if (!handle || handle === 'out') return undefined
+  if (handle === 'error') return '错误'
   return handle
 }
 
@@ -522,6 +524,15 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
+  setServiceConfig: (service) => {
+    const canvas = get().canvas
+    if (!canvas) return
+    set({
+      canvas: { ...canvas, graph: { ...canvas.graph, service } },
+      dirty: true,
+    })
+  },
+
   uploadBackground: async (file) => {
     const canvas = get().canvas
     if (!canvas) return
@@ -668,6 +679,8 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   onConnect: (conn) => {
+    const isError = conn.sourceHandle === 'error'
+    const color = isError ? '#f87171' : '#7c8aa5'
     const edge: FlowEdge = {
       ...conn,
       id: `e_${conn.source}_${conn.sourceHandle || 'out'}_${conn.target}_${Date.now().toString(36)}`,
@@ -675,8 +688,10 @@ export const useStore = create<AppState>((set, get) => ({
       animated: false,
       label: edgeLabelFromHandle(conn.sourceHandle),
       data: { branch: edgeLabelFromHandle(conn.sourceHandle) },
-      markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16, color: '#7c8aa5' },
-      style: { stroke: '#7c8aa5', strokeWidth: 2 },
+      markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16, color },
+      style: isError
+        ? { stroke: color, strokeWidth: 2, strokeDasharray: '5 4' }
+        : { stroke: color, strokeWidth: 2 },
     }
     set({ edges: addEdge(edge, get().edges) as FlowEdge[], dirty: true })
   },
@@ -1085,6 +1100,7 @@ export const useStore = create<AppState>((set, get) => ({
         edges,
         viewport: canvas.graph.viewport || { x: 0, y: 0, zoom: 1 },
         background: canvas.background,
+        service: (canvas.graph as any).service || undefined,
       })
       set({
         canvas: res.canvas,

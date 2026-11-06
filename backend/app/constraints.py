@@ -100,11 +100,15 @@ class GraphView:
         self.out: Dict[str, List[str]] = defaultdict(list)
         self.inn: Dict[str, List[str]] = defaultdict(list)
         self.out_handles: Dict[str, Set[str]] = defaultdict(set)
+        # 错误出口的边：不参与「多入边需要 join」这类正常数据流校验
+        self.error_pairs: Set[Tuple[str, str]] = set()
         for e in self.edges:
             self.out[e["source"]].append(e["target"])
             self.inn[e["target"]].append(e["source"])
             if e.get("sourceHandle"):
                 self.out_handles[e["source"]].add(str(e["sourceHandle"]))
+            if str(e.get("sourceHandle") or "") == "error":
+                self.error_pairs.add((e["source"], e["target"]))
 
     def ids_of(self, kinds: Iterable[str]) -> List[str]:
         ks = set(kinds)
@@ -237,7 +241,8 @@ def _check_builtin(g: GraphView) -> List[Dict[str, Any]]:
     for nid in g.kind:
         # 循环回边（源节点在我的下游）不算真正的多入边
         back = g.downstream(nid)
-        real_ins = [s for s in g.inn.get(nid, []) if s not in back]
+        real_ins = [s for s in g.inn.get(nid, [])
+                    if s not in back and (s, nid) not in g.error_pairs]
         if len(real_ins) > 1 and g.kind[nid] not in {"join"} | MULTI_INPUT_OK:
             out.append(_v("multi-in-needs-join",
                           f"节点「{g.label[nid]}」有 {len(real_ins)} 条入边", [nid]))

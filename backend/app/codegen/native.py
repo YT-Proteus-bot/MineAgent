@@ -504,28 +504,89 @@ def _agent_stream(agent, task: str, node_id: str = "", name: str = "",
     return str(getattr(messages[-1], "content", "")) if messages else ""
 
 
-def _track(fn, node_id: str, name: str = "", label: str = "", kind: str = "llm"):
-    """包一层：把节点执行前后的状态推给运行面板，并累计执行轨迹 trace。"""
+def _run_with_timeout(fn, state, timeout_s: float):
+    """给同步节点加超时：放到线程里跑，超时抛 TimeoutError。"""
+    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import TimeoutError as FutureTimeout
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(fn, state)
+        try:
+            return future.result(timeout=timeout_s)
+        except FutureTimeout:
+            raise TimeoutError(f"节点执行超时（>{timeout_s:g}s）") from None
+
+
+def _retryable(exc: Exception) -> bool:
+    """只有网络 / 限流 / 超时这类瞬时错误才值得重试。"""
+    if isinstance(exc, TimeoutError):
+        return True
+    name = type(exc).__name__.lower()
+    if any(k in name for k in ("timeout", "connection", "ratelimit")):
+        return True
+    text = str(exc).lower()
+    return any(k in text for k in ("timeout", "timed out", "429", "503", "connection reset"))
+
+
+def _track(fn, node_id: str, name: str = "", label: str = "", kind: str = "llm",
+           opts: dict | None = None):
+    """包一层：执行超时 / 失败重试 / 错误分流 / 事件回传 / 轨迹记录。"""
+    opts = opts or {}
+    timeout_s = float(opts.get("timeout_s") or 0)
+    max_retries = int(opts.get("max_retries") or 0)
+    backoff = float(opts.get("retry_backoff_s") or 0)
+    on_error = str(opts.get("on_error") or "block")
+    rate = int(opts.get("rate_per_minute") or 0)
 
     def wrapped(state):
         started = time.time()
+        if rate > 0:
+            now = time.time()
+            window = [t for t in (state.get("__rate__") or []) if now - t < 60]
+            if len(window) >= rate:
+                wait = 60 - (now - window[0])
+                if wait > 0:
+                    _emit({"event": "log", "level": "warn", "node": node_id,
+                           "name": name or node_id,
+                           "message": f"触发限流，等待 {wait:.1f}s"})
+                    time.sleep(min(wait, 30))
+                window = []
+            window.append(time.time())
+            state["__rate__"] = window[-rate:]
         _emit({"event": "node_start", "node": node_id, "name": name or node_id,
                "label": label, "kind": kind})
-        try:
-            out = fn(state)
-        except Exception as exc:  # noqa: BLE001
-            _emit({"event": "error", "node": node_id, "name": name or node_id,
-                   "message": str(exc)})
-            raise
+        attempt = 0
+        while True:
+            try:
+                out = _run_with_timeout(fn, state, timeout_s) if timeout_s > 0 else fn(state)
+                break
+            except Exception as exc:  # noqa: BLE001
+                if attempt < max_retries and _retryable(exc):
+                    attempt += 1
+                    _emit({"event": "log", "level": "warn", "node": node_id,
+                           "name": name or node_id,
+                           "message": f"第 {attempt} 次重试：{type(exc).__name__}: {exc}"})
+                    time.sleep(backoff * attempt)
+                    continue
+                _emit({"event": "error", "node": node_id, "name": name or node_id,
+                       "message": str(exc)})
+                if on_error == "edge":
+                    # 不中断流程：把错误写进状态，由 conditional edge 送到错误出口
+                    out = {"data": f"[节点失败] {exc}", "__error__": str(exc)}
+                    break
+                raise
         data = out.get("data", "") if isinstance(out, dict) else out
         trace = list(state.get("trace") or [])
         trace.append({"node": name or node_id, "id": node_id, "kind": kind,
-                      "output": _brief(data)})
+                      "output": _brief(data), "attempts": attempt})
         _emit({"event": "node_end", "node": node_id, "name": name or node_id, "kind": kind,
                "duration_ms": int((time.time() - started) * 1000),
-               "output": _brief(data)})
+               "attempts": attempt, "output": _brief(data)})
         if isinstance(out, dict):
             out["trace"] = trace[-40:]
+            # 成功执行后清掉上一轮的错误标记
+            if "__error__" not in out:
+                out["__error__"] = ""
         return out
 
     return wrapped
@@ -701,10 +762,19 @@ def _graph_section(spec: Dict[str, Any], framework: str) -> str:
             if _kind_of(node) in TOOL_KINDS:
                 # 工具节点本身不是图里的执行步骤，工具在 agent 内部被调用
                 continue
+            p = node.get("params") or {}
+            opts = {
+                "timeout_s": _num(p, "timeout_s", 120),
+                "max_retries": int(_num(p, "max_retries", 0)),
+                "retry_backoff_s": _num(p, "retry_backoff_s", 2),
+                "rate_per_minute": int(_num(p, "rate_per_minute", 0)),
+                "on_error": _text(p, "on_error", "block"),
+            }
             lines.append(
                 f"builder.add_node({_q(node['name'])}, "
                 f"_track({fn}, {_q(node['id'])}, {_q(node['name'])}, "
-                f"{_q(node.get('label') or '')}, {_q(_kind_of(node))}))"
+                f"{_q(node.get('label') or '')}, {_q(_kind_of(node))}, "
+                f"{json.dumps(opts, ensure_ascii=False)}))"
             )
         lines.append("")
 
@@ -722,11 +792,30 @@ def _graph_section(spec: Dict[str, Any], framework: str) -> str:
             outs = by_source.get(src, [])
             if not outs:
                 continue
-            handles = {(e.get("sourceHandle") or "out") for e in outs}
-            multi = len(handles) > 1 or _kind_of(src_node) in ROUTE_KINDS
+            kind = _kind_of(src_node)
+            err_outs = [e for e in outs if str(e.get("sourceHandle") or "") == "error"]
+            normal_outs = [e for e in outs if str(e.get("sourceHandle") or "") != "error"]
+
+            # 接了「错误出口」的普通节点：用 conditional edge 在 error / 正常之间分流
+            if err_outs and kind not in ROUTE_KINDS and kind not in TOOL_KINDS \
+                    and len(normal_outs) <= 1:
+                err_target = nodes[err_outs[0]["target"]]["name"]
+                out_target = nodes[normal_outs[0]["target"]]["name"] if normal_outs else "END"
+                out_lit = out_target if out_target == "END" else _q(out_target)
+                lines.append(
+                    f"builder.add_conditional_edges(\n"
+                    f"    {_q(src_node['name'])},\n"
+                    f'    lambda s: "error" if s.get("__error__") else "out",\n'
+                    f"    {{{_q('error')}: {_q(err_target)}, {_q('out')}: {out_lit}}},\n"
+                    f")"
+                )
+                continue
+
+            handles = {(e.get("sourceHandle") or "out") for e in normal_outs}
+            multi = len(handles) > 1 or kind in ROUTE_KINDS
             if multi:
                 mapping = {}
-                for e in outs:
+                for e in normal_outs:
                     h = e.get("sourceHandle") or "out"
                     mapping[h] = nodes[e["target"]]["name"]
                 map_lit = ", ".join(f"{_q(k)}: {_q(v)}" for k, v in mapping.items())
@@ -739,7 +828,7 @@ def _graph_section(spec: Dict[str, Any], framework: str) -> str:
                     f")"
                 )
             else:
-                target = nodes[outs[0]["target"]]["name"]
+                target = nodes[normal_outs[0]["target"]]["name"]
                 lines.append(f"builder.add_edge({_q(src_node['name'])}, {_q(target)})")
 
         # 没有出边的节点连到 END
@@ -751,7 +840,13 @@ def _graph_section(spec: Dict[str, Any], framework: str) -> str:
                 lines.append(f"builder.add_edge({_q(node['name'])}, END)")
 
         lines.append("")
-        lines.append("graph = builder.compile()")
+        lines.append("")
+        lines.append("def build_graph(checkpointer=None):")
+        lines.append("    \"\"\"构建（可选带持久化 checkpointer 的）LangGraph 图，服务入口会复用。\"\"\"")
+        lines.append("    return builder.compile(checkpointer=checkpointer)")
+        lines.append("")
+        lines.append("")
+        lines.append("graph = build_graph()")
     elif framework == "autogen":
         lines.append("# AutoGen：把画布里的 agent 节点变成 AssistantAgent，按对话推进")
         agents = [nodes[i] for i in order if _kind_of(nodes[i]) in ("agent", "worker", "supervisor")]
@@ -811,7 +906,9 @@ def _main_section(spec: Dict[str, Any], framework: str) -> str:
 
     if framework == "langchain":
         body = (
-            f'    result = graph.invoke({{"data": user_input, "user_input": user_input, "route": ""}})\n'
+            f'    config = {{"configurable": {{"thread_id": thread_id}}}} if thread_id else {{}}\n'
+            f'    result = graph.invoke({{"data": user_input, "user_input": user_input, "route": ""}},\n'
+            f'                         config=config)\n'
             f'    data = result.get("data", "")\n'
             f'    _emit({{"event": "final", "output": data if isinstance(data, str) else _brief(data)}})\n'
             f'    return data\n'
@@ -857,7 +954,7 @@ def _main_section(spec: Dict[str, Any], framework: str) -> str:
         )
 
     return (
-        "def main(user_input: str) -> str:\n"
+        "def main(user_input: str, thread_id: str = \"\") -> str:\n"
         f'    """入口：把用户输入交给 {entry_name}，一路跑完整张图。"""\n'
         f"{body}"
         "\n"
