@@ -1,3 +1,7 @@
+# Copyright 2026 YT-Proteus-bot
+# SPDX-License-Identifier: Apache-2.0
+# Part of MineAgent: https://github.com/YT-Proteus-bot/MineAgent
+
 """画布项目执行器。
 
 用法：

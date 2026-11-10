@@ -702,3 +702,27 @@ node test/ui-smoke.mjs
 
 **网页上改了代码，但项目目录里被我手改过**：以画布为准——点保存会覆盖 `nodes/*.py`。
 建议始终在网页里编辑节点代码，或者改完不要再到网页点保存。
+
+---
+
+## License
+
+Copyright 2026 YT-Proteus-bot
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+### 关于出处
+
+本项目采用 Apache-2.0，允许商用、允许闭源分发，只需保留版权声明与 NOTICE。
+如果你愿意在文档或产品页里注明一句「基于 MineAgent 构建」，非常欢迎——
+但这是请求，不是许可条件，不注明也不构成违约。

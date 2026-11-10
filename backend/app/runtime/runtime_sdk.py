@@ -1,3 +1,7 @@
+# Copyright 2026 YT-Proteus-bot
+# SPDX-License-Identifier: Apache-2.0
+# Part of MineAgent: https://github.com/YT-Proteus-bot/MineAgent
+
 """MineAgent 项目运行时 SDK。
 
 这段代码会被复制到每一个画布项目目录（projects/<画布>/runtime_sdk.py），
