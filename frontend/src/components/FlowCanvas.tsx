@@ -15,6 +15,7 @@ import AgentEdge from './AgentEdge'
 import BackgroundPanel from './BackgroundPanel'
 import ConstraintPanel from './ConstraintPanel'
 import NodeModelModal from './NodeModelModal'
+import ToolPickerModal from './ToolPickerModal'
 import { ContextMenu, NodePicker } from './ContextMenu'
 import { useStore } from '../store'
 import { DEFAULT_BACKGROUND, isAgentKind, usesLLM } from '../types'
@@ -66,6 +67,7 @@ export default function FlowCanvas() {
   const [menu, setMenu] = useState<MenuState>(null)
   const [bgPanelOpen, setBgPanelOpen] = useState(false)
   const [modelNodeId, setModelNodeId] = useState<string | null>(null)
+  const [toolPickerNodeId, setToolPickerNodeId] = useState<string | null>(null)
   const setInspectorTab = useStore((s) => s.setInspectorTab)
   const canvasId = canvas?.id
   const menuNodeKind =
@@ -73,6 +75,11 @@ export default function FlowCanvas() {
       ? nodes.find((n) => n.id === menu.nodeId)?.data.kind
       : undefined
   const menuNodeIsAgent = isAgentKind(menuNodeKind)
+  const TOOL_KINDS = new Set([
+    'tool', 'function', 'mcp_tool', 'crewai_tool', 'http_request', 'web_search',
+    'code_interpreter', 'sql_query', 'rag_retriever', 'file_io', 'browser', 'shell',
+  ])
+  const menuNodeIsTool = !!menuNodeKind && TOOL_KINDS.has(menuNodeKind)
   // 优先用保存时扫描源码得出的结论；还没保存过才退回按节点类型判断
   const menuNode = menu?.kind === 'node' ? nodes.find((n) => n.id === menu.nodeId) : undefined
   const menuNodeDef = meta?.nodes.find((n) => n.kind === menuNodeKind)
@@ -370,6 +377,17 @@ export default function FlowCanvas() {
           >
             <span className="ico">&lt;/&gt;</span> 编辑代码逻辑
           </div>
+          {menuNodeIsTool && (
+            <div
+              className="ctx-item"
+              onClick={() => {
+                setToolPickerNodeId(menu.nodeId)
+                setMenu(null)
+              }}
+            >
+              <span className="ico">🛠</span> 套用内置工具…
+            </div>
+          )}
           <div
             className="ctx-item"
             onClick={() => {
@@ -494,6 +512,13 @@ export default function FlowCanvas() {
             </>
           )}
         </ContextMenu>
+      )}
+
+      {toolPickerNodeId && (
+        <ToolPickerModal
+          nodeId={toolPickerNodeId}
+          onClose={() => setToolPickerNodeId(null)}
+        />
       )}
 
       {modelNodeId && (

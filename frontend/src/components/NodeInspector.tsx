@@ -1,4 +1,5 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { api } from '../api'
 import { useStore } from '../store'
 import { isAgentKind, type AgentOrg } from '../types'
 import CodeEditor from './CodeEditor'
@@ -8,6 +9,7 @@ function ParamField({
   def,
   value,
   onChange,
+  instances,
 }: {
   def: {
     key: string
@@ -16,10 +18,42 @@ function ParamField({
     placeholder: string
     options?: { value: string; label: string }[]
     help?: string
+    /** 这个参数要选画布里的哪类实例（embedding / vector / data） */
+    source?: 'embedding' | 'vector' | 'data'
   }
   value: any
   onChange: (v: any) => void
+  instances?: { name: string; is_default: boolean }[]
 }) {
+  // 画布实例选择：空值表示跟随画布默认
+  if (def.source) {
+    const list = instances || []
+    return (
+      <label className="field">
+        <span>{def.label}</span>
+        <select value={value ?? ''} onChange={(e) => onChange(e.target.value)}>
+          <option value="">跟随画布默认</option>
+          {list.map((it) => (
+            <option key={it.name} value={it.name}>
+              {it.name}
+              {it.is_default ? '（默认）' : ''}
+            </option>
+          ))}
+        </select>
+        {list.length === 0 && (
+          <div className="dim small" style={{ marginTop: 4, lineHeight: 1.5 }}>
+            这张画布还没配对应的实例，打开右上角「模型」里的页签添加
+          </div>
+        )}
+        {def.help && (
+          <div className="dim small" style={{ marginTop: 4, lineHeight: 1.5 }}>
+            {def.help}
+          </div>
+        )}
+      </label>
+    )
+  }
+
   if (def.options && def.options.length) {
     return (
       <label className="field">
@@ -156,11 +190,46 @@ export default function NodeInspector() {
   const tab = useStore((s) => s.inspectorTab)
   const setTab = useStore((s) => s.setInspectorTab)
   const [showModel, setShowModel] = useState(false)
+  // 画布里的 provider 实例：按类型缓存，供节点的「用哪一套」下拉使用
+  const [providerNames, setProviderNames] = useState<
+    Record<string, { name: string; is_default: boolean }[]>
+  >({})
 
   const def = useMemo(
     () => meta?.nodes.find((n) => n.kind === node?.data.kind),
     [meta, node?.data.kind],
   )
+
+  const canvasId = canvas?.id || ''
+  const neededKinds = useMemo(() => {
+    const kinds = new Set<string>()
+    for (const p of (def?.params || []) as { source?: string }[]) {
+      if (p.source) kinds.add(p.source)
+    }
+    return [...kinds].sort().join(',')
+  }, [def])
+
+  useEffect(() => {
+    if (!canvasId || !neededKinds) return
+    let alive = true
+    const kinds = neededKinds.split(',')
+    Promise.all(
+      kinds.map((kind) =>
+        api
+          .listProviders({ kind, canvas_id: canvasId })
+          .then(
+            (list) =>
+              [kind, list.map((r) => ({ name: r.name, is_default: r.is_default }))] as const,
+          )
+          .catch(() => [kind, []] as const),
+      ),
+    ).then((pairs) => {
+      if (alive) setProviderNames(Object.fromEntries(pairs))
+    })
+    return () => {
+      alive = false
+    }
+  }, [canvasId, neededKinds])
 
   if (!node) {
     return (
@@ -194,6 +263,25 @@ export default function NodeInspector() {
   }
 
   const data = node.data
+  const applyToolPreset = useStore((s) => s.applyToolPreset)
+  const toast = useStore((s) => s.toast)
+  const [describing, setDescribing] = useState(false)
+  const describe = async () => {
+    if (!canvas) return
+    setDescribing(true)
+    try {
+      const res = await api.describeNode(canvas.id, node.id)
+      updateNode(node.id, { description: res.description })
+      toast('已根据代码生成介绍', 'ok')
+    } catch (err: any) {
+      toast(`生成失败：${err.message || err}`, 'err')
+    } finally {
+      setDescribing(false)
+    }
+  }
+  const presetDef = (meta?.tool_presets || []).find(
+    (t) => t.id === String(data.params?.preset || ''),
+  )
   const isAgent = isAgentKind(data.kind)
   const rawOrg = (data.org || {}) as Partial<AgentOrg>
   const org: AgentOrg = {
@@ -255,6 +343,12 @@ export default function NodeInspector() {
                 onChange={(e) => updateNode(node.id, { description: e.target.value })}
               />
             </label>
+            <div className="row" style={{ marginTop: 2, gap: 8 }}>
+              <button className="sm" onClick={describe} disabled={describing}>
+                {describing ? '生成中…' : '⟳ 根据代码生成介绍'}
+              </button>
+              <span className="dim small">取代码里的 docstring / 用到的能力</span>
+            </div>
 
             {isAgent && (
               <>
@@ -363,11 +457,34 @@ export default function NodeInspector() {
                 key={p.key}
                 def={p}
                 value={data.params?.[p.key]}
-                onChange={(v) =>
+                instances={p.source ? providerNames[p.source] : undefined}
+                onChange={(v) => {
+                  if (p.key === 'preset') {
+                    applyToolPreset(node.id, String(v || ''))
+                    return
+                  }
                   updateNode(node.id, { params: { ...(data.params || {}), [p.key]: v } })
-                }
+                }}
               />
             ))}
+
+            {presetDef && presetDef.params.length > 0 && (
+              <>
+                <div className="dim small" style={{ margin: '10px 0 6px', letterSpacing: 0.4 }}>
+                  {presetDef.label} 参数
+                </div>
+                {presetDef.params.map((p) => (
+                  <ParamField
+                    key={`preset-${p.key}`}
+                    def={{ key: p.key, label: p.label, default: p.default, placeholder: '' }}
+                    value={data.params?.[p.key]}
+                    onChange={(v) =>
+                      updateNode(node.id, { params: { ...(data.params || {}), [p.key]: v } })
+                    }
+                  />
+                ))}
+              </>
+            )}
 
             <div className="dim small" style={{ margin: '16px 0 8px', letterSpacing: 0.4 }}>
               可靠性

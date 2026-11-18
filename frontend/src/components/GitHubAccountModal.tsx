@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
 import { useStore } from '../store'
-import type { CommunityConfig } from '../types'
+import type { CommunityConfig, TemplateLib } from '../types'
 import Modal from './Modal'
 
 /**
- * GitHub 账户：连接 / 断开 / 查看当前登录身份。
+ * GitHub 账户：连接 / 断开 / 查看当前登录身份，以及配置多个公共/私人模板仓库。
  * 登录走 OAuth 授权码流程，回调后回到首页并带 ?github=connected。
  */
 export default function GitHubAccountModal({ onClose }: { onClose: () => void }) {
@@ -13,7 +13,14 @@ export default function GitHubAccountModal({ onClose }: { onClose: () => void })
   const [config, setConfig] = useState<CommunityConfig | null>(null)
   const [busy, setBusy] = useState(false)
   const [advanced, setAdvanced] = useState(false)
-  const [form, setForm] = useState({ client_id: '', client_secret: '', repo: '', branch: 'main', dir: 'templates' })
+  const [libs, setLibs] = useState<TemplateLib[]>([])
+  const [form, setForm] = useState({
+    client_id: '',
+    client_secret: '',
+    repo: '',
+    branch: 'main',
+    dir: 'templates',
+  })
 
   const reload = async () => {
     try {
@@ -22,10 +29,12 @@ export default function GitHubAccountModal({ onClose }: { onClose: () => void })
       setForm((f) => ({
         ...f,
         client_id: f.client_id || c.client_id || '',
-        repo: f.repo || c.repo || '',
+        repo: c.repo || '',
         branch: c.branch || 'main',
         dir: c.dir || 'templates',
       }))
+      const res = await api.communityLibs()
+      setLibs(res.libs || [])
     } catch (e: any) {
       toast(`读取配置失败：${e.message || e}`, 'err')
     }
@@ -74,7 +83,9 @@ export default function GitHubAccountModal({ onClose }: { onClose: () => void })
         branch: form.branch,
         dir: form.dir,
       })
-      toast('GitHub 配置已保存', 'ok')
+      const res = await api.saveCommunityLibs(libs)
+      setLibs(res.libs || [])
+      toast('GitHub 配置与仓库已保存', 'ok')
       setForm({ ...form, client_secret: '' })
       await reload()
     } catch (e: any) {
@@ -84,13 +95,17 @@ export default function GitHubAccountModal({ onClose }: { onClose: () => void })
     }
   }
 
+  const updateLib = (id: string, patch: Partial<TemplateLib>) =>
+    setLibs((list) => list.map((l) => (l.id === id ? { ...l, ...patch } : l)))
+
   const connected = !!config?.connected
 
   return (
     <Modal
       title="GitHub 账户"
-      subtitle="连上之后可以把画布发布成公共模板，也能一键加载别人分享的模板。"
+      subtitle="连上之后可以发布和加载模板；仓库在下面「仓库设置」里配置，支持多个公共库和私人库。"
       onClose={onClose}
+      width={760}
       footer={
         <>
           <button onClick={onClose}>关闭</button>
@@ -107,30 +122,24 @@ export default function GitHubAccountModal({ onClose }: { onClose: () => void })
       }
     >
       <div className={`gh-account${connected ? ' on' : ''}`}>
-        <div className="gh-avatar">{connected ? (config?.login || 'GH').slice(0, 1).toUpperCase() : '?'}</div>
+        <div className="gh-avatar">
+          {connected ? (config?.login || 'GH').slice(0, 1).toUpperCase() : '?'}
+        </div>
         <div style={{ flex: 1, minWidth: 0 }}>
           {connected ? (
             <>
               <div className="gh-name">@{config?.login}</div>
-              <div className="dim small">已连接，可以发布和加载公共模板</div>
+              <div className="dim small">已连接，可以发布和加载模板</div>
             </>
           ) : (
             <>
               <div className="gh-name">未连接 GitHub</div>
-              <div className="dim small">连接后才能发布模板、拉取社区模板</div>
+              <div className="dim small">连接后才能发布模板、拉取模板库</div>
             </>
           )}
         </div>
         <span className={`badge${connected ? ' ok' : ''}`}>{connected ? '已连接' : '未连接'}</span>
       </div>
-
-      {connected && (
-        <div className="hint-box">
-          发布目标：<code className="mono">{config?.repo || '未设置仓库'}</code>
-          {config?.branch ? ` · 分支 ${config.branch}` : ''}
-          {config?.dir ? ` · 目录 ${config.dir}` : ''}
-        </div>
-      )}
 
       <div className="row" style={{ marginTop: 12 }}>
         <button className="ghost sm" onClick={() => setAdvanced((v) => !v)}>
@@ -160,28 +169,115 @@ export default function GitHubAccountModal({ onClose }: { onClose: () => void })
               onChange={(e) => setForm({ ...form, client_secret: e.target.value })}
             />
           </label>
-          <label className="field">
-            <span>模板仓库</span>
-            <input
-              value={form.repo}
-              placeholder="owner/repo，例如 YT-Proteus-bot/agent-templates"
-              onChange={(e) => setForm({ ...form, repo: e.target.value })}
-            />
-          </label>
-          <div className="row" style={{ gap: 8 }}>
-            <label className="field" style={{ flex: 1 }}>
-              <span>分支</span>
-              <input value={form.branch} onChange={(e) => setForm({ ...form, branch: e.target.value })} />
-            </label>
-            <label className="field" style={{ flex: 1 }}>
-              <span>目录</span>
-              <input value={form.dir} onChange={(e) => setForm({ ...form, dir: e.target.value })} />
-            </label>
+
+          <div className="community-head" style={{ marginTop: 12 }}>
+            <span>仓库设置（{libs.length}）</span>
+            <span className="dim small">公共库走 PR；私人库直接提交到配置的分支</span>
+            <div style={{ flex: 1 }} />
+            <button
+              className="sm"
+              onClick={() =>
+                setLibs([
+                  ...libs,
+                  {
+                    id: `new-${Date.now()}`,
+                    name: '',
+                    kind: 'private',
+                    repo: '',
+                    branch: 'main',
+                    dir: 'templates',
+                  },
+                ])
+              }
+            >
+              + 添加仓库
+            </button>
           </div>
+
+          <div className="community-list" style={{ maxHeight: 240 }}>
+            {libs.length === 0 && (
+              <div className="dim" style={{ padding: '12px 0' }}>
+                还没有仓库。添加一个公共或私人仓库，填上 owner/repo。
+              </div>
+            )}
+            {libs.map((lib) => (
+              <div key={lib.id} className="community-item" style={{ alignItems: 'flex-start' }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div className="row" style={{ gap: 8, marginBottom: 6, alignItems: 'flex-end' }}>
+                    <label className="field" style={{ width: 130 }}>
+                      <span>名称</span>
+                      <input
+                        className="mono"
+                        value={lib.name}
+                        placeholder="模板库名称"
+                        onChange={(e) => updateLib(lib.id, { name: e.target.value })}
+                      />
+                    </label>
+                    <label className="field" style={{ width: 100 }}>
+                      <span>类型</span>
+                      <select
+                        value={lib.kind}
+                        onChange={(e) =>
+                          updateLib(lib.id, { kind: e.target.value as TemplateLib['kind'] })
+                        }
+                      >
+                        <option value="public">公共</option>
+                        <option value="private">私人</option>
+                      </select>
+                    </label>
+                    <label className="field" style={{ flex: 1, minWidth: 220 }}>
+                      <span>
+                        仓库
+                        {lib.visibility && (
+                          <span
+                            className={`badge${lib.visibility === 'private' ? ' warn' : ' ok'}`}
+                            style={{ marginLeft: 6 }}
+                          >
+                            {lib.visibility === 'private' ? '私有' : '公开'}
+                          </span>
+                        )}
+                      </span>
+                      <input
+                        className="mono"
+                        value={lib.repo}
+                        placeholder="owner/repo 或 https://github.com/owner/repo"
+                        onChange={(e) => updateLib(lib.id, { repo: e.target.value })}
+                      />
+                    </label>
+                  </div>
+                  <div className="row" style={{ gap: 8, alignItems: 'flex-end' }}>
+                    <label className="field" style={{ width: 120 }}>
+                      <span>分支</span>
+                      <input
+                        className="mono"
+                        value={lib.branch}
+                        onChange={(e) => updateLib(lib.id, { branch: e.target.value })}
+                      />
+                    </label>
+                    <label className="field" style={{ width: 140 }}>
+                      <span>目录</span>
+                      <input
+                        className="mono"
+                        value={lib.dir}
+                        onChange={(e) => updateLib(lib.id, { dir: e.target.value })}
+                      />
+                    </label>
+                  </div>
+                </div>
+                <button
+                  className="sm"
+                  onClick={() => setLibs((list) => list.filter((l) => l.id !== lib.id))}
+                >
+                  删除
+                </button>
+              </div>
+            ))}
+          </div>
+
           <div className="hint-box">
             回调地址填：<code className="mono">{config?.callback_url || '/'}</code>
             <br />
-            secret 会加密存在本地库，不会随模板上传。
+            secret 会加密存在本地库，不会随模板上传；私有仓库需要授权带 <code className="mono">repo</code> 权限。
           </div>
           <button className="sm primary" onClick={saveConfig} disabled={busy}>
             保存设置

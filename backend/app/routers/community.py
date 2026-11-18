@@ -359,6 +359,14 @@ def save_libs(payload: Dict[str, Any]):
         except ValueError as exc:
             errors.append(f"「{label}」校验失败：{exc}")
             continue
+        branch = str(item.get("branch") or "main").strip() or "main"
+        dir_path = str(item.get("dir") or "templates").strip().strip("/") or "templates"
+        if not community.dir_exists(target, branch, dir_path):
+            errors.append(
+                f"「{label}」的目录 {dir_path} 在分支 {branch} 下不存在"
+                f"（检查目录名，或先在仓库里创建它）"
+            )
+            continue
         checked.append({
             **item,
             "repo": target,

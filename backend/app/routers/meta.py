@@ -10,6 +10,7 @@ from ..framework_modes import FRAMEWORK_MODES, all_modes
 from ..mode_templates import TPL, all_templates, build_mode_graph
 from ..node_docs import node_doc
 from ..node_registry import AGENT_MODES, CATEGORIES, NODE_TYPES
+from ..tool_presets import list_presets
 
 router = APIRouter(prefix="/api/meta", tags=["meta"])
 
@@ -39,6 +40,7 @@ def meta():
         "all_modes": all_modes(),
         "constraint_rules": rule_catalog(),
         "custom_rule_types": CUSTOM_RULE_TYPES,
+        "tool_presets": list_presets(),
         "version": "1.0.0",
     }
 
@@ -62,6 +64,12 @@ def framework_template(framework: str):
 def mode_templates():
     """33 个模式各自的节点模板概要。"""
     return all_templates()
+
+
+@router.get("/tools")
+def tool_presets():
+    """内置工具清单：tool 节点的「内置工具」下拉用。"""
+    return list_presets()
 
 
 @router.get("/modes/{mode}")

@@ -16,11 +16,30 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
+def content_text(content) -> str:
+    """取消息正文。
+
+    新一点的 SDK（smolagents / openai-agents 等）发的是多模态数组：
+    [{"type": "text", "text": "..."}]，这里统一摊平成字符串。
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                parts.append(str(item.get("text") or item.get("content") or ""))
+            else:
+                parts.append(str(item))
+        return "\n".join(p for p in parts if p)
+    return "" if content is None else str(content)
+
+
 def reply_for(messages) -> str:
     prompt = ""
     for m in messages:
         if m.get("role") == "user":
-            prompt = m.get("content") or ""
+            prompt = content_text(m.get("content"))
     low = prompt.lower()
     if "只回答 true 或 false" in prompt or "only answer true or false" in low:
         return "false"
@@ -52,7 +71,67 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             data = {}
         messages = data.get("messages") or []
+        tools = data.get("tools") or []
         content = reply_for(messages)
+
+        # 支持 function calling：带 tools 且还没拿到工具结果时，先发起一次工具调用。
+        # 这样 agent 节点 + 工具节点（web_search / http_request 等）的链路能被真跑验证。
+        # agent 节点默认用流式，所以两种响应模式都要支持。
+        has_tool_result = any(m.get("role") == "tool" for m in messages)
+        if tools and not has_tool_result:
+            fn = (tools[0].get("function") or {})
+            fn_name = fn.get("name", "tool")
+            call_args = json.dumps({"query": "MineAgent"})
+            if data.get("stream"):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                try:
+                    for chunk in (
+                        {"choices": [{"index": 0, "delta": {"role": "assistant"},
+                                      "finish_reason": None}]},
+                        {"choices": [{"index": 0, "delta": {"tool_calls": [{
+                            "index": 0, "id": "call_mock_1", "type": "function",
+                            "function": {"name": fn_name, "arguments": call_args}}]},
+                            "finish_reason": None}]},
+                        {"choices": [{"index": 0, "delta": {},
+                                      "finish_reason": "tool_calls"}]},
+                    ):
+                        payload = {"id": "chatcmpl-mock",
+                                   "object": "chat.completion.chunk",
+                                   "model": data.get("model", "mock-model"), **chunk}
+                        self.wfile.write(
+                            ("data: " + json.dumps(payload, ensure_ascii=False) + "\n\n")
+                            .encode("utf-8"))
+                        self.wfile.flush()
+                    self.wfile.write(b"data: [DONE]\n\n")
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                return
+            self._send({
+                "id": "chatcmpl-mock",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": data.get("model", "mock-model"),
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [{
+                            "id": "call_mock_1",
+                            "type": "function",
+                            "function": {"name": fn_name, "arguments": call_args},
+                        }],
+                    },
+                    "finish_reason": "tool_calls",
+                }],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 20,
+                          "total_tokens": 30},
+            })
+            return
 
         # 支持 SSE 流式，方便测内置助手和流式节点
         if data.get("stream"):

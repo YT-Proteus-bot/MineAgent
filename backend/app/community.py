@@ -147,6 +147,41 @@ def repo_info(target: str) -> Dict[str, Any]:
     return api("GET", f"/repos/{target}", token_str)
 
 
+def dir_exists(target: str, branch: str, path: str) -> bool:
+    """检查仓库某个分支下的目录是否存在（contents API 目录返回 list）。"""
+    token_str = token()
+    if not token_str:
+        return False
+    url = (f"/repos/{target}/contents/{urllib.parse.quote(path, safe='/')}"
+           f"?ref={urllib.parse.quote(branch, safe='')}")
+    try:
+        data = api("GET", url, token_str)
+    except GitHubError:
+        return False
+    return isinstance(data, list)
+
+
+def token_scopes() -> set:
+    """当前 token 的权限范围（X-OAuth-Scopes），用来区分「仓库不存在」和「权限不够」。"""
+    token_str = token()
+    if not token_str:
+        return set()
+    req = urllib.request.Request(
+        GITHUB_API + "/user",
+        headers={
+            "Authorization": f"Bearer {token_str}",
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "MineAgent-Community",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            raw = resp.headers.get("X-OAuth-Scopes") or ""
+        return {part.strip() for part in raw.split(",") if part.strip()}
+    except Exception:  # noqa: BLE001
+        return set()
+
+
 def parse_repo(repo: str) -> Tuple[str, str]:
     """接受 owner/repo，也接受完整 GitHub 仓库 URL（会去掉 https://github.com/ 和 .git）。"""
     raw = (repo or "").strip()

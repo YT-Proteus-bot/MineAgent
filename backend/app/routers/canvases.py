@@ -18,10 +18,10 @@ from ..framework_templates import FRAMEWORK_INDEX, auto_layout, build_graph
 from ..node_registry import NODE_INDEX, get_node_type
 from ..node_templates import CODE_TEMPLATES
 from ..providers.bindings import resolve_runtime_providers
-from ..schemas import (AgentNodeModel, ApplyDraftRequest, CanvasBackground,
-                       CanvasCreate, CanvasDetail, CanvasSummary, CanvasUpdate,
-                       ConstraintReport, GlobalSettings, Graph, ModelConfig,
-                       SaveResult)
+from ..schemas import (AgentNodeModel, ApplyDraftRequest, ApplyOpsRequest,
+                       CanvasBackground, CanvasCreate, CanvasDetail,
+                       CanvasSummary, CanvasUpdate, ConstraintReport,
+                       GlobalSettings, Graph, ModelConfig, SaveResult)
 from ..security import decrypt, encrypt, mask
 from ..tool_presets import TOOL_PRESETS, get_summary
 
@@ -350,6 +350,198 @@ def apply_draft(canvas_id: str, payload: ApplyDraftRequest):
     return {"ok": True, "canvas": _detail(updated), "constraints": report}
 
 
+@router.post("/{canvas_id}/apply-ops")
+def apply_ops(canvas_id: str, payload: ApplyOpsRequest):
+    """增量修改画布：增删节点、改参数/代码、连线、挪位置。
+
+    每条操作独立执行，单条失败不影响其它；最后统一跑一次约束检查。
+    """
+    if not payload.operations and not payload.relayout:
+        raise HTTPException(400, "没有要执行的操作")
+
+    with get_conn() as conn:
+        row = _fetch(conn, canvas_id)
+        try:
+            graph = json.loads(row["graph"] or "{}")
+        except json.JSONDecodeError:
+            graph = {}
+        try:
+            rules = json.loads(row["rules"] or "[]")
+        except Exception:  # noqa: BLE001
+            rules = []
+
+    node_map: Dict[str, Dict[str, Any]] = {n["id"]: n for n in graph.get("nodes") or []}
+    edges: List[Dict[str, Any]] = list(graph.get("edges") or [])
+    key_to_id: Dict[str, str] = {}
+
+    def new_node_id() -> str:
+        idx = 1
+        while f"n{idx}" in node_map:
+            idx += 1
+        return f"n{idx}"
+
+    def ref(value: str) -> str:
+        return key_to_id.get(value, value)
+
+    applied = 0
+    errors: List[str] = []
+
+    for index, op in enumerate(payload.operations, 1):
+        try:
+            name = (op.op or "").strip()
+            if name == "add_node":
+                meta = NODE_INDEX.get(op.kind)
+                if not meta:
+                    raise ValueError(f"未知节点类型 {op.kind}")
+                nid = new_node_id()
+                key_to_id[op.key or nid] = nid
+                defaults = {p["key"]: p.get("default")
+                            for p in meta.get("params") or []}
+                code = (op.code or "").strip()
+                node_map[nid] = {
+                    "id": nid,
+                    "type": "agent",
+                    "position": {"x": float(op.x or 0), "y": float(op.y or 0)},
+                    "data": {
+                        "kind": op.kind,
+                        "label": op.label or meta["label"],
+                        "name": op.name or f"{op.kind}_{nid[1:]}",
+                        "description": meta["description"],
+                        "code": code or meta["default_code"],
+                        "language": meta["language"],
+                        "params": {**defaults, **(op.params or {})},
+                        "status": "idle",
+                        "code_touched": bool(code),
+                    },
+                }
+                applied += 1
+
+            elif name == "remove_node":
+                nid = ref(op.id)
+                if nid not in node_map:
+                    raise ValueError(f"节点不存在：{op.id}")
+                node_map.pop(nid)
+                edges = [e for e in edges
+                         if e.get("source") != nid and e.get("target") != nid]
+                applied += 1
+
+            elif name == "update_node":
+                nid = ref(op.id)
+                node = node_map.get(nid)
+                if not node:
+                    raise ValueError(f"节点不存在：{op.id}")
+                data = node.setdefault("data", {})
+                if op.label:
+                    data["label"] = op.label
+                if op.name:
+                    data["name"] = op.name
+                if op.params:
+                    data["params"] = {**(data.get("params") or {}), **op.params}
+                applied += 1
+
+            elif name == "set_code":
+                nid = ref(op.id)
+                node = node_map.get(nid)
+                if not node:
+                    raise ValueError(f"节点不存在：{op.id}")
+                if not (op.code or "").strip():
+                    raise ValueError("code 为空")
+                data = node.setdefault("data", {})
+                data["code"] = op.code
+                # 标记为手改，保存时不会被模板重新生成覆盖
+                data["code_touched"] = True
+                applied += 1
+
+            elif name == "connect":
+                src, dst = ref(op.source), ref(op.target)
+                if src not in node_map or dst not in node_map:
+                    raise ValueError(f"节点不存在：{op.source} → {op.target}")
+                handle = (op.branch or "").strip() or None
+                exists = any(
+                    e.get("source") == src and e.get("target") == dst
+                    and (e.get("sourceHandle") or None) == handle
+                    for e in edges)
+                if not exists:
+                    edges.append({
+                        "id": f"e{len(edges) + 1}__{src}__{dst}"
+                              + (f"__{handle}" if handle else ""),
+                        "source": src,
+                        "sourceHandle": handle,
+                        "target": dst,
+                        "targetHandle": "in",
+                        "label": handle,
+                        "data": {},
+                    })
+                applied += 1
+
+            elif name == "disconnect":
+                src, dst = ref(op.source), ref(op.target)
+                handle = (op.branch or "").strip() or None
+                before = len(edges)
+                edges = [e for e in edges if not (
+                    e.get("source") == src and e.get("target") == dst
+                    and (handle is None or (e.get("sourceHandle") or None) == handle))]
+                if len(edges) == before:
+                    raise ValueError(f"没有这条连线：{op.source} → {op.target}")
+                applied += 1
+
+            elif name == "move_node":
+                nid = ref(op.id)
+                node = node_map.get(nid)
+                if not node:
+                    raise ValueError(f"节点不存在：{op.id}")
+                pos = dict(node.get("position") or {})
+                if op.x is not None:
+                    pos["x"] = float(op.x)
+                if op.y is not None:
+                    pos["y"] = float(op.y)
+                node["position"] = pos
+                applied += 1
+
+            elif name == "relayout":
+                applied += 0  # 统一在循环后处理
+
+            else:
+                raise ValueError(f"不支持的操作：{op.op}")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"第 {index} 条（{op.op}）：{exc}")
+
+    need_layout = payload.relayout or any(
+        (op.op or "").strip() == "relayout" for op in payload.operations)
+
+    nodes_list = list(node_map.values())
+    if need_layout:
+        nodes_list = auto_layout(nodes_list, edges)
+        for node in nodes_list:
+            node_map[node["id"]] = node
+
+    graph_dict: Dict[str, Any] = {
+        "nodes": nodes_list,
+        "edges": edges,
+        "viewport": graph.get("viewport") or {"x": 0, "y": 0, "zoom": 0.85},
+    }
+    if graph.get("background"):
+        graph_dict["background"] = graph["background"]
+    if graph.get("service"):
+        graph_dict["service"] = graph["service"]
+
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE canvases SET graph = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(graph_dict, ensure_ascii=False), now_iso(), canvas_id))
+
+    report = validate_graph(graph_dict, rules)
+    with get_conn() as conn:
+        updated = _fetch(conn, canvas_id)
+    return {
+        "ok": not errors,
+        "applied": applied,
+        "errors": errors,
+        "canvas": _detail(updated),
+        "constraints": report,
+    }
+
+
 @router.patch("/{canvas_id}", response_model=CanvasDetail)
 def update_canvas(canvas_id: str, payload: CanvasUpdate):
     with get_conn() as conn:
@@ -563,6 +755,8 @@ def delete_canvas(canvas_id: str):
         conn.execute("DELETE FROM agent_models WHERE canvas_id = ?", (canvas_id,))
         # 向量模型 / 向量库 / 数据源是画布级配置，跟着画布一起删
         conn.execute("DELETE FROM providers WHERE canvas_id = ?", (canvas_id,))
+        # 助手对话也是画布级的，不删会在列表里留下孤儿记录
+        conn.execute("DELETE FROM assistant_chats WHERE canvas_id = ?", (canvas_id,))
     target = (PROJECTS_DIR / row["slug"]).resolve()
     if target.parent == PROJECTS_DIR.resolve() and target.exists():
         shutil.rmtree(target, ignore_errors=True)

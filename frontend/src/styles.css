@@ -2109,6 +2109,27 @@ button.hud-btn.active {
   flex: 1;
   min-width: 120px;
 }
+.chat-tool-running {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--panel-2);
+  border: 1px dashed var(--border-soft);
+  border-radius: 6px;
+}
+.chat-tool-running .spin {
+  display: inline-block;
+  animation: mineagent-spin 1s linear infinite;
+}
+@keyframes mineagent-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
 
 /* 画布下拉：列表区自己滚动，底部操作项固定可见 */
 .menu-scroll {

@@ -72,7 +72,7 @@
 | 顶部「运行」 | 编译并真实执行当前画布，执行过程流式回显到节点和运行面板 |
 | 右上角「选择模式」 | 框架**左边**的下拉，列出该框架支持的推理模式（ReAct / CoT / Plan-and-Execute / 群聊…），选中后作为画布默认，新建 agent 节点会用它 |
 | 右上角下拉 | 选择 Agent 框架（LangChain/LangGraph、AutoGen、CrewAI…），切换后重建架构图 |
-| 右上角「模型」 | 配置**这个画布**用的大模型与 API Key |
+| 右上角「画布配置」 | 这张画布自己的对话模型、向量模型、向量库与数据源 |
 | 右上角「用户中心」 | 账户与配置下拉：GitHub 账户 / 模型配置 / 公共模板 |
 | 运行按钮右侧「☁ 上传模板」 | 把当前画布和项目文件贡献成社区模板，自动创建 GitHub PR（不含任何密钥） |
 | 右键空白画布 | 弹出节点面板，113 种细粒度节点任选（带搜索）；新增后**按约束自动连线** |
@@ -221,17 +221,51 @@ Client ID / Secret，点「连接 GitHub」跳转网页授权（`public_repo` + 
   发布前统一递归剔除，`config.json` 的 `api_key_env` 会重置为 `MINEAGENT_API_KEY`
 - 模板仓库需要是**公开仓库**（申请的是 `public_repo` 权限），第一次上传前先初始化一个 README
 
-### 内置 AI 助手
+### 内置 AI 助手（Agent）
 
 右侧那一列有两个 tab：「AI 助手」（默认）和「节点详情」。
 
 ![AI 助手](docs/screenshots/11-assistant.png)
 
-- 用的是**你在「用户中心 → 模型配置」里配的 key**，不需要额外配置
-- 默认带上画布上下文：画布名、框架、节点清单、约束未通过的项、最近一次运行的报错、
-  当前选中节点——所以可以直接问「我这张画布为什么跑不起来」
+它是一个**能调用工具的 Agent**，不只是聊天：
+
+- 用的是**你在「用户中心 → 模型配置」里配的 key**
 - 流式输出，可随时停止；「＋ 新对话」开一轮新的
-- 它只做问答，不会替你改画布
+- **每张画布有独立的对话和记忆**，切画布不会串上下文
+
+**工具集**
+
+| 读工具（自动执行） | 作用 |
+|---|---|
+| `get_canvas` | 读当前画布的真实节点 id、类型、参数、连线 |
+| `get_node_doc` | 查某类节点的用途、参数、默认代码 |
+| `list_node_types` | 列出可用节点类型（可按关键词过滤） |
+| `get_run_log` | 读最近一次运行的执行过程（每个节点的开始/结束/耗时/输出/报错） |
+| `get_constraints` | 读编排约束检查结果 |
+| `recall` | 按关键词查这张画布的长期记忆 |
+
+| 写工具（**要你确认**） | 作用 |
+|---|---|
+| `apply_ops` | 增量改画布：增删节点、改参数/代码、连线、挪位置 |
+| `apply_canvas` | 整张替换成新画布 |
+| `run_canvas` | 运行画布（会消耗模型额度） |
+
+写工具**不会直接执行**，只在对话里生成一张待确认卡片，你点「应用」才落地。
+
+**记忆与压缩**
+
+- **短期记忆**：会话内的最近 20 轮消息，随对话保存
+- **长期记忆**：按画布存（`remember` 工具写入），跨会话生效；
+  用户表达偏好、确认非显然结论时它会主动记；内容近重复会去重更新
+- **上下文压缩**：对话超过 30 条时，把较早的内容压成一段摘要（保留目标、约束、
+  已确认结论、待办），只保留最近 10 条；摘要随对话一起存，刷新后仍然有效
+
+**它可以直接改画布**，两种方式：
+
+| 你说的话 | 它给出的 | 卡片按钮 |
+|---|---|---|
+| 「帮我搭一个带检索的客服 Agent」「重新设计成多智能体」 | 一整张新画布 | **应用到当前画布**（整张替换，会先确认） |
+| 「加一个检索节点」「把那个工具接到助理下面」「改一下这个节点的代码」「把节点往右挪」 | 一组增量操作 | **应用这些修改**（只改动的部分） |
 
 没配 key 时面板会提示去「用户中心 → 模型配置」，不会静默失败。
 
@@ -755,7 +789,7 @@ Langflow 线性链、SmolAgents 代码行动
 四种方式，优先级从高到低：
 
 1. **节点级**：右键 agent 节点 →「配置模型 / API Key」（只影响这个 agent）；
-2. **画布级**：右上角「模型」→ 填 Base URL / 模型名 / API Key（只影响这个画布）；
+2. **画布级**：右上角「画布配置」→ 对话模型页签里填 Base URL / 模型名 / API Key（只影响这个画布）；
 3. **全局**：右上角「用户中心 → 模型配置」→ 配置整个项目默认使用的 key（兜底）；
 4. **项目文件**：在 `projects/<画布>/.env` 里写 `MINEAGENT_API_KEY=sk-xxx`（脱离网页独立运行时用）。
 
@@ -773,9 +807,19 @@ Langflow 线性链、SmolAgents 代码行动
 
 ## 向量模型 / 向量库 / 数据源
 
-入口在「用户中心」的三个页签里，和对话模型并列：**向量模型**、**向量库**、**数据源**。
-配好之后，`embedding` / `vector_indexer` / `vector_store` / `hybrid_retriever` 这些节点
-会自动用上；不配则回退到内置实现，画布照样能跑。
+这些是**画布级**配置：入口在右上角「画布配置」→ 弹窗里的三个页签
+（**向量模型**、**向量库**、**数据源**），和对话模型并列。
+
+同一张画布可以配**多套**：比如一个本地 bge-m3 建库、一个云端模型做查询，
+或者一个 Chroma 存文档、一个 pgvector 存订单。每种类型有一个「默认」，
+节点属性里可以单独改成用哪一套：
+
+```
+节点参数「向量库」= 跟随画布默认 / 本地库 / 订单库
+```
+
+不配也能跑：`embedding` / `vector_indexer` / `vector_store` / `hybrid_retriever`
+会回退到内置 SQLite 与哈希向量。
 
 ### 内置清单
 
@@ -785,16 +829,17 @@ Langflow 线性链、SmolAgents 代码行动
 | 向量库 | 46 个（全部已实现） | 内置 SQLite、sqlite-vec、Chroma、pgvector / pgvecto.rs / GaussDB、Qdrant、Milvus/Zilliz、Weaviate、LanceDB、FAISS、Elasticsearch、OpenSearch、Redis、Pinecone、DuckDB VSS、ClickHouse、Typesense、Upstash、Turbopuffer、Azure AI Search、ArangoDB、Vectara、Vespa、SurrealDB、Couchbase、Oracle、SAP HANA、Vertex AI、MySQL 家族（MariaDB/TiDB/OceanBase/Doris/StarRocks/SingleStore）、MongoDB Atlas、DashVector、腾讯云 VectorDB、百度向量数据库、VikingDB |
 | 数据源 | 48 个（全部已实现） | 关系型：PostgreSQL / MySQL / MariaDB / SQL Server / Oracle / SQLite / ClickHouse / DuckDB / TiDB / OceanBase / GaussDB / PolarDB / Greenplum / Redshift / Snowflake / BigQuery / Databricks / Trino / Presto / Hive；文档型：MongoDB / DocumentDB / Couchbase / Firestore / ArangoDB / CouchDB；图：Neo4j / Memgraph / NebulaGraph / TigerGraph / JanusGraph / Dgraph / Apache AGE / HugeGraph / TuGraph；KV：Redis / Valkey / Memcached / etcd / DynamoDB / Cassandra / ScyllaDB / HBase；时序：InfluxDB / TimescaleDB / TDengine / Prometheus / QuestDB |
 
-「已实现」和「即将支持」在下拉里会标出来，未实现的不能选，不会让你配完才发现跑不起来。
+未实现的条目在下拉里禁用并标「即将支持」，不会让你配完才发现跑不起来。
 
 ### 三个约定
 
-**1. 只认「设为默认」的配置。** 同一个作用域（全局 / 画布）里只有一个默认项；
-随手建了一条但没设默认，不会悄悄影响所有画布。画布默认优先于全局默认。
+**1. 配置跟着画布走。** 每张画布有自己的实例清单，互不影响；同一类型里
+「设为默认」的那个会被节点默认使用，节点参数留空就跟随它。
+老版本存在全局作用域里的记录仍可读取，但新建的一律属于当前画布。
 
 **2. 密钥加密落库，只走环境变量。** 密钥字段单独加密存在 `providers` 表，
 接口只回显 `sk-****abcd`；生成项目时 `config.json` 里只有 `api_key_env` 的名字
-（`MINEAGENT_EMB_KEY` / `MINEAGENT_VEC_KEY` / `MINEAGENT_DATA_KEY`），
+（第一个实例是 `MINEAGENT_EMB_KEY`，之后是 `_2`、`_3`，向量库 / 数据源同理），
 值由运行时通过环境变量注入子进程，**不会写进任何项目文件**。
 
 **3. 依赖是懒加载的。** 没装 `chromadb` 时选不了 Chroma 的节点不会把流程跑崩，

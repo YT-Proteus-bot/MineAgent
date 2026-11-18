@@ -3,7 +3,18 @@ import { api } from '../api'
 import { useStore } from '../store'
 import Modal from './Modal'
 import ModelNameField from './ModelNameField'
-import type { GlobalSettings, ModelConfig } from '../types'
+import { ProvidersPanel } from './ProvidersPanel'
+import type { GlobalSettings, ModelConfig, ProviderKind } from '../types'
+
+/** 用户中心的页签：对话模型 + 三类 provider 配置 */
+type TabId = 'chat' | ProviderKind
+
+const TABS: { id: TabId; label: string; hint: string }[] = [
+  { id: 'chat', label: '对话模型', hint: '编排与运行时兜底用的大模型' },
+  { id: 'embedding', label: '向量模型', hint: '把文本转成向量的模型（建库与查询必须一致）' },
+  { id: 'vector', label: '向量库', hint: '存向量和原文，按相似度检索' },
+  { id: 'data', label: '数据源', hint: '业务库 / 文档库 / 图库 / 缓存 / 时序库' },
+]
 
 /** 默认服务商是 DeepSeek，其余按需切换 */
 export const DEFAULT_PROVIDER = { id: 'deepseek', base: 'https://api.deepseek.com/v1' }
@@ -45,6 +56,7 @@ export function UserCenterModal({ onClose }: { onClose: () => void }) {
   const preset = PRESETS.find((p) => p.id === form.orchestrator_provider) || PRESETS[0]
 
   const save = async () => {
+    if (!form) return
     try {
       const next = await api.putSettings({
         ...form,
@@ -59,6 +71,7 @@ export function UserCenterModal({ onClose }: { onClose: () => void }) {
   }
 
   const test = async () => {
+    if (!form) return
     setTesting(true)
     setTestResult('')
     try {
@@ -163,6 +176,7 @@ export function CanvasModelModal({ onClose }: { onClose: () => void }) {
   const [form, setForm] = useState<ModelConfig | null>(canvas?.llm_config || null)
   const [key, setKey] = useState('')
   const [fallback, setFallback] = useState<GlobalSettings | null>(null)
+  const [tab, setTab] = useState<TabId>('chat')
 
   // 拉一次全局模型配置，好让用户看清「留空时实际会用哪一份」
   useEffect(() => {
@@ -191,18 +205,39 @@ export function CanvasModelModal({ onClose }: { onClose: () => void }) {
 
   return (
     <Modal
-      title={`画布模型 · ${canvas.name}`}
-      subtitle="这个画布运行时优先使用这里的配置；留空则回退到「模型配置」里的全局配置。"
+      title={`画布配置 · ${canvas.name}`}
+      subtitle="这张画布自己的对话模型、向量模型、向量库和数据源。不同画布互不影响。"
       onClose={onClose}
       footer={
-        <>
-          <button onClick={onClose}>取消</button>
-          <button className="primary" onClick={save}>
-            保存
-          </button>
-        </>
+        tab === 'chat' ? (
+          <>
+            <button onClick={onClose}>取消</button>
+            <button className="primary" onClick={save}>
+              保存
+            </button>
+          </>
+        ) : (
+          <button onClick={onClose}>关闭</button>
+        )
       }
     >
+      <div className="tabs">
+        {TABS.map((t) => (
+          <button
+            key={t.id}
+            className={tab === t.id ? 'tab active' : 'tab'}
+            onClick={() => setTab(t.id)}
+            title={t.hint}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {tab !== 'chat' && <ProvidersPanel kind={tab} canvasId={canvas.id} />}
+
+      {tab === 'chat' && (
+        <>
       <label className="field">
         <span>服务商</span>
         <select
@@ -284,6 +319,8 @@ export function CanvasModelModal({ onClose }: { onClose: () => void }) {
         运行时 key 通过环境变量注入子进程，不会明文写进项目文件夹。项目里也支持自己放
         <code className="mono"> .env</code> 做独立运行。
       </div>
+        </>
+      )}
     </Modal>
   )
 }

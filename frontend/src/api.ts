@@ -91,6 +91,18 @@ export const api = {
       `/api/canvases/${id}/apply-draft`,
       { method: 'POST', body: JSON.stringify({ draft }) },
     ),
+  /** 增量修改画布：增删节点 / 改参数与代码 / 连线 / 挪位置 */
+  applyOps: (id: string, operations: Record<string, any>[], relayout = false) =>
+    request<{
+      ok: boolean
+      applied: number
+      errors: string[]
+      canvas: CanvasDetail
+      constraints: ConstraintReport
+    }>(`/api/canvases/${id}/apply-ops`, {
+      method: 'POST',
+      body: JSON.stringify({ operations, relayout }),
+    }),
   setRules: (id: string, rules: CustomRule[]) =>
     request<{ ok: boolean; rules: CustomRule[] }>(`/api/canvases/${id}/rules`, {
       method: 'PUT',
@@ -231,10 +243,15 @@ export const api = {
     }),
 
   // ---- AI 助手历史对话 ----
-  listChats: () =>
+  /** 传 canvasId 就只取这张画布的对话 */
+  listChats: (canvasId?: string) =>
     request<
       { id: string; title: string; message_count: number; updated_at: string }[]
-    >('/api/assistant/chats'),
+    >(
+      `/api/assistant/chats${
+        canvasId ? `?canvas_id=${encodeURIComponent(canvasId)}` : ''
+      }`,
+    ),
   getChat: (id: string) =>
     request<{ id: string; title: string; messages: ChatMsg[]; updated_at: string }>(
       `/api/assistant/chats/${id}`,
@@ -244,6 +261,7 @@ export const api = {
     chat_id?: string
     title?: string
     canvas_id?: string
+    summary?: string
   }) =>
     request<{ ok: boolean; id: string; title?: string }>('/api/assistant/chats', {
       method: 'POST',
@@ -251,6 +269,31 @@ export const api = {
     }),
   deleteChat: (id: string) =>
     request<{ ok: boolean }>(`/api/assistant/chats/${id}`, { method: 'DELETE' }),
+
+  /** 把较早的对话压成摘要（上下文压缩） */
+  compressChat: (messages: ChatMsg[], canvasId: string) =>
+    request<{ ok: boolean; summary: string; kept: number; dropped: number }>(
+      '/api/assistant/compress',
+      { method: 'POST', body: JSON.stringify({ messages, canvas_id: canvasId }) },
+    ),
+
+  // ---- 助手长期记忆（按画布） ----
+  listMemories: (canvasId: string) =>
+    request<{ ok: boolean; memories: any[] }>(
+      `/api/assistant/memories?canvas_id=${encodeURIComponent(canvasId)}`,
+    ),
+  addMemory: (canvasId: string, content: string, kind = 'note') =>
+    request<{ ok: boolean; id: string }>('/api/assistant/memories', {
+      method: 'POST',
+      body: JSON.stringify({ canvas_id: canvasId, content, kind }),
+    }),
+  deleteMemory: (id: string) =>
+    request<{ ok: boolean }>(`/api/assistant/memories/${id}`, { method: 'DELETE' }),
+  clearMemories: (canvasId: string) =>
+    request<{ ok: boolean; removed: number }>(
+      `/api/assistant/memories?canvas_id=${encodeURIComponent(canvasId)}`,
+      { method: 'DELETE' },
+    ),
 
   // ---- 模式模板 ----
   modeTemplates: () =>
@@ -447,21 +490,43 @@ export interface ChatMsg {
   content: string
 }
 
-/** 内置助手：流式对话，token 逐个回调。 */
+/** 内置助手（Agent 形态）：流式对话 + 工具事件 + 待确认动作 */
+export type AssistantEvent = {
+  event: string
+  text?: string
+  message?: string
+  tool?: string
+  args?: Record<string, any>
+  summary?: string
+  payload?: Record<string, any>
+  [key: string]: any
+}
+
 export async function assistantChat(
-  messages: ChatMsg[],
-  context: Record<string, any>,
-  onToken: (text: string) => void,
-  onError: (message: string) => void,
-  onDone: () => void,
+  opts: {
+    messages: ChatMsg[]
+    context: Record<string, any>
+    canvasId?: string
+    summary?: string
+    onToken: (text: string) => void
+    onError: (message: string) => void
+    onDone: () => void
+    onEvent?: (evt: AssistantEvent) => void
+  },
   signal?: AbortSignal,
 ): Promise<void> {
+  const { onToken, onError, onDone, onEvent } = opts
   let resp: Response
   try {
     resp = await fetch('/api/assistant/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json; charset=utf-8' },
-      body: JSON.stringify({ messages, context }),
+      body: JSON.stringify({
+        messages: opts.messages,
+        context: opts.context,
+        canvas_id: opts.canvasId || '',
+        summary: opts.summary || '',
+      }),
       signal,
     })
   } catch (err: any) {
@@ -498,9 +563,10 @@ export async function assistantChat(
       const line = part.split('\n').find((l) => l.startsWith('data:'))
       if (!line) continue
       try {
-        const evt = JSON.parse(line.slice(5).trim())
-        if (evt.event === 'token') onToken(evt.text)
-        else if (evt.event === 'error') onError(evt.message)
+        const evt = JSON.parse(line.slice(5).trim()) as AssistantEvent
+        onEvent?.(evt)
+        if (evt.event === 'token') onToken(evt.text || '')
+        else if (evt.event === 'error') onError(evt.message || '')
         else if (evt.event === 'done') onDone()
       } catch {
         /* 忽略半行 */

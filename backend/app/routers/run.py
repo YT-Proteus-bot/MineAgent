@@ -16,6 +16,9 @@ from fastapi.responses import StreamingResponse
 from ..config import PROJECTS_DIR, RUN_LOG_DIR, RUN_TIMEOUT
 from ..constraints import validate as validate_graph
 from ..db import get_conn, now_iso
+from ..framework_env import interpreter as framework_interpreter
+from ..framework_env import status as framework_status
+from ..providers.bindings import env_bindings, resolve_runtime_providers
 from ..schemas import RunRequest
 from ..security import decrypt
 from .canvases import _fetch, _node_key_env, resolve_runtime_model, save_canvas
@@ -38,11 +41,17 @@ def _sse(obj: Dict[str, Any]) -> str:
 
 
 def _deps_status(framework: str) -> Dict[str, bool]:
+    """依赖是否就绪。
+
+    用隔离环境的框架（MetaGPT / Agno / SmolAgents / Semantic Kernel /
+    OpenAI Agents）看自己那个 venv；其余看当前进程。
+    """
+    st = framework_status(framework)
+    if st["isolated"]:
+        return {framework: bool(st["ready"])}
     import importlib.util
-    out = {}
-    for mod in DEPENDENCY_HINTS.get(framework, []):
-        out[mod] = importlib.util.find_spec(mod) is not None
-    return out
+    return {mod: importlib.util.find_spec(mod) is not None
+            for mod in DEPENDENCY_HINTS.get(framework, [])}
 
 
 @router.get("/{canvas_id}/env")
@@ -52,12 +61,16 @@ def env_status(canvas_id: str):
     fw = row["framework"]
     deps = _deps_status(fw)
     cfg = resolve_runtime_model(row)
+    st = framework_status(fw)
     return {
         "python": sys.version.split()[0],
-        "executable": sys.executable,
+        "executable": st.get("interpreter") or sys.executable,
         "framework": fw,
         "dependencies": deps,
         "all_dependencies_ready": all(deps.values()) if deps else True,
+        "isolated": st.get("isolated", False),
+        "env_path": st.get("path", ""),
+        "env_ready": st.get("ready", True),
         "has_api_key": bool(cfg.get("api_key")),
         "model": cfg.get("model"),
         "base_url": cfg.get("base_url"),
@@ -123,6 +136,11 @@ async def run_canvas(canvas_id: str, payload: RunRequest):
             env[_node_key_env(nm["node_id"])] = key
             node_keys += 1
 
+    # 向量模型 / 向量库 / 数据源的密钥：同样只走环境变量，不落进项目文件
+    for env_name, value in env_bindings(resolve_runtime_providers(canvas_id)).items():
+        if value:
+            env[env_name] = value
+
     runner_path = os.path.join(project_dir, "runner.py")
     # 依赖齐全就跑项目里的 agent.py（真实框架代码）；
     # 缺依赖时降级到零依赖预览执行器 runner.py
@@ -157,8 +175,10 @@ async def run_canvas(canvas_id: str, payload: RunRequest):
                     "entry": os.path.basename(entry_path)})
 
         try:
+            # 隔离环境优先：MetaGPT 之类的框架和主环境不兼容，各用各的解释器
+            runner_python = framework_interpreter(row["framework"]) or sys.executable
             proc = await asyncio.create_subprocess_exec(
-                sys.executable, entry_path, "--input", payload.input or "",
+                str(runner_python), entry_path, "--input", payload.input or "",
                 cwd=project_dir, env=env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,

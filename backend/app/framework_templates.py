@@ -37,16 +37,18 @@ FRAMEWORKS: List[Dict[str, Any]] = [
         "id": "metagpt",
         "label": "MetaGPT",
         "runnable": False,
-        "badge": "架构图",
+        "badge": "需 Linux 环境",
         "color": "#6d28d9",
-        "description": "软件公司式 SOP 多智能体（产品经理 / 架构师 / 工程师）。",
+        "description": "软件公司式 SOP 多智能体。上游把依赖钉死为 lancedb==0.4.0，"
+                       "该版本在 PyPI 已不可安装，Windows/macOS 上装不上；"
+                       "要真跑需在 Linux 容器里用它自己的镜像。",
         "requires": "metagpt",
     },
     {
         "id": "agno",
         "label": "Agno",
-        "runnable": False,
-        "badge": "架构图",
+        "runnable": True,
+        "badge": "可运行",
         "color": "#be123c",
         "description": "轻量高性能 Agent 框架，Team + Memory + Knowledge 组合。",
         "requires": "agno",
@@ -54,8 +56,8 @@ FRAMEWORKS: List[Dict[str, Any]] = [
     {
         "id": "smolagents",
         "label": "SmolAgents",
-        "runnable": False,
-        "badge": "架构图",
+        "runnable": True,
+        "badge": "可运行",
         "color": "#0e7490",
         "description": "HuggingFace 的代码型 Agent，用 CodeAgent 生成并执行代码。",
         "requires": "smolagents",
@@ -63,8 +65,8 @@ FRAMEWORKS: List[Dict[str, Any]] = [
     {
         "id": "semantic_kernel",
         "label": "Semantic Kernel",
-        "runnable": False,
-        "badge": "架构图",
+        "runnable": True,
+        "badge": "可运行",
         "color": "#4338ca",
         "description": "微软的企业级 SDK，Plugin + Planner + Function 调用。",
         "requires": "semantic-kernel",
@@ -72,8 +74,8 @@ FRAMEWORKS: List[Dict[str, Any]] = [
     {
         "id": "openai_agents",
         "label": "OpenAI Agents SDK",
-        "runnable": False,
-        "badge": "架构图",
+        "runnable": True,
+        "badge": "可运行",
         "color": "#111827",
         "description": "Agent + Handoff + Guardrail + Session 四件套。",
         "requires": "openai-agents",
@@ -81,10 +83,10 @@ FRAMEWORKS: List[Dict[str, Any]] = [
     {
         "id": "dify",
         "label": "Dify Workflow",
-        "runnable": False,
-        "badge": "架构图",
+        "runnable": True,
+        "badge": "可导出 DSL",
         "color": "#0369a1",
-        "description": "可视化工作流风格：开始 → 节点链 → 条件分支 → 结束。",
+        "description": "可视化工作流风格：开始 → 节点链 → 条件分支 → 结束；导出 DSL 导入 Dify 即可运行。",
         "requires": "dify",
     },
     {
@@ -99,7 +101,8 @@ FRAMEWORKS: List[Dict[str, Any]] = [
 ]
 
 FRAMEWORK_INDEX = {f["id"]: f for f in FRAMEWORKS}
-RUNNABLE = {"langchain", "autogen", "crewai"}
+RUNNABLE = {"langchain", "autogen", "crewai", "smolagents", "agno",
+            "openai_agents", "semantic_kernel", "dify"}
 
 
 def _mk(kind: str, idx: int, label: str | None = None, params: Dict[str, Any] | None = None,
