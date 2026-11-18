@@ -755,8 +755,9 @@ def delete_canvas(canvas_id: str):
         conn.execute("DELETE FROM agent_models WHERE canvas_id = ?", (canvas_id,))
         # 向量模型 / 向量库 / 数据源是画布级配置，跟着画布一起删
         conn.execute("DELETE FROM providers WHERE canvas_id = ?", (canvas_id,))
-        # 助手对话也是画布级的，不删会在列表里留下孤儿记录
+        # 助手对话和长期记忆也是画布级的，不删会留下孤儿记录
         conn.execute("DELETE FROM assistant_chats WHERE canvas_id = ?", (canvas_id,))
+        conn.execute("DELETE FROM assistant_memories WHERE canvas_id = ?", (canvas_id,))
     target = (PROJECTS_DIR / row["slug"]).resolve()
     if target.parent == PROJECTS_DIR.resolve() and target.exists():
         shutil.rmtree(target, ignore_errors=True)
