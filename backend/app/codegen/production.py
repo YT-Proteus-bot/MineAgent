@@ -1671,7 +1671,8 @@ def test_run_state_endpoint_exists():
 '''
 
 
-def render_requirements_extra(session_store: str = "sqlite") -> str:
+def render_requirements_extra(session_store: str = "sqlite",
+                              framework: str = "") -> str:
     lines = [
         "fastapi>=0.110",
         "uvicorn[standard]>=0.29",
@@ -1682,6 +1683,9 @@ def render_requirements_extra(session_store: str = "sqlite") -> str:
     # LangGraph 1.x 把 sqlite / postgres 的 checkpointer 拆成了独立包，
     # 不装的话「会话存储」会静默退化成内存态（重启就丢，审批也接不上）
     if session_store in ("sqlite", "postgres"):
+        if framework == "harness":
+            lines.append(
+                "# 下面这个只有 server.py（服务化）需要；直接跑 agent.py 不需要")
         lines.append("langgraph-checkpoint-sqlite>=2.0")
     if session_store == "postgres":
         lines.append("langgraph-checkpoint-postgres>=2.0")

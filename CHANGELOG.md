@@ -5,6 +5,76 @@
 
 ---
 
+## 2026-11-18 · 助手 Agent 化与源码分析
+
+这一版把 AI 助手从「单轮问答」改成**能调工具的 Agent**，并加了「按架构画图」和「按源码画图」。
+
+### 新增
+
+- **AI 助手 Agent 化**
+  - 自己实现流式 Agent 循环（`assistant_agent.py`），支持多轮工具调用，最多 6 步，
+    不引 langchain——这个循环足够简单，自己写更好控制
+  - **读工具自动执行，写工具一律挂起**：写工具返回 `__pending__`，前端渲染待确认卡片，
+    用户点「应用」才落地；回给模型的话是「操作已生成，等用户确认后才生效」
+  - 工具共 20 个：读 11 个（画布/配置/节点文档/运行日志/约束/记忆/架构指纹/源码扫描），
+    写 9 个（增量改画布、整张替换、改服务/模型/模式/框架/provider、按指纹生成、运行）
+  - **密钥边界**：助手读不到也写不了 API Key，`get_config` 只返回 `has_key`
+
+- **助手对话的记忆与压缩**
+  - 短期：会话内最近 20 条
+  - 长期：`assistant_memories` 表，按画布隔离，`remember`/`recall` 工具读写，
+    字符二元组重叠度检索（不依赖向量模型），近重复（>0.85）更新而非新增
+  - 压缩：对话超过 30 条时把早期内容压成摘要，只留最近 10 条；摘要存在
+    `assistant_chats.summary` 里，刷新后仍有效
+  - 对话按画布隔离：切画布清空、恢复该画布自己的对话；跨画布续写会被拒绝
+
+- **架构指纹库**（`architectures.py`，16 个项目）
+  - 每个指纹含行为特征（可验证）、节点拓扑、关键节点代码
+  - 已收录：AutoGPT、BabyAGI、MetaGPT、CrewAI、CAMEL、Voyager、OpenHands、AutoGen、
+    ChatDev、LangGraph、DeepSeek Harness、Dify、Coze、n8n、Flowise、Langflow
+  - 每个指纹绑定推荐的框架与推理模式，生成画布时**同时切换顶部两个下拉框**
+  - 没收录的项目直接说「还没收录」，不假装还原
+
+- **从源码画图**
+  - 三种输入：GitHub 地址（支持私有仓库）、上传压缩包、本地目录
+  - 静态扫描（`source_scan.py`）：目录树、依赖声明、模块 import、类与函数、
+    prompt 片段、工具定义线索；Python 走 `ast`，JS/TS 走正则
+  - **核心目录优先**排序，避免 `scripts/` 把扫描名额吃满
+  - 解压拒绝路径穿越和绝对路径；本地路径拒绝系统目录
+
+- **Harness 框架**（零依赖自实现）
+  - 不套任何第三方框架：`agent.py` 就是项目自带的图执行器，读 `agent.json` 跑节点
+  - `requirements.txt` 里框架依赖为空，实测 12 个 import 全是标准库 + `runtime_sdk`
+  - 用途：表达自研 runtime（如 DeepSeek Harness 这类插件化 agent 容器）的运行时结构
+
+- **画布级 provider**（模型 / 向量 / 数据源）
+  - 配置从「用户中心」移到画布，支持多实例，节点参数里可指定跟随默认或选具体实例
+  - 密钥只走环境变量注入，不写进项目文件
+
+- **运行附件**
+  - 运行面板支持选文件、拖入、粘贴图片，存到项目 `inputs/` 下（单文件 ≤ 20MB）
+  - 路径清单拼进 input，并通过 `MINEAGENT_INPUT_FILES` 传给子进程，节点用 `ctx.files` 拿
+
+### 修复
+
+- **`web_search` 节点跑不起来**：生成代码引用 `langchain_community`，但 requirements 里没有，
+  一调就 `ModuleNotFoundError`。改用 `ddgs`（DuckDuckGo 对脚本抓 HTML 会返回 202 反爬页，
+  零依赖方案拿不到结果），并在缺 ddgs 时给可照做的安装提示
+- **非 LangChain 框架缺 `langgraph` 声明**：header 里有 `langgraph.errors` / `langgraph.types`
+  的 import，但 requirements 没写，换台机器按声明装会缺
+- **约束规则白名单写错 kind**：`MULTI_INPUT_OK` 里写的是 `merge`，真实节点叫 `merger`，
+  导致任何用 merger 汇聚的画布都被误报「多入边无法合并」
+- **Flowise 指纹用了不存在的 `splitter`**：真实 kind 是 `text_splitter`
+- **发布模板时 GitHub 报 400**：不是参数错，是网络把 POST body 截断后 GitHub 回
+  `malformed request`。加了重试（3 次指数退避）并在错误信息里带上 URL
+- **模型配置被测试污染**：测试脚本直接写生产库的 `app_settings`，把模型配置改成 mock，
+  导致助手请求连不上。从备份恢复并加快照，测试不再碰真实配置
+- **删除画布不清助手记忆**：只级联删了 `providers` 和 `assistant_chats`，留下孤儿记忆
+- **`apply_architecture` 不同步框架/模式**：指纹里的 `framework`/`mode` 是摆设，
+  生成画布后顶部下拉框不变
+
+---
+
 ## 2026-11-18
 
 这一版的主题是**接入外部新能力**，并把节点从"占位"补成"真能跑"。

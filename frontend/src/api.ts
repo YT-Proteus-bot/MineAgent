@@ -85,11 +85,18 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(graph || {}),
     }),
-  /** 把 AI 助手生成的画布草稿替换到当前画布 */
-  applyDraft: (id: string, draft: Record<string, any>) =>
+  /** 把 AI 助手生成的画布草稿替换到当前画布（可顺带切换框架和模式） */
+  applyDraft: (id: string, draft: Record<string, any>, framework?: string, mode?: string) =>
     request<{ ok: boolean; canvas: CanvasDetail; constraints: ConstraintReport }>(
       `/api/canvases/${id}/apply-draft`,
-      { method: 'POST', body: JSON.stringify({ draft }) },
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          draft,
+          framework: framework || '',
+          mode: mode || '',
+        }),
+      },
     ),
   /** 增量修改画布：增删节点 / 改参数与代码 / 连线 / 挪位置 */
   applyOps: (id: string, operations: Record<string, any>[], relayout = false) =>
@@ -241,6 +248,70 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+
+  /** 按字段深合并画布的服务设置 */
+  updateService: (id: string, patch: Record<string, any>) =>
+    request<{ ok: boolean; canvas: CanvasDetail; service: Record<string, any> }>(
+      `/api/canvases/${id}/service`,
+      { method: 'PATCH', body: JSON.stringify(patch) },
+    ),
+
+  // ---- 运行附件（文件 / 图片） ----
+  listInputs: (id: string) =>
+    request<{ files: { name: string; path: string; size: number }[] }>(
+      `/api/canvases/${id}/inputs`,
+    ),
+  uploadInput: async (id: string, file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    const resp = await fetch(`/api/canvases/${id}/inputs`, {
+      method: 'POST',
+      body: form,
+    })
+    if (!resp.ok) {
+      let detail = `${resp.status} ${resp.statusText}`
+      try {
+        const body = await resp.json()
+        detail = body.detail || detail
+      } catch {
+        /* ignore */
+      }
+      throw new Error(detail)
+    }
+    return (await resp.json()) as {
+      ok: boolean
+      file: { name: string; path: string; size: number }
+    }
+  },
+  deleteInput: (id: string, path: string) =>
+    request<{ ok: boolean }>(
+      `/api/canvases/${id}/inputs?path=${encodeURIComponent(path)}`,
+      { method: 'DELETE' },
+    ),
+
+  // ---- 源码包（从源码还原架构） ----
+  listSources: () =>
+    request<{ sources: any[] }>('/api/sources'),
+  uploadSource: async (file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    const resp = await fetch('/api/sources/upload', { method: 'POST', body: form })
+    if (!resp.ok) {
+      let detail = `${resp.status} ${resp.statusText}`
+      try {
+        const body = await resp.json()
+        detail = body.detail || detail
+      } catch {
+        /* ignore */
+      }
+      throw new Error(detail)
+    }
+    return (await resp.json()) as { ok: boolean; source_id: string; source: any }
+  },
+  scanSource: (id: string) =>
+    request<Record<string, any>>(`/api/sources/${id}/scan`),
+  deleteSource: (id: string) =>
+    request<{ ok: boolean }>(`/api/sources/${id}`, { method: 'DELETE' }),
 
   // ---- AI 助手历史对话 ----
   /** 传 canvasId 就只取这张画布的对话 */
@@ -396,9 +467,13 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ canvas_id: canvasId, lib_id: libId }),
     }),
-  libTemplates: (libId: string) =>
+  libCount: (libId: string) =>
+    request<{ ok: boolean; count: number }>(
+      `/api/community/lib-count?lib_id=${encodeURIComponent(libId)}`,
+    ),
+  libTemplates: (libId: string, refresh = false) =>
     request<{ ok: boolean; lib: TemplateLib; templates: CommunityTemplate[] }>(
-      `/api/community/lib-templates?lib_id=${encodeURIComponent(libId)}`,
+      `/api/community/lib-templates?lib_id=${encodeURIComponent(libId)}${refresh ? '&refresh=1' : ''}`,
     ),
   libLoad: (libId: string, slug: string) =>
     request<{ ok: boolean; canvas: CanvasDetail }>('/api/community/lib-load', {
@@ -585,6 +660,7 @@ export async function runCanvas(
   onEvent: (evt: RunEvent) => void,
   onError: (message: string) => void,
   onConstraintBlocked?: (detail: { message: string; violations: any[] }) => void,
+  files: string[] = [],
 ): Promise<RunHandle> {
   const controller = new AbortController()
   const run = async () => {
@@ -593,7 +669,7 @@ export async function runCanvas(
       resp = await fetch(`/api/canvases/${canvasId}/run`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json; charset=utf-8' },
-        body: JSON.stringify({ input }),
+        body: JSON.stringify({ input, files }),
         signal: controller.signal,
       })
     } catch (err: any) {

@@ -121,6 +121,17 @@ def _summary(row) -> CanvasSummary:
     )
 
 
+def _deep_merge(base: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
+    """按字段深合并（只用于服务设置这类两层结构的配置）。"""
+    out = dict(base or {})
+    for key, value in (patch or {}).items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _deep_merge(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
 def _detail(row) -> CanvasDetail:
     graph = json.loads(row["graph"] or "{}")
     models = load_node_models(row["id"])
@@ -323,6 +334,13 @@ def apply_draft(canvas_id: str, payload: ApplyDraftRequest):
 
     nodes = auto_layout(nodes, edges)
 
+    # 还原某个架构时可以顺带把框架/模式切过去：只改列，不触发重建
+    # （图已经被这份草稿整体替换了，再走 update_canvas 的 build_graph 会打架）
+    target_framework = (payload.framework or "").strip()
+    target_mode = (payload.mode or "").strip()
+    if target_framework and target_framework not in FRAMEWORK_INDEX:
+        raise HTTPException(400, f"没有这个框架：{target_framework}")
+
     with get_conn() as conn:
         row = _fetch(conn, canvas_id)
         old = json.loads(row["graph"] or "{}")
@@ -336,9 +354,17 @@ def apply_draft(canvas_id: str, payload: ApplyDraftRequest):
             graph_dict["background"] = old["background"]
         if old.get("service"):
             graph_dict["service"] = old["service"]
-        conn.execute(
-            "UPDATE canvases SET graph = ?, updated_at = ? WHERE id = ?",
-            (json.dumps(graph_dict, ensure_ascii=False), now_iso(), canvas_id))
+
+        sets = ["graph = ?", "updated_at = ?"]
+        values: List[Any] = [json.dumps(graph_dict, ensure_ascii=False), now_iso()]
+        if target_framework:
+            sets.append("framework = ?")
+            values.append(target_framework)
+        if target_mode:
+            sets.append("mode = ?")
+            values.append(target_mode)
+        values.append(canvas_id)
+        conn.execute(f"UPDATE canvases SET {', '.join(sets)} WHERE id = ?", values)
         try:
             rules = json.loads(row["rules"] or "[]")
         except Exception:  # noqa: BLE001
@@ -348,6 +374,27 @@ def apply_draft(canvas_id: str, payload: ApplyDraftRequest):
     with get_conn() as conn:
         updated = _fetch(conn, canvas_id)
     return {"ok": True, "canvas": _detail(updated), "constraints": report}
+
+
+@router.patch("/{canvas_id}/service")
+def update_service(canvas_id: str, payload: Dict[str, Any]):
+    """按字段深合并画布的「服务设置」（入口 / 会话并发 / 可观测 / 安全）。
+
+    只传要改的那几个字段即可，没传的保持原样。
+    """
+    with get_conn() as conn:
+        row = _fetch(conn, canvas_id)
+        try:
+            graph = json.loads(row["graph"] or "{}")
+        except json.JSONDecodeError:
+            graph = {}
+        merged = _deep_merge(graph.get("service") or {}, payload or {})
+        graph["service"] = merged
+        conn.execute(
+            "UPDATE canvases SET graph = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(graph, ensure_ascii=False), now_iso(), canvas_id))
+        updated = _fetch(conn, canvas_id)
+    return {"ok": True, "canvas": _detail(updated), "service": merged}
 
 
 @router.post("/{canvas_id}/apply-ops")

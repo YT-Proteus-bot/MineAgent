@@ -11,12 +11,14 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import re
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -24,6 +26,7 @@ from .db import get_setting, set_setting
 from .security import decrypt
 
 GITHUB_API = "https://api.github.com"
+GRAPHQL_API = "https://api.github.com/graphql"
 OAUTH_AUTHORIZE = "https://github.com/login/oauth/authorize"
 OAUTH_TOKEN = "https://github.com/login/oauth/access_token"
 RAW_BASE = "https://raw.githubusercontent.com"
@@ -259,26 +262,46 @@ def collect_project_files(project_dir: Path) -> Dict[str, str]:
 # GitHub HTTP
 # --------------------------------------------------------------------------- #
 def _http(method: str, url: str, token_str: str = "", data: Any = None,
-          headers: Optional[Dict[str, str]] = None, timeout: int = 30) -> Any:
+          headers: Optional[Dict[str, str]] = None, timeout: int = 30,
+          retries: int = 3) -> Any:
+    """发起 GitHub 请求。
+
+    会重试：连接被重置 / 超时 / 500 系，以及 400 malformed。
+    最后一种看着像参数错，实际在国内网络下经常是代理把 POST body 截断了，
+    重发一次基本就好；真参数错的话重试三次后照样会抛出来。
+    """
     body = json.dumps(data, ensure_ascii=False).encode("utf-8") if data is not None else None
-    req = urllib.request.Request(url, data=body, method=method)
-    req.add_header("Accept", "application/vnd.github+json")
-    req.add_header("User-Agent", "MineAgent-Community")
-    if body is not None:
-        req.add_header("Content-Type", "application/json")
-    if token_str:
-        req.add_header("Authorization", f"Bearer {token_str}")
-    for key, value in (headers or {}).items():
-        req.add_header(key, value)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read().decode("utf-8", "replace")
-            return json.loads(raw) if raw.strip() else {}
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", "replace")[:400]
-        raise GitHubError(f"GitHub API {exc.code}：{detail}") from exc
-    except urllib.error.URLError as exc:
-        raise GitHubError(f"连接 GitHub 失败：{exc.reason}") from exc
+    last_error = ""
+    for attempt in range(max(1, retries)):
+        req = urllib.request.Request(url, data=body, method=method)
+        req.add_header("Accept", "application/vnd.github+json")
+        req.add_header("User-Agent", "MineAgent-Community")
+        if body is not None:
+            req.add_header("Content-Type", "application/json")
+        if token_str:
+            req.add_header("Authorization", f"Bearer {token_str}")
+        for key, value in (headers or {}).items():
+            req.add_header(key, value)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read().decode("utf-8", "replace")
+                return json.loads(raw) if raw.strip() else {}
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace")[:400]
+            last_error = f"GitHub API {exc.code}（{method} {url}）：{detail}"
+            retryable = exc.code in (400, 408, 429, 500, 502, 503, 504)
+            if retryable and attempt < retries - 1:
+                time.sleep(0.6 * (2 ** attempt))
+                continue
+            raise GitHubError(last_error) from exc
+        except (urllib.error.URLError, OSError) as exc:
+            reason = getattr(exc, "reason", exc)
+            last_error = f"连接 GitHub 失败（{method} {url}）：{reason}"
+            if attempt < retries - 1:
+                time.sleep(0.6 * (2 ** attempt))
+                continue
+            raise GitHubError(last_error) from exc
+    raise GitHubError(last_error or f"请求 GitHub 失败（{method} {url}）")
 
 
 def api(method: str, path: str, token_str: str = "", data: Any = None) -> Any:
@@ -352,11 +375,123 @@ def existing_slugs(token_str: str = "", conf: Optional[Dict[str, Any]] = None) -
     return {item.get("name", "") for item in items if item.get("type") == "dir"}
 
 
-def list_templates(conf: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+_LIST_CACHE: Dict[str, Any] = {}
+_LIST_TTL = 60.0
+
+
+def _cache_key(conf: Dict[str, Any]) -> str:
+    return f"{conf.get('repo')}|{conf.get('branch')}|{conf.get('dir')}"
+
+
+def invalidate_templates(conf: Optional[Dict[str, Any]] = None) -> None:
+    if conf:
+        _LIST_CACHE.pop(_cache_key(conf), None)
+    else:
+        _LIST_CACHE.clear()
+
+
+def template_count(conf: Optional[Dict[str, Any]] = None) -> int:
+    """只列目录（1 次请求），本地数模板目录数量，不读每个 meta.json。"""
+    conf = conf or cfg()
+    if not conf["repo"]:
+        return 0
+    owner, repo = parse_repo(conf["repo"])
+    try:
+        items = api("GET", f"/repos/{owner}/{repo}/contents/{urllib.parse.quote(conf['dir'], safe='/')}"
+                           f"?ref={urllib.parse.quote(conf['branch'], safe='')}", token() or "")
+    except GitHubError:
+        return 0
+    if not isinstance(items, list):
+        return 0
+    return sum(1 for item in items if item.get("type") == "dir")
+
+
+def _graphql(query: str) -> Dict[str, Any]:
+    """GitHub GraphQL：一次请求批量取多个文件内容。"""
+    token_str = token()
+    if not token_str:
+        raise GitHubError("还没有连接 GitHub")
+    body = json.dumps({"query": query}).encode("utf-8")
+    req = urllib.request.Request(
+        GRAPHQL_API,
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token_str}",
+            "Content-Type": "application/json",
+            "User-Agent": "MineAgent-Community",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            payload = json.loads(resp.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")[:300]
+        raise GitHubError(f"GitHub GraphQL {exc.code}：{detail}") from exc
+    except urllib.error.URLError as exc:
+        raise GitHubError(f"连接 GitHub 失败：{exc.reason}") from exc
+    if payload.get("errors"):
+        raise GitHubError(f"GitHub GraphQL：{payload['errors'][0].get('message')}")
+    return payload.get("data") or {}
+
+
+def _templates_via_graphql(owner: str, repo: str, branch: str,
+                           dir_path: str) -> List[Dict[str, Any]]:
+    """一次 GraphQL 请求拿到 templates 下所有子目录的 meta.json 内容。"""
+    expression = f"{branch}:{dir_path}"
+    query = (
+        'query { repository(owner: %s, name: %s) { '
+        'object(expression: %s) { ... on Tree { entries { name type '
+        'object { ... on Tree { entries { name object { ... on Blob { text } } } } } } } } } }'
+        % (json.dumps(owner), json.dumps(repo), json.dumps(expression))
+    )
+    data = _graphql(query)
+    tree = (((data.get("repository") or {}).get("object")) or {}).get("entries") or []
+    out: List[Dict[str, Any]] = []
+    for entry in tree:
+        if entry.get("type") != "tree":
+            continue
+        slug = str(entry.get("name") or "")
+        meta: Optional[Dict[str, Any]] = None
+        for sub in (entry.get("object") or {}).get("entries") or []:
+            if sub.get("name") != "meta.json":
+                continue
+            text = (sub.get("object") or {}).get("text") or ""
+            if text:
+                try:
+                    meta = json.loads(text)
+                except Exception:  # noqa: BLE001
+                    meta = None
+            break
+        if not isinstance(meta, dict):
+            continue
+        if not meta.get("slug"):
+            meta["slug"] = slug
+        out.append(meta)
+    return out
+
+
+def list_templates(conf: Optional[Dict[str, Any]] = None,
+                   force: bool = False) -> List[Dict[str, Any]]:
+    """列目录 + 并发拉每个模板的 meta.json，结果缓存 60 秒。"""
     conf = conf or cfg()
     if not conf["repo"]:
         return []
+    key = _cache_key(conf)
+    if not force:
+        hit = _LIST_CACHE.get(key)
+        if hit and time.time() - hit[0] < _LIST_TTL:
+            return hit[1]
     owner, repo = parse_repo(conf["repo"])
+    # GraphQL 一次拿全部 meta；实测在国内网络比并发 REST 慢，默认关闭，可用环境变量开启
+    if os.environ.get("MINEAGENT_TEMPLATES_GRAPHQL") == "1":
+        try:
+            out = _templates_via_graphql(owner, repo, conf["branch"], conf["dir"])
+            out.sort(key=lambda m: str(m.get("created_at", "")), reverse=True)
+            _LIST_CACHE[key] = (time.time(), out)
+            return out
+        except GitHubError:
+            pass
     try:
         items = api("GET", f"/repos/{owner}/{repo}/contents/{urllib.parse.quote(conf['dir'], safe='/')}"
                            f"?ref={urllib.parse.quote(conf['branch'], safe='')}", token() or "")
@@ -364,19 +499,22 @@ def list_templates(conf: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]
         return []
     if not isinstance(items, list):
         return []
-    out: List[Dict[str, Any]] = []
-    for item in items:
-        if item.get("type") != "dir":
-            continue
-        slug = item.get("name", "")
+    slugs = [item.get("name", "") for item in items if item.get("type") == "dir"]
+
+    def fetch_one(slug: str) -> Optional[Dict[str, Any]]:
         try:
             meta = _raw_json(owner, repo, conf["branch"], f"{conf['dir']}/{slug}/meta.json")
         except Exception:  # noqa: BLE001
-            continue
+            return None
         if not meta.get("slug"):
             meta["slug"] = slug
-        out.append(meta)
+        return meta
+
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        metas = list(pool.map(fetch_one, slugs))
+    out = [meta for meta in metas if meta]
     out.sort(key=lambda m: str(m.get("created_at", "")), reverse=True)
+    _LIST_CACHE[key] = (time.time(), out)
     return out
 
 
@@ -578,6 +716,7 @@ def publish(canvas_row, graph: Dict[str, Any], meta: Dict[str, Any],
         api("PATCH", f"/repos/{owner}/{repo}/git/refs/heads/"
             f"{urllib.parse.quote(branch, safe='/')}", token_str,
             {"sha": commit["sha"]})
+        invalidate_templates(conf)
         return {
             "ok": True,
             "target": "private",
@@ -621,6 +760,7 @@ def publish(canvas_row, graph: Dict[str, Any], meta: Dict[str, Any],
         "base": branch,
         "body": _pr_body(meta, list(payload.keys()), canvas_id),
     })
+    invalidate_templates(conf)
     return {
         "ok": True,
         "target": "public",

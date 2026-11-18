@@ -2131,6 +2131,43 @@ button.hud-btn.active {
   }
 }
 
+/* 运行面板的附件区 */
+.run-attach {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+.run-left.dragging {
+  outline: 2px dashed var(--accent);
+  outline-offset: -4px;
+  border-radius: 8px;
+}
+.run-file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+  max-height: 140px;
+  overflow-y: auto;
+}
+.run-file-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  background: var(--panel-2);
+  font-size: 12px;
+}
+.run-file-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* 画布下拉：列表区自己滚动，底部操作项固定可见 */
 .menu-scroll {
   max-height: min(52vh, 460px);

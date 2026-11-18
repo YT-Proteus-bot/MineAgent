@@ -21,7 +21,9 @@ export default function CommunityModal({
   const [libs, setLibs] = useState<TemplateLib[]>([])
   const [libId, setLibId] = useState('')
   const [templates, setTemplates] = useState<CommunityTemplate[]>([])
+  const [count, setCount] = useState(0)
   const [loadingSlug, setLoadingSlug] = useState('')
+  const [loadingList, setLoadingList] = useState(false)
 
   useEffect(() => {
     api
@@ -41,12 +43,23 @@ export default function CommunityModal({
   useEffect(() => {
     if (!libId) {
       setTemplates([])
+      setCount(0)
       return
     }
+    setLoadingList(true)
+    // 先只列目录拿数量（一次请求，快）；再拉每个模板的 meta（并发）
+    api
+      .libCount(libId)
+      .then((res) => setCount(res.count || 0))
+      .catch(() => {})
     api
       .libTemplates(libId)
-      .then((res) => setTemplates(res.templates || []))
+      .then((res) => {
+        setTemplates(res.templates || [])
+        setCount((res.templates || []).length)
+      })
       .catch(() => setTemplates([]))
+      .finally(() => setLoadingList(false))
   }, [libId])
 
   const load = async (tpl: CommunityTemplate) => {
@@ -93,27 +106,41 @@ export default function CommunityModal({
           ))}
           {libs.length === 0 && <option value="">还没有配置模板库</option>}
         </select>
+        <span className="dim small">{count} 个模板</span>
         <span className="dim small">{canvas ? `当前画布：${canvas.name}` : '先打开一张画布'}</span>
         <div style={{ flex: 1 }} />
         <button
           className="sm"
-          onClick={() =>
-            libId && api.libTemplates(libId).then((r) => setTemplates(r.templates || []))
-          }
+          onClick={() => {
+            if (!libId) return
+            setLoadingList(true)
+            api
+              .libTemplates(libId, true)
+              .then((r) => setTemplates(r.templates || []))
+              .catch(() => {})
+              .finally(() => setLoadingList(false))
+          }}
         >
           刷新
         </button>
       </div>
 
       <div className="community-list">
-        {templates.length === 0 && (
+        {loadingList && (
+          <div className="dim" style={{ padding: '14px 0' }}>
+            <span className="spin" style={{ marginRight: 8, verticalAlign: -2 }} />
+            正在加载模板…
+          </div>
+        )}
+        {!loadingList && templates.length === 0 && (
           <div className="dim" style={{ padding: '14px 0' }}>
             {libs.length === 0
               ? '还没有配置模板库。先到「用户中心 → GitHub 账户 → 仓库设置」添加一个。'
               : '这个库里还没有模板。'}
           </div>
         )}
-        {templates.map((t) => (
+        {!loadingList &&
+          templates.map((t) => (
           <div key={t.slug} className="community-item">
             <div style={{ flex: 1, minWidth: 0 }}>
               <div className="row" style={{ gap: 6 }}>

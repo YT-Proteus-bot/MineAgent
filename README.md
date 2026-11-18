@@ -69,8 +69,7 @@
 | 顶部「↶ / ↷」 | 撤销 / 重做画布改动（`Ctrl+Z` / `Ctrl+Shift+Z` 或 `Ctrl+Y`），连续拖动合并成一步 |
 | 顶部「⚠ 约束」 | 编排约束面板：内置规则 + 自定义规则，违规节点在画布上标红 |
 | 顶部「⚙ 服务」 | 画布级服务设置：入口 / 会话并发 / 可观测 / 安全；保存后编译进生成项目的服务文件 |
-| 顶部「运行」 | 编译并真实执行当前画布，执行过程流式回显到节点和运行面板 |
-| 右上角「选择模式」 | 框架**左边**的下拉，列出该框架支持的推理模式（ReAct / CoT / Plan-and-Execute / 群聊…），选中后作为画布默认，新建 agent 节点会用它 |
+| 顶部「运行」 | 编译并真实执行当前画布，执行过程流式回显到节点和运行面板 || 右上角「选择模式」 | 框架**左边**的下拉，列出该框架支持的推理模式（ReAct / CoT / Plan-and-Execute / 群聊…），选中后作为画布默认，新建 agent 节点会用它 |
 | 右上角下拉 | 选择 Agent 框架（LangChain/LangGraph、AutoGen、CrewAI…），切换后重建架构图 |
 | 右上角「画布配置」 | 这张画布自己的对话模型、向量模型、向量库与数据源 |
 | 右上角「用户中心」 | 账户与配置下拉：GitHub 账户 / 模型配置 / 公共模板 |
@@ -238,19 +237,33 @@ Client ID / Secret，点「连接 GitHub」跳转网页授权（`public_repo` + 
 | 读工具（自动执行） | 作用 |
 |---|---|
 | `get_canvas` | 读当前画布的真实节点 id、类型、参数、连线 |
+| `get_config` | 读框架 / 推理模式 / 对话模型 / 服务设置 / 已配的向量与数据源（**不含密钥**） |
 | `get_node_doc` | 查某类节点的用途、参数、默认代码 |
 | `list_node_types` | 列出可用节点类型（可按关键词过滤） |
 | `get_run_log` | 读最近一次运行的执行过程（每个节点的开始/结束/耗时/输出/报错） |
 | `get_constraints` | 读编排约束检查结果 |
 | `recall` | 按关键词查这张画布的长期记忆 |
+| `list_architectures` | 列出已收录的开源智能体架构指纹 |
+| `get_architecture` | 读某个智能体的行为特征、节点拓扑与推荐框架/模式 |
+| `scan_source` | 扫描源码库（GitHub / 本地目录 / 上传的压缩包）拿架构线索 |
 
 | 写工具（**要你确认**） | 作用 |
 |---|---|
 | `apply_ops` | 增量改画布：增删节点、改参数/代码、连线、挪位置 |
 | `apply_canvas` | 整张替换成新画布 |
+| `update_service` | 改服务设置（入口 / 会话 / 并发 / 可观测 / 安全），按字段深合并 |
+| `update_model` | 改对话模型（provider / base_url / model / 参数），**不动 Key** |
+| `set_mode` | 切默认推理模式 |
+| `switch_framework` | 切 Agent 框架（**会重建架构图**，二次确认） |
+| `upsert_provider` | 新建向量模型 / 向量库 / 数据源（只写非密钥字段） |
+| `apply_architecture` | 按架构指纹整张生成画布（同时把框架与推理模式切过去） |
 | `run_canvas` | 运行画布（会消耗模型额度） |
 
 写工具**不会直接执行**，只在对话里生成一张待确认卡片，你点「应用」才落地。
+`switch_framework` 这种破坏性操作会在卡片和二次确认里都标明「会重建架构图」。
+
+**密钥边界**：AI 读不到也写不了 API Key。`get_config` 只返回 `has_key: true/false`；
+新建向量库/数据源后，它会提醒你去「画布配置」里补 Key。
 
 **记忆与压缩**
 
@@ -268,6 +281,58 @@ Client ID / Secret，点「连接 GitHub」跳转网页授权（`public_repo` + 
 | 「加一个检索节点」「把那个工具接到助理下面」「改一下这个节点的代码」「把节点往右挪」 | 一组增量操作 | **应用这些修改**（只改动的部分） |
 
 没配 key 时面板会提示去「用户中心 → 模型配置」，不会静默失败。
+
+### 还原开源智能体的架构
+
+内置一份**架构指纹库**，收录了 16 个主流智能体。每个指纹包含三样东西：
+
+- `behaviors`：这个项目区别于别家的关键行为（可验证，不是形容词）
+- `nodes` / `edges`：等价的画布拓扑
+- `codes`：让行为真的对上的节点代码（比如 AutoGPT 的任务队列出队）
+
+| 项目 | 框架 | 模式 | 核心范式 |
+| --- | --- | --- | --- |
+| AutoGPT | langchain | goal | 目标拆任务队列，逐任务执行并反思 |
+| BabyAGI | langchain | goal | 任务队列 + **每轮重排序** |
+| MetaGPT | metagpt | sop | SOP 流水线，产物驱动 |
+| CrewAI | crewai | sequential | 角色协作，各角色独立上下文 |
+| CAMEL | langchain | two_agent | 双向角色扮演，自判终止 |
+| Voyager | langchain | code_agent | 技能库累积 + 自动课程 |
+| OpenHands | langchain | code_agent | 沙箱内 act-observe 循环 |
+| AutoGen | autogen | group_chat | 共享历史 + 动态选人发言 |
+| ChatDev | crewai | sequential | 软件公司四阶段流水线 |
+| LangGraph | langchain | react | 显式状态图 + 条件边 + checkpoint |
+| DeepSeek Harness | harness | react | 插件化 runtime，闸门 + 分层压缩 + 持久化 |
+| Dify / n8n | dify / langchain | workflow | 变量驱动的节点工作流 |
+| Coze | langchain | chatflow | Bot = 人设 + 插件 + 知识库 |
+| Flowise / Langflow | langchain | rag | 可视化 RAG / 组件链 |
+
+说「还原 AutoGPT」时，助手会 `get_architecture` 拿指纹、再 `apply_architecture` 生成画布，
+**同时把顶部「框架」和「模式」两个下拉框切到对应值**。
+
+**没收录的项目它会直说「还没收录」，不会假装还原。**
+
+### 从源码画出架构
+
+三种输入都能进：
+
+| 方式 | 怎么用 |
+| --- | --- |
+| GitHub 地址 | 直接说仓库链接；私有仓库需要在「用户中心 → 社区模板」连过 GitHub 且授权了 `repo` |
+| 上传源码包 | 助手面板点「📦 源码」，选 `.zip` / `.tar.gz` / `.tgz` / `.tar` |
+| 本地目录 | 直接给路径（会拒绝系统目录） |
+
+源码进来后先做**静态扫描**（`backend/app/source_scan.py`），不做执行：
+
+- 目录结构、语言分布、入口文件
+- 依赖声明：`requirements.txt` / `pyproject.toml` / `package.json` / `go.mod`
+- 每个模块的 import 关系、类（含体量）、函数名——Python 走 `ast`，JS/TS 走正则
+- prompt 片段、工具定义线索（`@tool` / `StructuredTool` / `"type": "function"`）
+
+扫描结果交给模型归纳成节点图。**核心目录优先**（`src`/`apps`/`packages`/`core`…），
+`scripts`/`build`/`docs` 靠后，避免工具脚本把扫描名额占满。
+
+限制：单文件 ≤ 200KB，最多扫 1500 个文件；JS/TS 的函数内容看不到，只有 import 和类名。
 
 ### 编排约束
 
@@ -506,6 +571,29 @@ python agent.py --input "..."
 实测：把整个目录拷到别的路径、用系统 Python（不带本项目的 .venv）执行
 `run.ps1`，可以直接跑通。
 
+### 运行附件（文件 / 图片）
+
+运行面板的任务输入支持三种方式带上附件：
+
+- **选文件**：点「📎 添加文件」
+- **拖入**：把文件直接拖到输入框区域
+- **粘贴**：在输入框里 Ctrl+V 粘贴剪贴板中的图片
+
+文件存到项目目录的 `inputs/` 下（单个 ≤ 20MB），运行时路径清单会拼进 input：
+
+```
+你的任务描述
+
+[附件]
+- inputs/report.pdf
+- inputs/chart.png
+```
+
+同时通过环境变量 `MINEAGENT_INPUT_FILES` 传给子进程，节点里可以用 `ctx.files` 拿到相对路径列表，
+再配合 `ctx.read_file(path)` 读取；`doc_loader` / `pdf_parser` / `ocr_extract` 这些节点直接填路径即可。
+
+附件是画布级的，切走再回来还在；画布删除时跟着项目目录一起清理。
+
 ---
 
 ## 运行原理
@@ -708,6 +796,7 @@ Langflow 线性链、SmolAgents 代码行动
 | AutoGen | ✅ 可运行 | 节点映射为 `AssistantAgent` + `RoundRobinGroupChat` |
 | CrewAI | ✅ 可运行 | 节点映射为 `Agent` / `Task` / `Crew` |
 | MetaGPT、Agno、SmolAgents、Semantic Kernel、OpenAI Agents SDK、Dify Workflow | 🎨 架构图 | 选中后生成对应风格的架构图与代码骨架，暂不接原生执行 |
+| Harness（零依赖） | ✅ 可运行 | 不套任何框架：`agent.py` 就是项目自带的图执行器，直接读 `agent.json` 跑节点，工具/压缩/持久化由 `runtime_sdk` 提供。适合表达自研 runtime |
 
 ### 各框架支持的推理 / 协作模式
 

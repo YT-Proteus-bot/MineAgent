@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { api } from '../api'
 import { useStore } from '../store'
 import type { RunEvent } from '../types'
 
@@ -36,11 +37,59 @@ export default function RunPanel() {
   const run = useStore((s) => s.run)
   const stopRun = useStore((s) => s.stopRun)
   const canvas = useStore((s) => s.canvas)
+  const runFiles = useStore((s) => s.runFiles)
+  const setRunFiles = useStore((s) => s.setRunFiles)
+  const toast = useStore((s) => s.toast)
 
   const [tab, setTab] = useState<'events' | 'output'>('events')
   const [elapsed, setElapsed] = useState(0)
+  const [dragging, setDragging] = useState(false)
+  const fileRef = useRef<HTMLInputElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const startedRef = useRef(0)
+
+  const formatSize = (n: number) => {
+    if (!n) return '0KB'
+    if (n > 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)}MB`
+    return `${Math.max(1, Math.round(n / 1024))}KB`
+  }
+
+  /** 上传附件：选择、拖入、粘贴图片都走这里 */
+  const handleFiles = async (list: FileList | File[] | null | undefined) => {
+    if (!list || !canvas) return
+    const items = Array.from(list)
+    for (const file of items) {
+      try {
+        const res = await api.uploadInput(canvas.id, file)
+        const current = useStore.getState().runFiles || []
+        setRunFiles([...current, res.file])
+      } catch (e: any) {
+        toast(`上传失败：${e.message || e}`, 'err')
+      }
+    }
+  }
+
+  const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = Array.from(e.clipboardData?.items || [])
+    const files = items
+      .filter((it) => it.kind === 'file' && it.type.startsWith('image/'))
+      .map((it) => it.getAsFile())
+      .filter((f): f is File => !!f)
+    if (!files.length) return
+    e.preventDefault()
+    handleFiles(files)
+  }
+
+  const removeFile = async (file: { path: string }) => {
+    if (!canvas) return
+    try {
+      await api.deleteInput(canvas.id, file.path)
+      const current = useStore.getState().runFiles || []
+      setRunFiles(current.filter((f) => f.path !== file.path))
+    } catch (e: any) {
+      toast(`删除失败：${e.message || e}`, 'err')
+    }
+  }
 
   useEffect(() => {
     if (!running) {
@@ -200,16 +249,67 @@ export default function RunPanel() {
 
       {open && (
         <div className="run-body">
-          <div className="run-left">
+          <div
+            className={`run-left${dragging ? ' dragging' : ''}`}
+            onDragOver={(e) => {
+              e.preventDefault()
+              setDragging(true)
+            }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={(e) => {
+              e.preventDefault()
+              setDragging(false)
+              handleFiles(e.dataTransfer?.files)
+            }}
+          >
             <div className="dim small">任务输入（会传给 input 节点）</div>
             <textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="例如：调研 2025 年国产 Agent 编排平台的差异，输出一份对比报告…"
+              placeholder="例如：调研 2025 年国产 Agent 编排平台的差异，输出一份对比报告…（可拖入文件或粘贴图片）"
+              onPaste={handlePaste}
               onKeyDown={(e) => {
                 if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') run(input)
               }}
             />
+
+            <div className="run-attach">
+              <button
+                className="sm"
+                onClick={() => fileRef.current?.click()}
+                disabled={running || !canvas}
+              >
+                📎 添加文件
+              </button>
+              <span className="dim small">也可以拖进来，或直接粘贴图片</span>
+              <input
+                ref={fileRef}
+                type="file"
+                multiple
+                style={{ display: 'none' }}
+                onChange={(e) => {
+                  handleFiles(e.target.files)
+                  e.currentTarget.value = ''
+                }}
+              />
+            </div>
+
+            {runFiles.length > 0 && (
+              <div className="run-file-list">
+                {runFiles.map((f) => (
+                  <div key={f.path} className="run-file-item">
+                    <span className="run-file-name" title={f.path}>
+                      {f.name}
+                    </span>
+                    <span className="dim small">{formatSize(f.size)}</span>
+                    <button className="sm" onClick={() => removeFile(f)}>
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
             <div className="row">
               <button className="primary sm" onClick={() => run(input)} disabled={running}>
                 {running ? '运行中…' : '▶ 开始运行'}

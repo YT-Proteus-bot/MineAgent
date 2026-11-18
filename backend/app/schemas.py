@@ -176,6 +176,8 @@ class SaveResult(BaseModel):
 
 class RunRequest(BaseModel):
     input: str = ""
+    # 运行前上传的附件（相对项目目录的路径，如 inputs/report.pdf）
+    files: List[str] = Field(default_factory=list)
     stream: bool = True
     force: bool = False
 
@@ -294,6 +296,10 @@ class ApplyDraftRequest(BaseModel):
     draft: CanvasDraft
     # 是否把助手写的节点代码当作「手改」保留（默认保留）
     keep_code: bool = True
+    # 顺带把画布框架切过去（还原某个架构时用），空字符串表示不改
+    framework: str = ""
+    # 顺带切默认推理模式（顶部「模式」下拉框），空字符串表示不改
+    mode: str = ""
 
 
 class CanvasOp(BaseModel):

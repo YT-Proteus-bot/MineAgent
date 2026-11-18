@@ -11,12 +11,23 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional
 
+from . import architectures
 from . import assistant_memory as memory
 from .db import get_conn
 from .node_registry import NODE_INDEX, NODE_TYPES
 
 # 会改画布 / 产生副作用的工具：只生成待确认动作，不直接执行
-WRITE_TOOLS = {"apply_ops", "apply_canvas", "run_canvas"}
+WRITE_TOOLS = {
+    "apply_ops", "apply_canvas", "run_canvas",
+    # 项目配置类（都不碰密钥，密钥只能用户自己填）
+    "update_service", "update_model", "set_mode", "switch_framework",
+    "upsert_provider",
+    # 按架构指纹整张生成画布
+    "apply_architecture",
+}
+
+# 允许 AI 改的对话模型字段（api_key 不在其中，永远由用户填）
+MODEL_FIELDS = ("provider", "base_url", "model", "temperature", "max_tokens")
 
 
 def _brief_node(node: Dict[str, Any]) -> Dict[str, Any]:
@@ -213,6 +224,168 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_config",
+            "description": "读取当前画布的配置：框架、推理模式、对话模型（不含密钥）、"
+                           "服务设置、以及已配的向量模型/向量库/数据源。改配置前先调它。",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_service",
+            "description": "修改画布的「服务设置」：入口/会话/并发/可观测/安全。"
+                           "按字段深合并，只传要改的部分。生成待用户确认的卡片。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "patch": {
+                        "type": "object",
+                        "description": "要合并进去的服务设置，例如 "
+                                       '{"runtime": {"max_concurrency": 8}, '
+                                       '"security": {"guardrail": "strict"}}',
+                    },
+                },
+                "required": ["patch"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_model",
+            "description": "修改画布的对话模型（provider / base_url / model / temperature / "
+                           "max_tokens）。**不能改 API Key**，Key 由用户自己填。"
+                           "生成待用户确认的卡片。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "provider": {"type": "string"},
+                    "base_url": {"type": "string"},
+                    "model": {"type": "string"},
+                    "temperature": {"type": "number"},
+                    "max_tokens": {"type": "integer"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_mode",
+            "description": "设置画布的默认推理模式（react / plan_execute / cot / reflexion 等），"
+                           "影响新建 agent 节点的默认行为。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mode": {"type": "string", "description": "模式 id，如 react"},
+                },
+                "required": ["mode"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "switch_framework",
+            "description": "切换画布的 Agent 框架（langchain / autogen / crewai / agno / "
+                           "smolagents / semantic_kernel / openai_agents / dify）。"
+                           "**注意：切换会按新框架重建整张架构图，现有节点和连线会被替换。**"
+                           "只在用户明确要求换框架时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "framework": {"type": "string"},
+                },
+                "required": ["framework"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "upsert_provider",
+            "description": "新建或修改一张画布的向量模型 / 向量库 / 数据源配置（非密钥字段）。"
+                           "新建时不传 API Key，用户需要自己在画布配置里补 Key。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "enum": ["embedding", "vector", "data"]},
+                    "provider": {"type": "string",
+                                 "description": "厂商 id，如 openai / qdrant / postgres"},
+                    "name": {"type": "string", "description": "实例名，用于节点里引用"},
+                    "config": {"type": "object",
+                               "description": "非密钥字段，如 base_url / model / collection"},
+                    "is_default": {"type": "boolean"},
+                },
+                "required": ["kind", "provider"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_architectures",
+            "description": "列出已收录的开源智能体架构指纹（AutoGPT / MetaGPT / CrewAI 等）。"
+                           "用户说「还原 / 复刻 / 按 XX 的架构做」时先查这个，别凭印象画。",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_architecture",
+            "description": "读某个智能体的架构指纹：核心行为特征、节点拓扑、关键节点代码、"
+                           "推荐框架。拿到 behavior 清单才能判断还原是否到位。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "指纹 id，如 autogpt / metagpt / crewai"},
+                },
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "apply_architecture",
+            "description": "按架构指纹生成一张画布（整张替换当前画布，含关键节点代码）。"
+                           "生成待用户确认的卡片。用户要求「还原 XX」且已确认要生成时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "指纹 id"},
+                },
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "scan_source",
+            "description": "扫描一个源码库并返回架构线索：目录结构、依赖声明、模块间 import、"
+                           "类与函数、prompt 片段、工具定义。"
+                           "三个入口任选其一：github_url（公开仓库地址）、"
+                           "local_path（本机目录）、source_id（用户已上传的源码包）。"
+                           "拿到线索后用 apply_canvas 画出节点图。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "github_url": {"type": "string",
+                                   "description": "如 https://github.com/owner/repo"},
+                    "local_path": {"type": "string", "description": "本机绝对路径"},
+                    "source_id": {"type": "string", "description": "上传后拿到的 id"},
+                },
+                "required": [],
+            },
+        },
+    },
 ]
 
 
@@ -281,6 +454,104 @@ def _constraints(context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return {"violations": (context or {}).get("violations") or []}
 
 
+def _config(canvas_id: str) -> Dict[str, Any]:
+    """当前画布的配置快照（密钥只报有没有，不报值）。"""
+    if not canvas_id:
+        return {"error": "没有打开画布"}
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT framework, mode, model_config, graph FROM canvases WHERE id = ?",
+            (canvas_id,)).fetchone()
+        if row is None:
+            return {"error": "画布不存在"}
+        providers = conn.execute(
+            "SELECT kind, provider, name, config, is_default FROM providers "
+            "WHERE canvas_id = ? ORDER BY kind, created_at", (canvas_id,)).fetchall()
+
+    try:
+        model_cfg = json.loads(row["model_config"] or "{}")
+    except json.JSONDecodeError:
+        model_cfg = {}
+    try:
+        graph = json.loads(row["graph"] or "{}")
+    except json.JSONDecodeError:
+        graph = {}
+
+    model = {k: model_cfg.get(k) for k in MODEL_FIELDS if model_cfg.get(k) not in (None, "")}
+    model["has_key"] = bool(model_cfg.get("api_key_cipher"))
+
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for item in providers:
+        try:
+            cfg = json.loads(item["config"] or "{}")
+        except json.JSONDecodeError:
+            cfg = {}
+        grouped.setdefault(item["kind"], []).append({
+            "name": item["name"],
+            "provider": item["provider"],
+            "is_default": bool(item["is_default"]),
+            "config": cfg,
+        })
+
+    return {
+        "framework": row["framework"],
+        "mode": row["mode"] or "",
+        "model": model,
+        "service": graph.get("service") or {},
+        "providers": grouped,
+        "note": "密钥不在返回值里；新建配置后需要用户自己在「画布配置」里补 Key。",
+    }
+
+
+def _scan_source(args: Dict[str, Any]) -> Dict[str, Any]:
+    """扫描源码库（GitHub / 本地 / 已上传），返回压缩后的架构线索。"""
+    from . import source_fetch, source_scan
+
+    github_url = str(args.get("github_url") or "").strip()
+    local_path = str(args.get("local_path") or "").strip()
+    source_id = str(args.get("source_id") or "").strip()
+
+    try:
+        if github_url:
+            source_id = source_fetch.from_github(github_url)
+        elif local_path:
+            source_id = source_fetch.from_local(local_path)
+        elif not source_id:
+            return {"error": "需要 github_url / local_path / source_id 三者之一"}
+        root = source_fetch.resolve_dir(source_id)
+        if not root.is_dir():
+            return {"error": f"源码目录不存在：{root}"}
+        raw = source_scan.scan(root)
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+    modules = []
+    for mod in (raw.get("modules") or [])[:40]:
+        item: Dict[str, Any] = {"path": mod.get("path")}
+        if mod.get("imports"):
+            item["imports"] = mod["imports"][:12]
+        if mod.get("classes"):
+            item["classes"] = [c[0] if isinstance(c, list) else str(c)
+                               for c in mod["classes"][:10]]
+        if mod.get("functions"):
+            item["functions"] = mod["functions"][:12]
+        modules.append(item)
+
+    return {
+        "source_id": source_id,
+        "file_count": raw.get("file_count"),
+        "code_file_count": raw.get("code_file_count"),
+        "languages": raw.get("languages"),
+        "entrypoints": raw.get("entrypoints"),
+        "dependencies": raw.get("dependencies"),
+        "tree": "\n".join((raw.get("tree") or "").splitlines()[:60]),
+        "modules": modules,
+        "prompts": raw.get("prompts"),
+        "tool_hints": raw.get("tool_hints"),
+        "note": "以上是静态扫描结果。据此推断架构并画节点；不要臆造扫描里没有的模块。",
+    }
+
+
 # --------------------------------------------------------------------------- #
 # 统一入口
 # --------------------------------------------------------------------------- #
@@ -291,6 +562,21 @@ def execute(name: str, args: Dict[str, Any], *, canvas_id: str,
     写工具不会真的执行，返回 pending 标记，由调用方转成前端的待确认卡片。
     """
     args = args or {}
+    # 按架构指纹生成画布：payload 要带上转好的草稿，不能只回传参数
+    if name == "apply_architecture":
+        if not canvas_id:
+            return {"error": "没有打开画布，无法生成"}
+        arch = architectures.get(str(args.get("id") or ""))
+        if not arch:
+            return {"error": f"没有收录这个架构：{args.get('id')}",
+                    "hint": "先调 list_architectures 看有哪些"}
+        return {"__pending__": True, "tool": name,
+                "payload": {"arch_id": arch["id"], "name": arch["name"],
+                            "framework": arch["framework"],
+                            "mode": architectures.mode_of(arch),
+                            "behavior_count": len(arch["behaviors"]),
+                            "draft": architectures.to_draft(arch)}}
+
     if name in WRITE_TOOLS:
         if not canvas_id:
             return {"error": "没有打开画布，无法执行修改"}
@@ -307,6 +593,31 @@ def execute(name: str, args: Dict[str, Any], *, canvas_id: str,
             return _run_log(context)
         if name == "get_constraints":
             return _constraints(context)
+        if name == "get_config":
+            return _config(canvas_id)
+        if name == "list_architectures":
+            return {"architectures": architectures.list_all(),
+                    "note": "没有收录的项目，用 get_node_doc / get_canvas 现场设计，不要编造指纹"}
+        if name == "get_architecture":
+            arch = architectures.get(str(args.get("id") or ""))
+            if not arch:
+                return {"error": f"没有收录这个架构：{args.get('id')}",
+                        "hint": "先调 list_architectures"}
+            return {
+                "id": arch["id"],
+                "name": arch["name"],
+                "framework": arch["framework"],
+                "mode": architectures.mode_of(arch),
+                "paradigm": arch["paradigm"],
+                "summary": arch["summary"],
+                "behaviors": arch["behaviors"],
+                "nodes": [{k: n.get(k) for k in ("key", "kind", "label")}
+                          for n in arch["nodes"]],
+                "edges": arch["edges"],
+                "notes": arch.get("notes", ""),
+            }
+        if name == "scan_source":
+            return _scan_source(args)
         if name == "remember":
             if not canvas_id:
                 return {"error": "没有打开画布，无法写记忆"}

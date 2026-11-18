@@ -26,8 +26,10 @@ BRANCH_KINDS = {"router", "condition", "loop"}
 # 检索类节点是流程里的正常一步，不需要挂到 agent 下游
 RETRIEVAL_KINDS = {"rag_retriever", "embedding", "vector_store"}
 # 这些节点天然能处理多条入边（汇总/评审类），不算"无法合并"
-MULTI_INPUT_OK = {"merge", "critic", "reflector", "evaluator", "self_check",
-                  "formatter", "format_observations", "summarize", "output", "blackboard"}
+# 注意 merge / merger / join 都要在这里：节点真实 kind 是 merger，之前的 merge 是无效名
+MULTI_INPUT_OK = {"merge", "merger", "join", "critic", "reflector", "evaluator",
+                  "self_check", "formatter", "format_observations", "summarize",
+                  "summarizer", "output", "blackboard"}
 TOOL_KINDS = {
     "tool", "function", "mcp_tool", "crewai_tool", "http_request", "web_search",
     "code_interpreter", "sql_query", "rag_retriever", "file_io", "browser", "shell",

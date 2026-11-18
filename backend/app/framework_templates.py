@@ -90,6 +90,17 @@ FRAMEWORKS: List[Dict[str, Any]] = [
         "requires": "dify",
     },
     {
+        "id": "harness",
+        "label": "Harness（零依赖自实现）",
+        "runnable": True,
+        "badge": "可运行",
+        "color": "#4f46e5",
+        "description": "不依赖任何第三方框架：项目自带的执行器直接读 agent.json 跑图，"
+                       "工具/压缩/持久化都由 runtime_sdk 提供。适合表达自研 runtime"
+                       "（如 DeepSeek Harness 这类插件化 agent 容器）的运行时结构。",
+        "requires": "",
+    },
+    {
         "id": "custom",
         "label": "空白画布",
         "runnable": False,
@@ -102,7 +113,7 @@ FRAMEWORKS: List[Dict[str, Any]] = [
 
 FRAMEWORK_INDEX = {f["id"]: f for f in FRAMEWORKS}
 RUNNABLE = {"langchain", "autogen", "crewai", "smolagents", "agno",
-            "openai_agents", "semantic_kernel", "dify"}
+            "openai_agents", "semantic_kernel", "dify", "harness"}
 
 
 def _mk(kind: str, idx: int, label: str | None = None, params: Dict[str, Any] | None = None,

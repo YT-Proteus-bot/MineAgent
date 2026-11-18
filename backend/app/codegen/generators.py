@@ -41,6 +41,8 @@ REQUIREMENTS = {
     "semantic_kernel": ("semantic-kernel\nopenai\nlangchain>=1.0\n"
                         "langchain-openai>=1.0\nlangchain-core>=1.0\n"
                         "langgraph>=1.0\n"),
+    # harness：不依赖任何框架，只用标准库 + 项目自带的 runtime_sdk
+    "harness": "# 无需第三方框架依赖（自带执行器 + runtime_sdk）\n",
 }
 
 
@@ -457,7 +459,13 @@ def generate_project(name: str, slug: str, framework: str, graph: Dict[str, Any]
     written.append("providers/")
 
     # 框架入口：一整个 agent.py，就是这份画布的框架原生代码
-    agent_code, node_blocks = render_agent_full(spec, framework)
+    if framework == "harness":
+        # Harness 不套任何框架：agent.py 就是项目自带的零依赖执行器，
+        # 直接读 agent.json + runtime_sdk 跑图，行为和这类自研 runtime 对得上。
+        agent_code = (RUNTIME_DIR / "runner.py").read_text(encoding="utf-8")
+        node_blocks = {}
+    else:
+        agent_code, node_blocks = render_agent_full(spec, framework)
     # 先按内容算版本：hash 变了才 bump，并把上一版存进 .history/ 供回滚
     version_info = _bump_version(project_dir, spec, agent_code)
     write("agent.py", agent_code)
@@ -523,7 +531,8 @@ def generate_project(name: str, slug: str, framework: str, graph: Dict[str, Any]
     session_store = merge_service(graph.get("service"))["session"]["store"]
     requirements_text = (
         REQUIREMENTS.get(framework, "# 无额外依赖（使用内置 runner）\n").rstrip()
-        + "\n\n# 服务化依赖（server.py）\n" + render_requirements_extra(session_store)
+        + "\n\n# 服务化依赖（server.py）\n"
+        + render_requirements_extra(session_store, framework)
     )
     # 画布里用了联网搜索才需要 ddgs；不用就不加，避免无谓依赖
     if any(n.get("kind") == "web_search" for n in spec["nodes"]):

@@ -397,12 +397,21 @@ def write_canvas_lib(payload: Dict[str, Any]):
     return {"ok": True, "lib_id": community.save_canvas_lib(canvas_id, lib_id)}
 
 
-@router.get("/lib-templates")
-def lib_templates(lib_id: str):
+@router.get("/lib-count")
+def lib_count(lib_id: str):
+    """模板数量：只列目录，一次请求，不读 meta。"""
     lib = community.lib_by_id(lib_id)
     if not lib:
         raise HTTPException(404, "模板库不存在")
-    return {"ok": True, "lib": lib, "templates": community.list_templates(lib)}
+    return {"ok": True, "count": community.template_count(lib)}
+
+
+@router.get("/lib-templates")
+def lib_templates(lib_id: str, refresh: bool = False):
+    lib = community.lib_by_id(lib_id)
+    if not lib:
+        raise HTTPException(404, "模板库不存在")
+    return {"ok": True, "lib": lib, "templates": community.list_templates(lib, force=refresh)}
 
 
 @router.post("/lib-load")

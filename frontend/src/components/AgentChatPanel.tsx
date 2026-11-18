@@ -101,6 +101,9 @@ export default function AgentChatPanel() {
   const [chats, setChats] = useState<ChatBrief[]>([])
   const [historyOpen, setHistoryOpen] = useState(false)
   const [applying, setApplying] = useState(false)
+  // 上传源码包（从源码画图）
+  const [uploading, setUploading] = useState(false)
+  const srcRef = useRef<HTMLInputElement>(null)
   // Agent 状态：正在跑的工具、待用户确认的动作、早前对话的摘要
   const [toolRunning, setToolRunning] = useState('')
   const [pending, setPending] = useState<{ tool: string; payload: any } | null>(null)
@@ -353,9 +356,31 @@ export default function AgentChatPanel() {
     }
   }
 
+  /** 上传源码包后直接开一轮「按源码画图」的对话 */
+  const handleSourceUpload = async (file: File) => {
+    if (!canvas) {
+      toast('先打开一张画布再上传源码包', 'err')
+      return
+    }
+    setUploading(true)
+    try {
+      const res = await api.uploadSource(file)
+      await send(
+        `我刚上传了源码包（source_id=${res.source_id}）。` +
+          '请先 scan_source 扫描它，再按它的真实结构在画布上画出架构；' +
+          '扫描没覆盖到的部分要说明，不要臆造。',
+      )
+    } catch (e: any) {
+      toast(`上传失败：${e.message || e}`, 'err')
+    } finally {
+      setUploading(false)
+    }
+  }
+
   /** 应用 Agent 提出的待确认动作 */
   const applyPending = async (p: { tool: string; payload: any }) => {
     if (!canvas) return
+    const id = canvas.id
     if (p.tool === 'apply_ops') {
       await applyOps(p.payload.operations || [])
       setPending(null)
@@ -369,9 +394,78 @@ export default function AgentChatPanel() {
       setPending(null)
       return
     }
-    if (p.tool === 'run_canvas') {
-      toast(`运行输入：${String(p.payload.input || '').slice(0, 60)}。点顶部「▶ 运行」即可`, 'info')
+    if (p.tool === 'apply_architecture') {
+      await applyDraft(
+        p.payload.draft || { nodes: [], edges: [] },
+        p.payload.framework || undefined,
+        p.payload.mode || undefined,
+      )
       setPending(null)
+      return
+    }
+    setApplying(true)
+    try {
+      if (p.tool === 'update_service') {
+        await api.updateService(id, p.payload.patch || {})
+        toast('服务设置已更新', 'ok')
+      } else if (p.tool === 'update_model') {
+        const current = (canvas as any).llm_config || {}
+        await api.setCanvasModel(id, {
+          ...current,
+          provider: p.payload.provider ?? current.provider,
+          base_url: p.payload.base_url ?? current.base_url,
+          model: p.payload.model ?? current.model,
+          temperature: p.payload.temperature ?? current.temperature,
+          max_tokens: p.payload.max_tokens ?? current.max_tokens,
+        })
+        toast('对话模型已更新（API Key 未改动）', 'ok')
+      } else if (p.tool === 'set_mode') {
+        await api.updateCanvas(id, { mode: String(p.payload.mode || '') })
+        toast(`推理模式已切换为 ${p.payload.mode}`, 'ok')
+      } else if (p.tool === 'switch_framework') {
+        const fw = String(p.payload.framework || '')
+        const ok = window.confirm(
+          `切换到「${fw}」会按新框架重建整张架构图，\n当前画布上的节点和连线会被替换。确定吗？`,
+        )
+        if (!ok) return
+        await api.updateCanvas(id, { framework: fw })
+        toast(`已切换到 ${fw}`, 'ok')
+      } else if (p.tool === 'upsert_provider') {
+        const kind = String(p.payload.kind || '') as any
+        const name = String(p.payload.name || '')
+        // 同名实例已存在就更新，否则新建（密钥都不动）
+        const existing = (await api.listProviders({ kind, canvas_id: id })).find(
+          (item) => name && item.name === name,
+        )
+        if (existing) {
+          await api.updateProvider(existing.id, {
+            kind,
+            provider: p.payload.provider || existing.provider,
+            name: existing.name,
+            config: { ...existing.config, ...(p.payload.config || {}) },
+            is_default: p.payload.is_default ?? existing.is_default,
+          })
+          toast('配置已更新（API Key 未改动）', 'ok')
+        } else {
+          await api.createProvider({
+            kind,
+            provider: p.payload.provider,
+            name,
+            config: p.payload.config || {},
+            is_default: !!p.payload.is_default,
+            canvas_id: id,
+          })
+          toast('配置已创建。API Key 需要你在「画布配置」里补上', 'info')
+        }
+      } else if (p.tool === 'run_canvas') {
+        toast(`运行输入：${String(p.payload.input || '').slice(0, 60)}。点顶部「▶ 运行」即可`, 'info')
+      }
+      await loadCanvas(id)
+      setPending(null)
+    } catch (e: any) {
+      toast(`应用失败：${e.message || e}`, 'err')
+    } finally {
+      setApplying(false)
     }
   }
 
@@ -388,6 +482,57 @@ export default function AgentChatPanel() {
         label: '应用到当前画布',
       }
     }
+    if (p.tool === 'apply_architecture') {
+      const draft = p.payload.draft || {}
+      const bits: string[] = [
+        `${(draft.nodes || []).length} 节点`,
+        `${(draft.edges || []).length} 连线`,
+        `对齐 ${p.payload.behavior_count || 0} 条行为特征`,
+      ]
+      if (p.payload.framework) bits.push(`框架→${p.payload.framework}`)
+      if (p.payload.mode) bits.push(`模式→${p.payload.mode}`)
+      return {
+        title: `按「${p.payload.name || p.payload.arch_id}」架构生成画布`,
+        detail: bits.join(' · '),
+        label: '生成这张画布',
+      }
+    }
+    if (p.tool === 'update_service') {
+      const keys = Object.keys(p.payload.patch || {})
+      return { title: '助手要修改服务设置', detail: `涉及：${keys.join('、') || '—'}`, label: '应用设置' }
+    }
+    if (p.tool === 'update_model') {
+      const parts = ['provider', 'base_url', 'model', 'temperature', 'max_tokens']
+        .filter((k) => p.payload[k] !== undefined)
+        .map((k) => `${k}=${p.payload[k]}`)
+      return {
+        title: '助手要修改对话模型',
+        detail: `${parts.join('，') || '—'}（不会动 API Key）`,
+        label: '应用模型配置',
+      }
+    }
+    if (p.tool === 'set_mode') {
+      return { title: '助手要切换推理模式', detail: String(p.payload.mode || ''), label: '切换模式' }
+    }
+    if (p.tool === 'switch_framework') {
+      return {
+        title: '⚠ 助手要切换框架（会重建架构图）',
+        detail: `新框架：${p.payload.framework || ''}，现有节点和连线会被替换`,
+        label: '切换并重建',
+      }
+    }
+    if (p.tool === 'upsert_provider') {
+      const kindLabel: Record<string, string> = {
+        embedding: '向量模型',
+        vector: '向量库',
+        data: '数据源',
+      }
+      return {
+        title: `助手要新建${kindLabel[p.payload.kind] || '配置'}`,
+        detail: `${p.payload.provider || ''}${p.payload.name ? ` · ${p.payload.name}` : ''}（Key 需你自己补）`,
+        label: '创建配置',
+      }
+    }
     return {
       title: '助手要运行画布',
       detail: String(p.payload.input || ''),
@@ -396,22 +541,31 @@ export default function AgentChatPanel() {
   }
 
   /** 把助手生成的画布替换到当前画布（替换前确认，避免误丢内容） */
-  const applyDraft = async (draft: CanvasDraft) => {
+  const applyDraft = async (draft: CanvasDraft, framework?: string, mode?: string) => {
     if (!canvas) {
       toast('先打开一张画布再应用', 'err')
       return
     }
     const currentCount = nodes.length
+    const changes: string[] = []
+    if (framework && framework !== canvas.framework) {
+      changes.push(`框架从「${canvas.framework}」切成「${framework}」`)
+    }
+    const currentMode = (canvas as any).mode || ''
+    if (mode && mode !== currentMode) {
+      changes.push(`模式从「${currentMode || '默认'}」切成「${mode}」`)
+    }
+    const fwNote = changes.length ? '\n' + changes.join('；') + '。' : ''
     if (currentCount > 0) {
       const ok = window.confirm(
         `这会用助手生成的 ${draft.nodes.length} 个节点替换当前画布的 ${currentCount} 个节点，\n` +
-          '当前画布上的节点、连线和手写代码都会丢失。确定替换吗？',
+          '当前画布上的节点、连线和手写代码都会丢失。' + fwNote + '\n确定替换吗？',
       )
       if (!ok) return
     }
     setApplying(true)
     try {
-      const res = await api.applyDraft(canvas.id, draft)
+      const res = await api.applyDraft(canvas.id, draft, framework, mode)
       await loadCanvas(canvas.id)
       const errs = res.constraints?.errors?.length || 0
       const warns = res.constraints?.warnings?.length || 0
@@ -420,7 +574,7 @@ export default function AgentChatPanel() {
       } else if (warns) {
         toast(`已应用，有 ${warns} 条提醒`, 'info')
       } else {
-        toast('已应用到当前画布', 'ok')
+        toast(changes.length ? `已应用，${changes.join('；')}` : '已应用到当前画布', 'ok')
       }
     } catch (e: any) {
       toast(`应用失败：${e.message || e}`, 'err')
@@ -518,6 +672,25 @@ export default function AgentChatPanel() {
           />
           带上画布上下文
         </label>
+        <button
+          className="ghost sm"
+          onClick={() => srcRef.current?.click()}
+          disabled={busy || uploading || !canvas}
+          title="上传源码包（zip / tar.gz），让助手按源码画架构"
+        >
+          {uploading ? '解析中…' : '📦 源码'}
+        </button>
+        <input
+          ref={srcRef}
+          type="file"
+          accept=".zip,.tar.gz,.tgz,.tar"
+          style={{ display: 'none' }}
+          onChange={(e) => {
+            const file = e.target.files?.[0]
+            if (file) handleSourceUpload(file)
+            e.currentTarget.value = ''
+          }}
+        />
       </div>
 
       <div className="chat-list" ref={listRef}>

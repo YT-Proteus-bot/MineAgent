@@ -137,6 +137,20 @@ def _file_env() -> Dict[str, str]:
     return data
 
 
+def _input_files() -> List[str]:
+    """运行时附件的相对路径清单（由 run.py 通过环境变量传入）。"""
+    raw = os.environ.get("MINEAGENT_INPUT_FILES") or ""
+    if not raw.strip():
+        return []
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(data, list):
+        return []
+    return [str(item) for item in data if str(item).strip()]
+
+
 def load_config() -> Dict[str, Any]:
     cfg: Dict[str, Any] = {
         "provider": "openai",
@@ -367,6 +381,8 @@ class NodeContext:
         self.state = state
         self.run_id = run_id
         self.tools: List[ToolSpec] = []
+        # 运行前上传的附件（相对项目目录），节点可以用 read_file 读
+        self.files: List[str] = _input_files()
         self.config = load_config()
         self.org = org or {}
         self._model_override = model_override or {}

@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from .config import FRONTEND_DIST, HOST, PORT, ensure_dirs
 from .db import init_db
 from .routers import (assistant, backgrounds, canvases, community, frameworks,
-                      meta, projects, providers, run, settings, versions)
+                      meta, projects, providers, run, settings, sources, versions)
 
 
 @asynccontextmanager
@@ -46,6 +46,7 @@ app.include_router(frameworks.router)
 app.include_router(meta.router)
 app.include_router(community.router)
 app.include_router(community.oauth_router)
+app.include_router(sources.router)
 
 
 @app.get("/api/health")

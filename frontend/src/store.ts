@@ -264,6 +264,8 @@ interface AppState {
   runStream: { node: string; name: string; text: string } | null
   runError: string
   runInput: string
+  /** 运行前拖入/粘贴/选择的附件（存到项目 inputs/ 下） */
+  runFiles: { name: string; path: string; size: number }[]
   runPanelOpen: boolean
   toasts: Toast[]
   loading: boolean
@@ -321,6 +323,7 @@ interface AppState {
   run: (input: string) => Promise<void>
   stopRun: () => void
   setRunInput: (v: string) => void
+  setRunFiles: (files: { name: string; path: string; size: number }[]) => void
   setRunPanelOpen: (v: boolean) => void
   setNodeStatus: (id: string, status: NodeStatus) => void
   toast: (text: string, kind?: Toast['kind']) => void
@@ -448,6 +451,7 @@ export const useStore = create<AppState>((set, get) => ({
   runStream: null,
   runError: '',
   runInput: '',
+  runFiles: [],
   runPanelOpen: false,
   toasts: [],
   loading: true,
@@ -495,10 +499,16 @@ export const useStore = create<AppState>((set, get) => ({
         runError: '',
         constraintReport: null,
         violatedNodeIds: [],
+        runFiles: [],
       })
       get().resetHistory()
       get().validateNow()
       rememberCanvas(id)
+      // 附件存在项目目录里，切回来时把已有的读出来
+      api
+        .listInputs(id)
+        .then((res) => set({ runFiles: res.files || [] }))
+        .catch(() => set({ runFiles: [] }))
     } catch (err: any) {
       get().toast(`打开画布失败：${err.message || err}`, 'err')
     }
@@ -1417,6 +1427,7 @@ export const useStore = create<AppState>((set, get) => ({
         set({ violatedNodeIds: get().constraintReport?.node_ids || [] })
         get().toast(detail.message, 'err')
       },
+      get().runFiles.map((f) => f.path),
     )
   },
 
@@ -1427,6 +1438,7 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   setRunInput: (v) => set({ runInput: v }),
+  setRunFiles: (files) => set({ runFiles: files }),
   setRunPanelOpen: (v) => set({ runPanelOpen: v }),
 
   setNodeStatus: (id, status) => {
