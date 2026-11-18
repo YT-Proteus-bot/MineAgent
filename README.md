@@ -11,12 +11,7 @@
 - 存储：SQLite 存画布与配置；`projects/<画布名>/` 存生成出来的 Agent 项目
 - 启动：双击 `start.bat`（或 `.\start.ps1`），一个端口，一个地址
 
-最近新增：
-
-- 🧩 **社区模板**：一键把画布提成 GitHub PR，也能在应用里加载别人分享的模板
-- ⚡ **流式运行**：模型输出逐 token 回显，执行到哪个节点哪个节点高亮，每个节点的输出都留在运行日志里
-- 🎯 **33 个推理模式模板**：选一个模式直接生成对应架构，不用从空白画布搭
-- 🎨 画布默认改成**纸白**底色，长时间看画布不刺眼
+> 想看每个版本改了什么，见 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
 
@@ -63,7 +58,7 @@
 
 ![运行面板](docs/screenshots/05-run.png)
 
-右键空白画布可以搜出 110 种节点，从 `observation` 这类经典循环节点，到意图识别、查询改写、混合检索、重排、上下文拼装，再到 MCP、护栏、人工审批：
+右键空白画布可以搜出 113 种节点，从 `observation` 这类经典循环节点，到意图识别、查询改写、混合检索、重排、上下文拼装，再到 MCP、护栏、人工审批：
 
 ![节点面板](docs/screenshots/04-node-picker.png)
 
@@ -80,7 +75,7 @@
 | 右上角「模型」 | 配置**这个画布**用的大模型与 API Key |
 | 右上角「用户中心」 | 账户与配置下拉：GitHub 账户 / 模型配置 / 公共模板 |
 | 运行按钮右侧「☁ 上传模板」 | 把当前画布和项目文件贡献成社区模板，自动创建 GitHub PR（不含任何密钥） |
-| 右键空白画布 | 弹出节点面板，110 种细粒度节点任选（带搜索）；新增后**按约束自动连线** |
+| 右键空白画布 | 弹出节点面板，113 种细粒度节点任选（带搜索）；新增后**按约束自动连线** |
 | 鼠标划过节点面板条目 | 右侧弹出该节点的「概念 / 解释 / 用途 / 编码建议」 |
 | 右键任意节点 | 编辑代码逻辑 / 编辑属性参数 / 重命名标识 / 复制 / 删除 |
 | 拖动节点右侧圆点 | 连到下个节点，编排顺序与循环（靠近目标节点会自动吸附，不用精确对准小圆点） |
@@ -88,7 +83,7 @@
 | 拖动节点本身 | 调整位置（吸附 16px 网格） |
 | 选中后按 Delete | 删除节点或连线 |
 | 悬停节点 | 浮层显示「概念 / 解释 / 用途 / 编码建议」四段说明，而不是干巴巴的字段 |
-| 右键空白画布 | 弹出节点面板，110 种细粒度节点任选（带搜索）；**鼠标划过条目也会显示同一份说明** |
+| 右键空白画布 | 弹出节点面板，113 种细粒度节点任选（带搜索）；**鼠标划过条目也会显示同一份说明** |
 | 单击节点 | 只选中（用于连线和缩放），**不会**切换右侧面板 |
 | 右键任意节点 | 打开右侧「节点详情」并弹出操作菜单 |
 | 双击节点 | 直接打开代码编辑器 |
@@ -312,11 +307,20 @@ MineAgent/
 │  │  ├─ config.py              # 路径与端口
 │  │  ├─ db.py                  # SQLite（canvases / app_settings / runs）
 │  │  ├─ security.py            # key 加密（HMAC 密钥流 + 校验标签）
-│  │  ├─ node_registry.py       # 110 种节点类型注册表
-│  │  ├─ node_templates.py      # 每种节点的默认代码模板
+│  │  ├─ node_registry.py       # 113 种节点类型注册表
+│  │  ├─ node_templates.py      # 每种节点的默认代码模板（预览用 run(ctx)）
+│  │  ├─ node_templates_ext.py  # 扩展节点模板（意图识别 / 意图路由 / Wiki 等）
+│  │  ├─ node_docs.py           # 节点悬停说明（概念 / 解释 / 用途 / 编码建议）
+│  │  ├─ tool_presets.py        # 工具节点的预设实现
 │  │  ├─ framework_templates.py # 10 个框架 + 各自的架构图模板 + 自动布局
-│  │  ├─ codegen/generators.py  # 画布 → 独立 Agent 项目的代码生成
-│  │  ├─ codegen/production.py  # 服务设置 → server.py / Dockerfile / CI 等生产化文件
+│  │  ├─ framework_modes.py     # 各框架支持的推理 / 协作模式（33 个）
+│  │  ├─ mode_templates.py      # 每个模式一套节点模板（选中直接生成画布）
+│  │  ├─ constraints.py         # 编排约束规则库
+│  │  ├─ community.py           # 社区模板：脱敏打包 + GitHub API
+│  │  ├─ codegen/
+│  │  │  ├─ native.py           # ★ 画布 → agent.py 的框架原生代码生成
+│  │  │  ├─ generators.py       # 项目骨架、requirements、文件落盘
+│  │  │  └─ production.py       # 服务设置 → server.py / Dockerfile / CI 等生产化文件
 │  │  ├─ providers/             # ★ 向量模型 / 向量库 / 数据源的适配层
 │  │  │  ├─ catalog*.py         #   枚举清单（纯数据，加一家只改这里）
 │  │  │  ├─ embedding.py        #   6 类 embedding 协议
@@ -326,18 +330,21 @@ MineAgent/
 │  │  ├─ runtime/
 │  │  │  ├─ runtime_sdk.py      # 节点可用的 ctx 能力（会被复制进每个项目）
 │  │  │  └─ runner.py           # 内置图执行器（会被复制进每个项目）
-│  │  └─ routers/               # canvases / run / projects / settings / providers / meta
+│  │  └─ routers/               # canvases / run / projects / settings / providers / meta / community
 │  ├─ data/                     # mineagent.db、master.key、运行日志、背景图（不入库）
 │  └─ requirements.txt
 ├─ frontend/
 │  ├─ src/                      # React 应用
-│  ├─ test/ui-smoke.mjs         # headless 浏览器交互测试
+│  ├─ test/                     # headless 浏览器交互测试
 │  └─ dist/                     # 构建产物（后端自动托管）
 ├─ projects/                    # ★ 每个画布一个独立 Agent 项目
 ├─ tools/
 │  ├─ mock_llm.py               # 本地 mock 模型服务
+│  ├─ build_framework_blueprints.py  # 生成 14 张编排架构画布
+│  ├─ regen_and_run.py          # 批量重新生成 + 实跑验证
 │  ├─ smoke_test.py             # 端到端冒烟测试
 │  └─ api_test.py               # 后端边缘场景测试
+├─ CHANGELOG.md                 # 版本更新记录
 └─ README.md
 ```
 
@@ -469,10 +476,12 @@ python agent.py --input "..."
 
 ## 运行原理
 
-1. **保存**：后端把画布 JSON 转成 `agent.json`，为每个节点写出一个 `nodes/<name>.py`，
-   再按当前框架生成 `agent.py` 与 `requirements.txt`。删掉的节点对应文件会被清理。
-2. **运行**：后端用当前 Python 解释器拉起项目的 `runner.py` 子进程，
-   通过 stdout 的 `@@EVENT@@{json}` 行回传事件，再以 SSE 推给浏览器。
+1. **保存**：后端把画布 JSON 转成 `agent.json`，再按当前框架把整张图生成为一份
+   `agent.py`（每个节点是里面一个带 `═══` 标记的函数块），同时写出 `requirements.txt`。
+   删掉的节点对应代码块会被清理。
+2. **运行**：依赖齐全时直接执行 `agent.py`（框架原生代码）；依赖缺失或想零安装预览时，
+   后端拉起项目的 `runner.py` 子进程按图执行。两条路径都通过 stdout 的
+   `@@EVENT@@{json}` 行回传事件，再以 SSE 推给浏览器。
 3. **执行语义**（`runner.py`）：
    - 从 `input` 节点出发，沿边推进；
    - 多入边节点会先把**还没执行过的上游分支补齐**，再合并输入（fan-in）；
@@ -489,7 +498,7 @@ python agent.py --input "..."
 
 ---
 
-## 节点清单（110 种，13 类）
+## 节点清单（113 种，13 类）
 
 ![节点库](docs/screenshots/09-node-library.png)
 
@@ -773,8 +782,8 @@ Langflow 线性链、SmolAgents 代码行动
 | 类别 | 数量 | 覆盖 |
 | --- | --- | --- |
 | 向量模型 | 38 家 / 350+ 模型 | OpenAI、Azure、通义、智谱、硅基流动、火山、混元、千帆、百川、MiniMax、Cohere、Jina、Voyage、Gemini、Mistral、Together、Fireworks、DeepInfra、Nebius、Nomic、Mixedbread、Upstage、Snowflake、Vertex、Bedrock，以及 Ollama / TEI / vLLM / LM Studio / Xinference / LocalAI / FastChat，和 FastEmbed / sentence-transformers 进程内直跑 |
-| 向量库 | 46 个（42 个已实现） | 内置 SQLite、sqlite-vec、Chroma、pgvector / pgvecto.rs / GaussDB、Qdrant、Milvus/Zilliz、Weaviate、LanceDB、FAISS、Elasticsearch、OpenSearch、Redis、Pinecone、DuckDB VSS、ClickHouse、Typesense、Upstash、Turbopuffer、Azure AI Search、ArangoDB、Vectara、Vespa、SurrealDB、Couchbase、Oracle、SAP HANA、Vertex AI、MySQL 家族（MariaDB/TiDB/OceanBase/Doris/StarRocks/SingleStore）、MongoDB Atlas；剩百度向量数据库 / DashVector / 腾讯云 / VikingDB 四家待补（需对应云账号验证） |
-| 数据源 | 48 个（6 类已实现） | 内置 SQLite、PostgreSQL、MySQL、MongoDB、Redis、Neo4j；关系 / 文档 / 图 / KV / 时序共 48 个已枚举 |
+| 向量库 | 46 个（全部已实现） | 内置 SQLite、sqlite-vec、Chroma、pgvector / pgvecto.rs / GaussDB、Qdrant、Milvus/Zilliz、Weaviate、LanceDB、FAISS、Elasticsearch、OpenSearch、Redis、Pinecone、DuckDB VSS、ClickHouse、Typesense、Upstash、Turbopuffer、Azure AI Search、ArangoDB、Vectara、Vespa、SurrealDB、Couchbase、Oracle、SAP HANA、Vertex AI、MySQL 家族（MariaDB/TiDB/OceanBase/Doris/StarRocks/SingleStore）、MongoDB Atlas、DashVector、腾讯云 VectorDB、百度向量数据库、VikingDB |
+| 数据源 | 48 个（全部已实现） | 关系型：PostgreSQL / MySQL / MariaDB / SQL Server / Oracle / SQLite / ClickHouse / DuckDB / TiDB / OceanBase / GaussDB / PolarDB / Greenplum / Redshift / Snowflake / BigQuery / Databricks / Trino / Presto / Hive；文档型：MongoDB / DocumentDB / Couchbase / Firestore / ArangoDB / CouchDB；图：Neo4j / Memgraph / NebulaGraph / TigerGraph / JanusGraph / Dgraph / Apache AGE / HugeGraph / TuGraph；KV：Redis / Valkey / Memcached / etcd / DynamoDB / Cassandra / ScyllaDB / HBase；时序：InfluxDB / TimescaleDB / TDengine / Prometheus / QuestDB |
 
 「已实现」和「即将支持」在下拉里会标出来，未实现的不能选，不会让你配完才发现跑不起来。
 
@@ -838,7 +847,12 @@ python runner.py --input "你的问题"
 
 ## 节点代码能用到什么
 
-每个节点就是 `nodes/<name>.py` 里的一个 `run(ctx)` 函数，`ctx` 提供：
+节点代码有两种写法，取决于当前跑的是哪条路径：
+
+- **预览（零依赖，`runner.py`）**：节点是 `run(ctx)` 函数，下面这些能力都由 `ctx` 提供
+- **原生（`agent.py`）**：节点是 `def xxx(state: AgentState) -> dict`，直接用框架自己的 API
+
+`ctx` 提供：
 
 ```python
 ctx.text / ctx.input        # 上游输出（字符串 / 原始对象）
@@ -847,16 +861,19 @@ ctx.params                  # 节点面板里配置的参数
 ctx.llm(prompt, system=)    # 调大模型
 ctx.llm_stream(...)         # 流式调大模型（token 会实时推到画布）
 ctx.agent(task, tools, mode=)  # 内置 agent，mode 可选 react/plan_execute/goal/reflexion/tool_call/simple
+ctx.judge(state, questions) # 交给 Jev 做结构化判断（choice / noul / score），没配 key 会抛 JudgeUnavailable
 ctx.superior                # 我的上级 agent 名字
 ctx.subordinates            # 下级 agent 名字列表
 ctx.peers                   # 平级 agent 名字列表
 ctx.delegate(名字, 任务)     # 把任务派给某个 agent 并取回结果
+ctx.delegate_many([...])    # 并行派给多个 agent，单点失败不影响其它
 ctx.json_prompt(...)        # 结构化输出
 ctx.http(...) / ctx.search() / ctx.fetch_text() / ctx.mcp_call(...)
 ctx.skill(name, inline)     # 读 skills/*.md 或直接用内联的 skill.md 内容
 ctx.remember() / ctx.recall() / ctx.history()
 ctx.retrieve() / ctx.embed() / ctx.vector_upsert() / ctx.vector_search()
 ctx.embed_many() / ctx.use_collection() / ctx.vector_delete() / ctx.vector_store_drop()
+ctx.wiki_ingest() / ctx.wiki_query() / ctx.wiki_pages() / ctx.wiki_read()   # LLM Wiki
 ctx.query_data() / ctx.write_data() / ctx.data_tables()   # 数据源（SQL / Cypher / Redis）
 ctx.exec_python() / ctx.shell() / ctx.read_file() / ctx.write_file() / ctx.query_sql()
 ctx.log() / ctx.emit() / ctx.route()
@@ -882,7 +899,7 @@ ctx.log() / ctx.emit() / ctx.route()
 # Agent 模式 / 多 agent 委派 / 节点级模型
 .\.venv\Scripts\python.exe tools\feature_test.py
 
-# 节点库与细粒度能力（110 节点、检索链路、新 SDK 能力）
+# 节点库与细粒度能力（113 节点、检索链路、新 SDK 能力）
 .\.venv\Scripts\python.exe tools\granularity_test.py
 
 # 浏览器端交互（右键菜单、代码编辑、保存、运行）
@@ -909,7 +926,9 @@ node test/ui-smoke.mjs
 **想彻底重来**：删掉 `backend/data/` 和 `projects/` 下的内容，重新启动即可
 （会生成新的加密主密钥，已保存的 key 需要重填）。
 
-**网页上改了代码，但项目目录里被我手改过**：以画布为准——点保存会覆盖 `nodes/*.py`。
+**网页上改了代码，但项目目录里被我手改过**：以画布为准——点保存会重新生成
+`agent.py`，把画布里的代码块写回去。想保留项目目录里的手改，先在网页上把那一段
+改过来，或者把节点标记为「已手改」（保存时不会覆盖你的版本）。
 建议始终在网页里编辑节点代码，或者改完不要再到网页点保存。
 
 ---
