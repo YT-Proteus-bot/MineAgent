@@ -112,6 +112,9 @@ class Settings(BaseSettings):
     price_input_per_1k: float = Field(0.0, ge=0.0)
     price_output_per_1k: float = Field(0.0, ge=0.0)
 
+    # 灰度：0=全走主版本，100=全走 canary；中间按 trace_id 稳定分流
+    canary_percent: int = Field(0, ge=0, le=100)
+
     sandbox: str = {_py(sec["sandbox"])}
     guardrail: str = {_py(sec["guardrail"])}
     pii: bool = {_py(sec["pii"])}
@@ -707,6 +710,7 @@ def render_server(spec: Dict[str, Any]) -> str:
 from __future__ import annotations
 
 import contextvars
+import hashlib
 import json
 import os
 import threading
@@ -776,6 +780,9 @@ async def _trace_middleware(request: Request, call_next):
     with span(f"{{request.method}} {{request.url.path}}", {{"trace_id": trace_id}}):
         response = await call_next(request)
     response.headers.setdefault("X-Trace-Id", trace_id)
+    variant = getattr(request.state, "variant", "")
+    if variant:
+        response.headers.setdefault("X-Variant", variant)
     return response
 
 # ── 并发闸门：同时执行的数量受 max_concurrency 限制，排队的受 queue_limit 限制 ──
@@ -868,6 +875,27 @@ class ChatResponse(BaseModel):
     usage: Dict[str, Any] = {{}}
     status: str = "ok"          # ok | interrupted
     interrupt: Optional[Dict[str, Any]] = None
+    variant: str = "primary"    # primary | canary
+
+
+def _pick_variant(request, trace_id: str) -> str:
+    """灰度分流：显式 header 优先，其次按百分比（用 trace_id 做稳定哈希，同一个请求不会摇摆）。"""
+    forced = (request.headers.get("X-Canary") or "").strip().lower()
+    if forced in ("1", "true", "yes", "on"):
+        return "canary"
+    if forced in ("0", "false", "no", "off"):
+        return "primary"
+    percent = int(getattr(settings, "canary_percent", 0) or 0)
+    if percent <= 0:
+        return "primary"
+    if percent >= 100:
+        return "canary"
+    bucket = int(hashlib.md5(trace_id.encode("utf-8")).hexdigest()[:8], 16) % 100
+    variant = "canary" if bucket < percent else "primary"
+    # 没配 canary 模型时不要谎报：流量仍然走主模型
+    if variant == "canary" and getattr(flow, "llm_canary", None) is None:
+        return "primary"
+    return variant
 
 
 class ResumeRequest(BaseModel):
@@ -970,6 +998,10 @@ def _startup_report() -> None:
         # 这些开关已经写进配置但运行时不生效，宁可吵一句也不要让交付方误会
         log_event("service_settings_unimplemented",
                   {{"keys": list(settings.UNIMPLEMENTED)}})
+    if settings.canary_percent > 0 and getattr(flow, "llm_canary", None) is None:
+        log_event("canary_not_configured",
+                  {{"canary_percent": settings.canary_percent,
+                    "hint": "配了灰度比例但没有 MINEAGENT_CANARY_MODEL / _BASE_URL，流量仍走主模型"}})
 
 
 @app.get("/health")
@@ -1008,6 +1040,8 @@ def chat(req: ChatRequest, request: Request,
     # 有 checkpointer 就必须给 thread_id：没传就现造一个，跑完再删掉
     thread_id = req.thread_id or uuid.uuid4().hex[:16]
     _ensure_budget()
+    variant = _pick_variant(request, trace_id)
+    request.state.variant = variant
     started = time.time()
     _acquire_slot(settings.run_timeout_s)
     usage: Dict[str, Any] = {{}}
@@ -1015,6 +1049,7 @@ def chat(req: ChatRequest, request: Request,
     try:
         flow.reset_usage()
         _bind_trace(trace_id)
+        flow.set_canary(variant == "canary")
         config = {{"configurable": {{"thread_id": thread_id}}}}
         payload = {{"data": req.message, "user_input": req.message, "route": "",
                    "trace_id": trace_id}}
@@ -1038,18 +1073,20 @@ def chat(req: ChatRequest, request: Request,
             _drop_thread(thread_id)
         _release_slot()
     metrics.inc("chat_ok")
+    metrics.inc("chat_canary" if variant == "canary" else "chat_primary")
     metrics.observe("chat_latency_ms", (time.time() - started) * 1000)
     log_event("chat_ok", {{"trace_id": trace_id, "thread_id": thread_id,
+                           "variant": variant,
                            "latency_ms": round((time.time() - started) * 1000, 2),
                            "usage": usage, "interrupted": bool(interrupts)}})
     trace_event("chat_ok" if not interrupts else "chat_interrupted",
-                {{"trace_id": trace_id, "thread_id": thread_id,
+                {{"trace_id": trace_id, "thread_id": thread_id, "variant": variant,
                   "latency_ms": round((time.time() - started) * 1000, 2),
                   "usage": usage, "interrupt": interrupts[0] if interrupts else None}})
     if interrupts:
         return ChatResponse(answer="", thread_id=thread_id, usage=usage,
-                            status="interrupted", interrupt=interrupts[0])
-    return ChatResponse(answer=answer, thread_id=thread_id, usage=usage)
+                            status="interrupted", interrupt=interrupts[0], variant=variant)
+    return ChatResponse(answer=answer, thread_id=thread_id, usage=usage, variant=variant)
 
 
 @app.post("/resume", response_model=ChatResponse)
@@ -1059,6 +1096,8 @@ def resume(req: ResumeRequest, request: Request,
     _check_auth(authorization)
     trace_id = getattr(request.state, "trace_id", "") or _new_trace_id(None)
     _ensure_budget()
+    variant = _pick_variant(request, trace_id)
+    request.state.variant = variant
     started = time.time()
     _acquire_slot(settings.run_timeout_s)
     usage: Dict[str, Any] = {{}}
@@ -1066,6 +1105,7 @@ def resume(req: ResumeRequest, request: Request,
     try:
         flow.reset_usage()
         _bind_trace(trace_id)
+        flow.set_canary(variant == "canary")
         config = {{"configurable": {{"thread_id": req.thread_id}}}}
         result = _invoke_with_deadline(
             lambda: graph().invoke(Command(resume=req.decision), config=config),
@@ -1090,12 +1130,12 @@ def resume(req: ResumeRequest, request: Request,
                              "latency_ms": round((time.time() - started) * 1000, 2),
                              "usage": usage}})
     trace_event("resume_ok", {{"trace_id": trace_id, "thread_id": req.thread_id,
-                              "decision": req.decision, "usage": usage,
+                              "variant": variant, "decision": req.decision, "usage": usage,
                               "status": "interrupted" if interrupts else "ok"}})
     if interrupts:
         return ChatResponse(answer="", thread_id=req.thread_id, usage=usage,
-                            status="interrupted", interrupt=interrupts[0])
-    return ChatResponse(answer=answer, thread_id=req.thread_id, usage=usage)
+                            status="interrupted", interrupt=interrupts[0], variant=variant)
+    return ChatResponse(answer=answer, thread_id=req.thread_id, usage=usage, variant=variant)
 
 
 @app.get("/runs/{{thread_id}}")
@@ -1121,6 +1161,8 @@ def chat_stream(req: ChatRequest, request: Request,
     trace_id = getattr(request.state, "trace_id", "") or _new_trace_id(None)
     thread_id = req.thread_id or uuid.uuid4().hex[:16]
     _ensure_budget()
+    variant = _pick_variant(request, trace_id)
+    request.state.variant = variant
 
     def gen():
         started = time.time()
@@ -1130,8 +1172,10 @@ def chat_stream(req: ChatRequest, request: Request,
         try:
             flow.reset_usage()
             _bind_trace(trace_id)
+            flow.set_canary(variant == "canary")
             yield "event: open\\ndata: " + json.dumps(
-                {{"trace_id": trace_id, "thread_id": thread_id}}, ensure_ascii=False) + "\\n\\n"
+                {{"trace_id": trace_id, "thread_id": thread_id, "variant": variant}},
+                ensure_ascii=False) + "\\n\\n"
             config = {{"configurable": {{"thread_id": thread_id}}}}
             payload = {{"data": req.message, "user_input": req.message, "route": "",
                        "trace_id": trace_id}}

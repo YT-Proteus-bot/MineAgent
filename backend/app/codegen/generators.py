@@ -564,6 +564,11 @@ def generate_project(name: str, slug: str, framework: str, graph: Dict[str, Any]
         "MINEAGENT_PRICE_INPUT_PER_1K=0\n"
         "MINEAGENT_PRICE_OUTPUT_PER_1K=0\n"
         "MINEAGENT_BUDGET_USD=0\n"
+        "\n# 灰度：0=全走主版本，100=全走 canary；header X-Canary 可强制\n"
+        "MINEAGENT_CANARY_PERCENT=0\n"
+        "MINEAGENT_CANARY_MODEL=\n"
+        "MINEAGENT_CANARY_BASE_URL=\n"
+        "MINEAGENT_CANARY_API_KEY=\n"
         "\n# 密钥来源：env（默认）/ file / vault；环境变量仍然优先\n"
         "MINEAGENT_SECRETS=env\n"
         "MINEAGENT_SECRETS_FILE=\n"
@@ -936,6 +941,22 @@ def _readme(name: str, slug: str, framework: str, spec: Dict[str, Any]) -> str:
         "",
         "不再报错的输入，抄进 `cases.jsonl` 再补上 `expect_contains`，就成了一条正式用例——",
         "修过的 bug 从此有了回归测试。",
+        "",
+        "## 灰度发布",
+        "",
+        "配一套 canary 模型，让一小部分流量先走新版本：",
+        "",
+        "```bash",
+        "MINEAGENT_CANARY_BASE_URL=https://新模型地址/v1 \\",
+        "MINEAGENT_CANARY_MODEL=新模型名 \\",
+        "MINEAGENT_CANARY_PERCENT=10 \\",
+        "uvicorn server:app --host 0.0.0.0 --port 8000",
+        "```",
+        "",
+        "- 分流按 `trace_id` 做稳定哈希，同一个请求不会在两条链路间摇摆；",
+        "- 也可以用 header 强制：`X-Canary: 1` 走 canary、`X-Canary: 0` 走主版本（做对比验证很方便）；",
+        "- 响应体有 `variant` 字段、响应头有 `X-Variant`，日志与 trace 里也带；",
+        "- `/metrics` 里 `mineagent_chat_canary_total` 与 `mineagent_chat_primary_total` 可直接对比成功率与延迟。",
         "",
         "## 压测与验收",
         "",

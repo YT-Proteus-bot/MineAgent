@@ -83,8 +83,8 @@ def _has_own_model(node: Dict[str, Any]) -> bool:
 
 
 def _llm_var(node: Dict[str, Any]) -> str:
-    """节点用到模型时用哪个变量：有独立模型就用节点的，否则用全局 llm。"""
-    return f"{_pyid(node['name']).upper()}_LLM" if _has_own_model(node) else "llm"
+    """节点用到模型时用哪个变量：有独立模型就用节点的，否则走 _active_llm()（支持灰度）。"""
+    return f"{_pyid(node['name']).upper()}_LLM" if _has_own_model(node) else "_active_llm()"
 
 
 def _llm_decl(node: Dict[str, Any]) -> str:
@@ -352,7 +352,7 @@ def _block_agent(node: Dict[str, Any], spec: Dict[str, Any] | None = None) -> st
         f'    origin = state.get("user_input", "")\n'
         f"    if origin and origin != task:\n"
         f'        task = f"{{origin}}\\n\\n## 上一轮观察 / 反馈\\n{{task}}\\n\\n请结合原始问题作答。"\n'
-        f"    agent = _get_agent({_q(node['id'])}, lambda: create_agent(\n"
+        f"    agent = _get_agent(_agent_key({_q(node['id'])}), lambda: create_agent(\n"
         f"        model={_llm_var(node)},\n"
         f"        tools={tools_var},\n"
         f"        system_prompt={_q(system)},\n"
@@ -1161,6 +1161,45 @@ llm = ChatOpenAI(
     # callbacks 挂在模型上：所有节点（含 create_agent 内部）的调用都会记账
     callbacks=[_USAGE_HANDLER],
 )
+
+
+# ── 灰度：配了 canary 模型就多一个实例，按请求决定走哪条 ──────────────
+_CANARY = contextvars.ContextVar("mineagent_canary", default=False)
+
+_CANARY_MODEL = os.environ.get("MINEAGENT_CANARY_MODEL") or ""
+_CANARY_BASE = os.environ.get("MINEAGENT_CANARY_BASE_URL") or ""
+
+llm_canary = None
+if _CANARY_MODEL or _CANARY_BASE:
+    llm_canary = ChatOpenAI(
+        model=_CANARY_MODEL or os.environ.get("MINEAGENT_MODEL") or CFG.get("model", "deepseek-chat"),
+        base_url=_CANARY_BASE or os.environ.get("MINEAGENT_BASE_URL") or CFG.get("base_url"),
+        api_key=_secret("MINEAGENT_CANARY_API_KEY") or _secret("MINEAGENT_API_KEY") or "EMPTY",
+        temperature=CFG.get("temperature", 0.3),
+        max_tokens=CFG.get("max_tokens", 2048),
+        timeout=float(os.environ.get("MINEAGENT_LLM_TIMEOUT") or 120),
+        max_retries=int(os.environ.get("MINEAGENT_LLM_MAX_RETRIES") or 2),
+        stream_usage=str(os.environ.get("MINEAGENT_STREAM_USAGE", "1")).lower() not in ("0", "false", "no"),
+        callbacks=[_USAGE_HANDLER],
+    )
+
+
+def get_canary() -> bool:
+    return bool(_CANARY.get())
+
+
+def set_canary(value: bool) -> None:
+    _CANARY.set(bool(value))
+
+
+def _active_llm():
+    """当前请求该用哪个模型：灰度流量且配了 canary 就用 canary，否则用主模型。"""
+    return llm_canary if (get_canary() and llm_canary is not None) else llm
+
+
+def _agent_key(node_id: str) -> str:
+    """agent 实例缓存键要带灰度标记，否则切流量后还在用旧实例。"""
+    return f"{node_id}:{'c' if get_canary() else 'p'}"
 
 # ── 运行事件：每个节点执行前后的输入/输出都回传给网页运行面板 ──────
 EVENT_PREFIX = "@@EVENT@@"
