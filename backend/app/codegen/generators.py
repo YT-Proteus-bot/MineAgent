@@ -594,7 +594,7 @@ def generate_project(name: str, slug: str, framework: str, graph: Dict[str, Any]
     write(".gitignore",
           ".env\n.venv/\n.store.db\n*.db\n.sessions.db\n__pycache__/\n*.pyc\n"
           "outputs/*\n!outputs/.gitkeep\nwheels/*\n!wheels/.gitkeep\n"
-          ".history/\nevals/candidates.jsonl\n")
+          ".history/\nevals/candidates.jsonl\nbackups/\n")
 
     # 空目录留占位文件，保证复制 / 打包 / git 之后目录结构不丢
     write("skills/.gitkeep", "# 技能文件（skill 节点的 skill.md）放这里\n")
@@ -991,6 +991,18 @@ def _readme(name: str, slug: str, framework: str, spec: Dict[str, Any]) -> str:
         "MINEAGENT_GUARDRAIL=block MINEAGENT_PII=1 MINEAGENT_AUDIT=1 uvicorn server:app",
         "curl -s localhost:8000/ready | jq .security",
         "```",
+        "",
+        "## 备份 / 恢复 / 演练",
+        "",
+        "```bash",
+        "python scripts/backup.py              # → backups/<项目>-<时间>.tar.gz（写完回读校验）",
+        "python scripts/backup.py --tag pre-upgrade",
+        "python scripts/restore.py backups/xxx.tar.gz   # 覆盖前会自动再备份一次现状",
+        "python scripts/drill.py               # 灾备演练：临时副本里 备份→写坏→恢复→核对，退出码 0 为通过",
+        "```",
+        "",
+        "备份内容：`VERSION`、`CHANGELOG.md`、`.history/`、会话库、`.store.db`、`outputs/`、`config.json`、`agent.json`。",
+        "交付前把 `drill.py` 跑一遍，把输出截图放进验收材料；日常运维细节见 `docs/runbook.md`。",
         "",
         "## 压测与验收",
         "",

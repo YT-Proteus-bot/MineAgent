@@ -2485,6 +2485,335 @@ def render_grafana(spec: Dict[str, Any]) -> Dict[str, str]:
     return {"docs/grafana-dashboard.json": json.dumps(dashboard, ensure_ascii=False, indent=2) + "\n"}
 
 
+_BACKUP_PY = '''"""备份：把运行数据打成一个 tar.gz（恢复见 restore.py，演练见 drill.py）。
+
+包含：VERSION / CHANGELOG.md / .history/ / .sessions.db / .sessions-meta.db /
+      .store.db / outputs/ / config.json / agent.json
+
+    python scripts/backup.py                 # 写到 backups/<项目名>-<时间>.tar.gz
+    python scripts/backup.py --out /data/bk  # 换目录
+    python scripts/backup.py --tag pre-upgrade
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import tarfile
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_OUT = ROOT / "backups"
+INCLUDE_FILES = ["agent.py", "VERSION", "CHANGELOG.md", "agent.json", "config.json",
+                 "requirements.txt", "requirements.lock.txt", "integrations.json"]
+INCLUDE_DIRS = [".history", "outputs", "skills"]
+INCLUDE_GLOBS = [".sessions.db", ".sessions-meta.db", ".store.db", "integrations.json"]
+SKIP_PARTS = {"__pycache__", ".venv", "backups", "wheels", "node_modules"}
+
+
+def _collect() -> list:
+    items = []
+    for name in INCLUDE_FILES:
+        p = ROOT / name
+        if p.exists():
+            items.append(p)
+    for name in INCLUDE_DIRS:
+        p = ROOT / name
+        if p.exists():
+            items.extend(x for x in p.rglob("*") if x.is_file())
+    for pattern in INCLUDE_GLOBS:
+        items.extend(p for p in ROOT.glob(pattern) if p.is_file())
+    return [p for p in items if not (set(p.relative_to(ROOT).parts) & SKIP_PARTS)]
+
+
+def make_backup(out_dir: Path, tag: str = "") -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    suffix = f"-{tag}" if tag else ""
+    archive = out_dir / f"{ROOT.name}-{stamp}{suffix}.tar.gz"
+    files = _collect()
+    with tarfile.open(archive, "w:gz") as tar:
+        for path in files:
+            tar.add(path, arcname=str(path.relative_to(ROOT)))
+    # 写完立刻回读校验：能列出同样多的条目才算成功
+    with tarfile.open(archive, "r:gz") as tar:
+        entries = tar.getnames()
+    if len(entries) < len(files):
+        raise SystemExit(f"备份校验失败：写入 {len(files)} 个文件，回读到 {len(entries)} 个")
+    return {"archive": str(archive), "files": len(files), "bytes": archive.stat().st_size,
+            "entries": entries[:20]}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--out", default=str(DEFAULT_OUT))
+    parser.add_argument("--tag", default="")
+    args = parser.parse_args()
+    info = make_backup(Path(args.out), args.tag)
+    print(json.dumps({k: v for k, v in info.items() if k != "entries"},
+                     ensure_ascii=False, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+
+_RESTORE_PY = '''"""恢复：先用 backup.py 把当前状态留一档，再解开备份覆盖。
+
+    python scripts/restore.py backups/xxx.tar.gz
+    python scripts/restore.py backups/xxx.tar.gz --yes    # 跳过确认
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import shutil
+import sys
+import tarfile
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+REQUIRED = ("agent.py", "VERSION")
+
+
+def _safe_members(tar: tarfile.TarFile, dest: Path) -> list:
+    """只允许解到 dest 里，防止 ../ 之类的路径穿越。"""
+    members = []
+    for member in tar.getmembers():
+        target = (dest / member.name).resolve()
+        if dest.resolve() not in target.parents and target != dest.resolve():
+            raise SystemExit(f"备份里有越界路径，拒绝解压：{member.name}")
+        members.append(member)
+    return members
+
+
+def restore(archive: Path, assume_yes: bool = False) -> dict:
+    archive = archive.resolve()
+    if not archive.exists():
+        raise SystemExit(f"找不到备份：{archive}")
+    with tempfile.TemporaryDirectory(prefix="restore-") as tmp:
+        tmp_path = Path(tmp)
+        with tarfile.open(archive, "r:gz") as tar:
+            tar.extractall(tmp_path, members=_safe_members(tar, tmp_path))
+        names = {p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*") if p.is_file()}
+        missing = [name for name in REQUIRED if name not in names]
+        if missing:
+            raise SystemExit(f"备份不完整，缺少：{', '.join(missing)}")
+        if not assume_yes:
+            answer = input(f"将用 {archive.name} 覆盖当前数据（先自动备份现状），继续？[y/N] ").strip().lower()
+            if answer not in ("y", "yes"):
+                return {"restored": False, "reason": "用户取消"}
+        pre = json.loads(_run_backup(Path(ROOT / "backups"), "pre-restore"))
+        for item in sorted(tmp_path.rglob("*")):
+            if not item.is_file():
+                continue
+            rel = item.relative_to(tmp_path)
+            target = ROOT / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(item, target)
+        for cache in ROOT.rglob("__pycache__"):
+            shutil.rmtree(cache, ignore_errors=True)
+        return {"restored": True, "archive": archive.name, "files": len(names),
+                "pre_restore_backup": pre.get("archive")}
+
+
+def _run_backup(out_dir: Path, tag: str) -> str:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import backup  # noqa: PLC0415
+
+    return json.dumps(backup.make_backup(out_dir, tag), ensure_ascii=False)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("archive")
+    parser.add_argument("--yes", action="store_true")
+    args = parser.parse_args()
+    info = restore(Path(args.archive), args.yes)
+    print(json.dumps(info, ensure_ascii=False, indent=2))
+    return 0 if info.get("restored") else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+
+_DRILL_PY = '''"""灾备演练：在临时副本上跑「备份 → 破坏 → 恢复 → 自检」，不碰当前数据。
+
+    python scripts/drill.py            # 退出码 0 表示演练通过
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+SKIP = {"__pycache__", ".venv", "backups", "wheels", "node_modules", ".git"}
+
+
+def _copy_project(dest: Path) -> None:
+    for item in ROOT.iterdir():
+        if item.name in SKIP:
+            continue
+        target = dest / item.name
+        if item.is_dir():
+            shutil.copytree(item, target, ignore=shutil.ignore_patterns(*SKIP))
+        else:
+            shutil.copyfile(item, target)
+
+
+def _sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+
+
+def _run(cwd: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, *args], cwd=str(cwd), capture_output=True,
+                          text=True, encoding="utf-8", errors="replace")
+
+
+def main() -> int:
+    steps = []
+    with tempfile.TemporaryDirectory(prefix="drill-") as tmp:
+        work = Path(tmp) / "project"
+        work.mkdir()
+        _copy_project(work)
+        agent = work / "agent.py"
+        before = _sha(agent)
+
+        r = _run(work, "scripts/backup.py")
+        steps.append({"step": "backup", "ok": r.returncode == 0, "out": (r.stdout or "").strip()[:120]})
+        archives = sorted((work / "backups").glob("*.tar.gz"))
+        if not archives:
+            print(json.dumps({"passed": False, "steps": steps}, ensure_ascii=False, indent=2))
+            return 1
+
+        # 破坏：改写 agent.py、清掉会话库
+        agent.write_text("# 演练：故意写坏\\n", encoding="utf-8")
+        for db in (".sessions.db", ".sessions-meta.db"):
+            (work / db).unlink(missing_ok=True)
+
+        r = _run(work, "scripts/restore.py", str(archives[-1]), "--yes")
+        steps.append({"step": "restore", "ok": r.returncode == 0, "out": (r.stdout or "").strip()[:120]})
+        after = _sha(agent)
+        steps.append({"step": "verify-agent", "ok": before == after,
+                      "before": before, "after": after})
+        checks = {
+            "VERSION": (work / "VERSION").exists(),
+            "CHANGELOG": (work / "CHANGELOG.md").exists(),
+            "outputs": (work / "outputs").exists(),
+        }
+        steps.append({"step": "verify-files", "ok": all(checks.values()), "detail": checks})
+
+    passed = all(item["ok"] for item in steps)
+    print(json.dumps({"passed": passed, "steps": steps}, ensure_ascii=False, indent=2))
+    return 0 if passed else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+
+_RUNBOOK_MD = '''# 运维手册
+
+假设项目目录为 `/opt/mineagent-agent`，服务跑在 8000。
+
+## 启动 / 停止 / 重启
+
+```bash
+cd /opt/mineagent-agent
+./scripts/install_offline.sh                 # 首次：离线装依赖
+uvicorn server:app --host 0.0.0.0 --port 8000 &
+curl -s localhost:8000/ready                 # ok=true 才算起来了
+kill $(cat server.pid)                        # 停止（建议用 systemd / compose 托管）
+```
+
+## 健康检查
+
+| 接口 | 用途 | 期望 |
+| --- | --- | --- |
+| `/health` | 存活 + 版本 | `{"ok":true,"version":"1.0.3"}` |
+| `/ready` | 就绪（缺配置 / 未实现项 / 沙箱 / 密钥 / 安全） | `missing` 为空 |
+| `/metrics` | Prometheus 指标 | 文本，含 `mineagent_chat_ok_total` |
+| `/version` | 当前生成物版本记录 | version / hash / generated_at |
+
+## 备份
+
+```bash
+python scripts/backup.py                 # → backups/<项目>-<时间>.tar.gz
+python scripts/backup.py --tag pre-upgrade
+```
+
+包含：`VERSION`、`CHANGELOG.md`、`.history/`、会话库、`.store.db`、`outputs/`、`config.json`、`agent.json`。
+写完会回读校验条目数，数量不符会直接报错。
+
+建议：**升级前、改配置前、批量导入数据前**各做一次；用 cron 每天一次并保留 7 天。
+
+## 恢复
+
+```bash
+python scripts/restore.py backups/xxx.tar.gz        # 会先自动备份当前状态再覆盖
+```
+
+恢复前会检查备份里是否含 `agent.py` 与 `VERSION`；解压路径有越界会直接拒绝。
+
+## 灾备演练（交付前必做）
+
+```bash
+python scripts/drill.py        # 退出码 0 = 通过
+```
+
+它在临时副本里做一遍「备份 → 写坏 agent.py、删会话库 → 恢复 → 核对哈希与文件」，
+**不碰生产数据**。把这个命令写进季度检查清单。
+
+## 回滚到上一版生成物
+
+```bash
+curl -s localhost:8000/runs                               # 看会话状态
+curl -s localhost:8000/api/canvases/<id>/versions         # 列版本（平台侧）
+cp .history/agent-1.0.2.py agent.py                        # 或者直接在项目里换文件
+```
+
+改完 `agent.py` 后重启服务；`.history/` 里保留最近 5 版，回滚前记得先 `backup.py`。
+
+## 常见故障
+
+| 现象 | 先看 | 处理 |
+| --- | --- | --- |
+| 起不来，打印「服务配置校验失败」 | 那行错误的字段名 | 按 `.env.example` 改对应环境变量 |
+| `/ready` 里 `missing` 非空 | 缺模型 key 或 base_url | 配 `MINEAGENT_API_KEY` / `MINEAGENT_BASE_URL` |
+| 401 | 鉴权 | 检查 `MINEAGENT_AUTH` 与 `MINEAGENT_SERVICE_KEY` |
+| 429 | 预算或并发 | 看 `/metrics` 的 `budget_exhausted_total`、调 `MAX_CONCURRENCY` |
+| 501 | 断点续跑关着 | `MINEAGENT_RESUME=1` |
+| 409 | 没有待审批 | 先 `/chat` 触发挂起，再 `/resume` |
+| 延迟飙高 | `/metrics` p95 + `docs/grafana-dashboard.json` | 看是模型慢还是节点多，必要时开 `TRACE_FILE` 定位 |
+
+## 扩容
+
+- 会话存 Postgres（`MINEAGENT_SESSION_STORE=postgres` + `DATABASE_URL`）后可多副本
+- 多副本时 `MAX_CONCURRENCY` 按副本数分摊；`BUDGET_USD` 是**进程内**累计，多副本下不等于全局预算
+- `/metrics` 由各副本各自暴露，由 Prometheus 抓取汇总
+'''
+
+
+def render_ops_scripts() -> Dict[str, str]:
+    return {
+        "scripts/backup.py": _BACKUP_PY,
+        "scripts/restore.py": _RESTORE_PY,
+        "scripts/drill.py": _DRILL_PY,
+        "docs/runbook.md": _RUNBOOK_MD,
+    }
+
+
 def render_evals(spec: Dict[str, Any]) -> Dict[str, str]:
     """评测目录：用例模板 + 打分脚本 + 说明。"""
     inputs = [n for n in spec.get("nodes", []) if (n.get("kind") or "") == "input"]
@@ -2562,4 +2891,6 @@ def render_production_files(spec: Dict[str, Any], graph: Dict[str, Any],
     if has_graph:
         files.update(render_loadtest())
         files.update(render_grafana(spec))
+    # 备份 / 恢复 / 演练 + 运维手册：任何项目都该有
+    files.update(render_ops_scripts())
     return files
