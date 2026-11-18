@@ -544,6 +544,9 @@ def generate_project(name: str, slug: str, framework: str, graph: Dict[str, Any]
         if stale not in prod_files:
             (project_dir / stale).unlink(missing_ok=True)
     for rel, content in prod_files.items():
+        # evals/cases.jsonl 是用户资产：只在没有时播种，重新生成不能覆盖手写用例
+        if rel == "evals/cases.jsonl" and (project_dir / rel).exists():
+            continue
         write(rel, content)
 
     env_example = (

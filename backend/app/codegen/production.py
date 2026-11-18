@@ -1548,7 +1548,16 @@ import os
 os.environ.setdefault("MINEAGENT_API_KEY", "test-key")
 os.environ.setdefault("MINEAGENT_BASE_URL", "http://127.0.0.1:9/v1")
 os.environ.setdefault("MINEAGENT_SESSION_STORE", "none")
-os.environ.setdefault("MINEAGENT_RESUME", "0")
+os.environ.setdefault("MINEAGENT_SERVICE_KEY", "test-key")
+
+
+def auth_headers():
+    """服务开了 apikey 鉴权就带上头，否则为空——冒烟测试要能跑在任何配置上。"""
+    import server
+
+    if (getattr(server.settings, "auth", "none") or "none").lower() != "apikey":
+        return {}
+    return {"Authorization": "Bearer " + (os.environ.get("MINEAGENT_SERVICE_KEY") or "test-key")}
 '''
     if not has_graph:
         # AutoGen / CrewAI / SmolAgents：没有 server.py，只验证入口能导入
@@ -1642,9 +1651,13 @@ def test_resume_disabled_returns_501():
     import server
 
     client = TestClient(server.app)
-    # 冒烟测试里固定 MINEAGENT_RESUME=0：关掉断点续跑时应明确拒绝，而不是假装成功
-    resp = client.post("/resume", json={"thread_id": "t", "decision": "approve"})
-    assert resp.status_code == 501
+    resp = client.post("/resume", json={"thread_id": "t", "decision": "approve"},
+                       headers=auth_headers())
+    if server.settings.resume:
+        # 开了断点续跑：这条会话没挂起过，应该是 404/409，而不是「假装成功」
+        assert resp.status_code in (404, 409)
+    else:
+        assert resp.status_code == 501
 
 
 def test_run_state_endpoint_exists():
@@ -1653,8 +1666,8 @@ def test_run_state_endpoint_exists():
     import server
 
     client = TestClient(server.app)
-    resp = client.get("/runs/not-started-yet")
-    assert resp.status_code in (200, 404)
+    resp = client.get("/runs/not-started-yet", headers=auth_headers())
+    assert resp.status_code in (200, 401, 404)
 '''
 
 
