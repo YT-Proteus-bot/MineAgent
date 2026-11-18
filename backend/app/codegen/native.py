@@ -227,21 +227,14 @@ def _block_tool(node: Dict[str, Any]) -> str:
         )
         arg = "query: str"
     elif kind == "sql_query":
-        body = (
-            '    import sqlite3\n'
-            '    conn = sqlite3.connect(query)\n'
-            '    try:\n'
-            '        cur = conn.execute(sql)\n'
-            '        return str(cur.fetchall()[:50])\n'
-            '    finally:\n'
-            '        conn.close()\n'
-        )
-        arg = "sql: str"
+        default_sql = _text(p, "sql", "")
         return (
             f"@tool\n"
-            f"def {fn}({arg}) -> str:\n"
+            f"def {fn}(sql: str = {_q(default_sql)}) -> str:\n"
             f'    """{desc}"""\n'
-            f"    raise ValueError(\"请在运行时传入数据库路径，或改用 ctx.exec_sql\")\n"
+            f"    from runtime_sdk import project_query_data\n"
+            f'    rows = project_query_data(sql, limit=100)\n'
+            f"    return str(rows)[:4000]\n"
         )
     else:
         body = f'    return f"[{fn}] 尚未实现：{{query}}"\n'
@@ -655,7 +648,8 @@ def _block_indexer(node: Dict[str, Any]) -> str:
         f'        project_vector_upsert(str(chunk), {{"node": {nname}}})\n'
         f'    _emit({{"event": "log", "node": {nid}, "name": {nname},\n'
         f'           "message": f"入库 {{len(chunks)}} 块"}})\n'
-        f'    return {{"data": chunks, "indexed": len(chunks)}}\n'
+        f'    return {{"data": str(data or ""), "text": str(data or ""),\n'
+        f'             "indexed": len(chunks)}}\n'
     )
 
 
@@ -859,7 +853,7 @@ def node_block(node: Dict[str, Any], spec: Dict[str, Any] | None = None) -> str:
         body = _block_critic(node)
     elif kind == "self_check":
         body = _block_self_check(node)
-    elif kind in ("merge", "join"):
+    elif kind in ("merge", "join", "merger"):
         body = _block_merge(node)
     elif kind == "system_prompt":
         body = _block_system_prompt(node)
