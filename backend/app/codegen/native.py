@@ -200,6 +200,13 @@ def _block_output(node: Dict[str, Any]) -> str:
     )
 
 
+def _idem_decorator(node: Dict[str, Any]) -> str:
+    """节点勾了「工具调用幂等」时，给工具套一层幂等装饰器。"""
+    p = _params(node)
+    on = str(p.get("idempotent", "")).strip().lower() in ("1", "true", "yes", "on")
+    return f"@idempotent({_q(node['id'])})\n" if on else ""
+
+
 def _block_tool(node: Dict[str, Any]) -> str:
     fn = _pyid(node["name"])
     kind = _kind_of(node)
@@ -216,6 +223,7 @@ def _block_tool(node: Dict[str, Any]) -> str:
         arg = spec.get("args") or "query: str"
         return (
             f"@tool\n"
+            f"{_idem_decorator(node)}"
             f"def {fn}({arg}) -> str:\n"
             f'    """{desc}"""\n'
             f"{body}"
@@ -241,6 +249,7 @@ def _block_tool(node: Dict[str, Any]) -> str:
         default_sql = _text(p, "sql", "")
         return (
             f"@tool\n"
+            f"{_idem_decorator(node)}"
             f"def {fn}(sql: str = {_q(default_sql)}) -> str:\n"
             f'    """{desc}"""\n'
             f"    from runtime_sdk import project_query_data\n"
@@ -252,6 +261,7 @@ def _block_tool(node: Dict[str, Any]) -> str:
         arg = "query: str"
     return (
         f"@tool\n"
+        f"{_idem_decorator(node)}"
         f"def {fn}({arg}) -> str:\n"
         f'    """{desc}"""\n'
         f"{body}"

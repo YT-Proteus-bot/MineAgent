@@ -34,6 +34,12 @@ EVENT_STREAM = sys.stdout
 PROJECT_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = PROJECT_DIR / "config.json"
 
+# 执行类能力统一交给 sandbox.py；老项目里没有这个文件时退回本文件内的实现
+try:  # pragma: no cover - 取决于项目目录里是否有 sandbox.py
+    import sandbox as _sandbox
+except Exception:  # noqa: BLE001
+    _sandbox = None
+
 
 # --------------------------------------------------------------------------- #
 # 事件输出
@@ -81,6 +87,56 @@ def dotenv() -> Dict[str, str]:
 # --------------------------------------------------------------------------- #
 # 配置
 # --------------------------------------------------------------------------- #
+def _providers_layer():
+    """惰性拿到 providers 适配层。
+
+    生成的项目里 providers/ 与 runtime_sdk.py 同级；在平台内则挂在 app 包下。
+    拿不到时返回 None，调用方回退到内置的本地实现。
+    """
+    try:
+        import providers as layer  # 项目内
+        return layer
+    except ImportError:
+        pass
+    try:
+        from app import providers as layer  # 平台内
+        return layer
+    except ImportError:
+        return None
+
+
+def _apply_secret_env(cfg: Dict[str, Any], env_name: str) -> Dict[str, Any]:
+    """把 api_key_env 指向的密钥从环境变量 / .env 里补进配置。"""
+    if not env_name:
+        return cfg
+    value = os.environ.get(env_name) or _file_env().get(env_name, "")
+    if value:
+        cfg = dict(cfg)
+        cfg["api_key"] = value
+    return cfg
+
+
+_FILE_ENV: Optional[Dict[str, str]] = None
+
+
+def _file_env() -> Dict[str, str]:
+    """读项目内的 .env（导出后独立运行时用）。"""
+    global _FILE_ENV
+    if _FILE_ENV is not None:
+        return _FILE_ENV
+    data: Dict[str, str] = {}
+    env_file = PROJECT_DIR / ".env"
+    if env_file.exists():
+        for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            data[k.strip()] = v.strip().strip('"').strip("'")
+    _FILE_ENV = data
+    return data
+
+
 def load_config() -> Dict[str, Any]:
     cfg: Dict[str, Any] = {
         "provider": "openai",
@@ -90,15 +146,7 @@ def load_config() -> Dict[str, Any]:
         "max_tokens": 2048,
     }
     # 项目内 .env（导出后独立运行用）
-    env_file = PROJECT_DIR / ".env"
-    file_env: Dict[str, str] = {}
-    if env_file.exists():
-        for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            k, v = line.split("=", 1)
-            file_env[k.strip()] = v.strip().strip('"').strip("'")
+    file_env: Dict[str, str] = _file_env()
     if CONFIG_FILE.exists():
         try:
             cfg.update(json.loads(CONFIG_FILE.read_text(encoding="utf-8")))
@@ -307,7 +355,10 @@ class NodeContext:
                  payload: Any, state: Dict[str, Any], run_id: str = "",
                  org: Optional[Dict[str, Any]] = None,
                  model_override: Optional[Dict[str, Any]] = None,
-                 delegate_fn: Optional[Callable[[str, Any], Any]] = None):
+                 delegate_fn: Optional[Callable[[str, Any], Any]] = None,
+                 embedding_config: Optional[Dict[str, Any]] = None,
+                 vector_config: Optional[Dict[str, Any]] = None,
+                 data_config: Optional[Dict[str, Any]] = None):
         self.node_id = node_id
         self.node_name = node_name
         self.kind = kind
@@ -321,6 +372,34 @@ class NodeContext:
         self._model_override = model_override or {}
         self._delegate_fn = delegate_fn
         self.cfg = self._effective_config()
+        # 向量模型 / 向量库 / 数据源：节点参数 > 传入的配置 > config.json
+        self.embedding_config = self._provider_cfg(
+            "embedding", embedding_config, self.params.get("embedding"))
+        self.vector_config = self._provider_cfg(
+            "vector", vector_config, self.params.get("vector_store") or self.params.get("vector"))
+        self.data_config = self._provider_cfg("data", data_config, self.params.get("data"))
+        self._store_cache: Optional[Any] = None
+
+    def _provider_cfg(self, section: str, explicit: Optional[Dict[str, Any]],
+                      from_params: Optional[Any]) -> Dict[str, Any]:
+        """按 节点参数 → 显式传入 → config.json 的优先级合并一份 provider 配置。"""
+        merged: Dict[str, Any] = {}
+        base = self.config.get(section)
+        if isinstance(base, dict):
+            merged.update(base)
+        if isinstance(explicit, dict):
+            merged.update(explicit)
+        if isinstance(from_params, dict):
+            merged.update(from_params)
+        elif isinstance(from_params, str) and from_params.strip():
+            # 节点里只填了个名字：去 config.json 的同名清单里找
+            named = (self.config.get(section + "_named") or {}).get(from_params.strip())
+            if isinstance(named, dict):
+                merged.update(named)
+        if not merged:
+            return {}
+        env_name = merged.get("api_key_env") or ""
+        return _apply_secret_env(merged, str(env_name))
 
     def _effective_config(self) -> Dict[str, Any]:
         """节点级模型配置优先于项目 config.json。"""
@@ -928,8 +1007,67 @@ class NodeContext:
         return out
 
     # ---- 向量 ----
+    @property
+    def has_embedding(self) -> bool:
+        """是否配了真实向量模型（否则用内置哈希向量兜底）。"""
+        return bool(self.embedding_config.get("model"))
+
     def embed(self, text: str) -> List[float]:
-        return local_embed(text)
+        """把一条文本转成向量。
+
+        配了真实向量模型就走它；没配才回退到内置的 256 维哈希向量。
+        配了但调用失败会抛错，不静默降级——否则索引和查询可能落在不同空间。
+        """
+        return self.embed_many([text])[0] if text or text == "" else []
+
+    def embed_many(self, texts: List[str], input_type: str = "document") -> List[List[float]]:
+        items = [t if isinstance(t, str) else str(t) for t in (texts or [])]
+        if not items:
+            return []
+        if not self.has_embedding:
+            if not self.state.get("__embed_warned__"):
+                self.state["__embed_warned__"] = True
+                self.log("没有配置向量模型，使用内置哈希向量（结果只适合演示）", "warn")
+            return [local_embed(t) for t in items]
+        layer = _providers_layer()
+        if layer is None:
+            raise RuntimeError("providers 适配层缺失，无法调用向量模型")
+        return layer.embed_texts(self.embedding_config, items, input_type=input_type)
+
+    def _vector_store(self):
+        """按配置造一个向量库适配器；没配就返回 None（走内置 SQLite 老路径）。"""
+        if self._store_cache is not None:
+            return self._store_cache or None
+        if not self.vector_config:
+            self._store_cache = False
+            return None
+        layer = _providers_layer()
+        if layer is None:
+            raise RuntimeError("providers 适配层缺失，无法连接向量库")
+        cfg = dict(self.vector_config)
+        cfg.setdefault("base_dir", str(PROJECT_DIR))
+        self._store_cache = layer.get_store(cfg)
+        return self._store_cache
+
+    @property
+    def vector_collection(self) -> str:
+        return str(self.vector_config.get("collection") or "default")
+
+    def use_collection(self, name: str) -> None:
+        """临时切到另一个集合（节点参数里指定集合名时用）。"""
+        if not name:
+            return
+        self.vector_config = {**self.vector_config, "collection": str(name)}
+        self._store_cache = None
+
+    def _ensure_store_collection(self, dim: int) -> None:
+        store = self._vector_store()
+        if store is None:
+            return
+        store.ensure_collection(
+            self.vector_collection, dim,
+            self.vector_config.get("metric", "cosine"),
+            self.embedding_config.get("model", ""))
 
     def retrieve(self, query: str, top_k: int = 4, folders: Optional[List[str]] = None,
                  mode: str = "hybrid") -> List[Dict[str, Any]]:
@@ -1248,27 +1386,95 @@ class NodeContext:
         window.append(now)
         self.state["__rate__"] = window[-per_minute:]
 
-    def vector_upsert(self, text: str) -> Dict[str, Any]:
-        store = _open_store()
-        store.execute("CREATE TABLE IF NOT EXISTS vectors(id TEXT, text TEXT, vec TEXT)", ())
-        vid = f"{self.node_id}-{int(time.time() * 1000)}"
-        store.execute("INSERT INTO vectors VALUES(?,?,?)",
-                      (vid, text, json.dumps(local_embed(text))))
-        store.commit()
-        return {"id": vid, "stored": True}
+    def vector_upsert(self, text: str, metadata: Optional[Dict[str, Any]] = None,
+                      doc_id: str = "") -> Dict[str, Any]:
+        """写入一条向量。配了外部向量库就写它，否则写内置 SQLite 表。"""
+        vec = self.embed(text)
+        store = self._vector_store()
+        if store is None:
+            # 内置兜底：保持老表结构不变，老项目不受影响
+            db = _open_store()
+            db.execute("CREATE TABLE IF NOT EXISTS vectors(id TEXT, text TEXT, vec TEXT)", ())
+            vid = doc_id or f"{self.node_id}-{int(time.time() * 1000)}"
+            db.execute("INSERT INTO vectors VALUES(?,?,?)",
+                       (vid, text, json.dumps(vec)))
+            db.commit()
+            return {"id": vid, "stored": True, "backend": "sqlite"}
 
-    def vector_search(self, query: str, top_k: int = 4) -> List[Dict[str, Any]]:
-        store = _open_store()
-        store.execute("CREATE TABLE IF NOT EXISTS vectors(id TEXT, text TEXT, vec TEXT)", ())
-        qv = local_embed(query)
-        out = []
-        for vid, text, vec in store.execute("SELECT id, text, vec FROM vectors").fetchall():
-            out.append({"id": vid, "text": text, "score": round(cosine(qv, json.loads(vec)), 4)})
-        out.sort(key=lambda x: x["score"], reverse=True)
-        return out[:top_k]
+        self._ensure_store_collection(len(vec))
+        vid = doc_id or f"{self.node_id}-{int(time.time() * 1000)}"
+        store.upsert(self.vector_collection, [{
+            "id": vid, "text": text, "vector": vec, "metadata": metadata or {},
+        }])
+        return {"id": vid, "stored": True, "backend": store.protocol,
+                "collection": self.vector_collection}
 
-    # ---- 执行类 ----
+    def vector_search(self, query: str, top_k: int = 4,
+                      where: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        """按相似度取回最相关的若干条。"""
+        store = self._vector_store()
+        if store is None:
+            db = _open_store()
+            db.execute("CREATE TABLE IF NOT EXISTS vectors(id TEXT, text TEXT, vec TEXT)", ())
+            qvec = self.embed(query)
+            out = []
+            for vid, text, vec in db.execute("SELECT id, text, vec FROM vectors").fetchall():
+                out.append({"id": vid, "text": text,
+                            "score": round(cosine(qvec, json.loads(vec)), 4)})
+            out.sort(key=lambda x: x["score"], reverse=True)
+            return out[:top_k]
+
+        qvec = self.embed_many([query], input_type="query")[0]
+        return store.search(self.vector_collection, qvec, top_k=top_k, where=where)
+
+    def vector_delete(self, ids: List[str]) -> int:
+        store = self._vector_store()
+        if store is None:
+            return 0
+        return store.delete(self.vector_collection, ids)
+
+    def vector_store_drop(self, name: str = "") -> bool:
+        """清空整个集合（换 embedding 模型后必须重建索引时用）。"""
+        store = self._vector_store()
+        if store is None:
+            return False
+        store.drop(name or self.vector_collection)
+        return True
+
+    # ---- 数据源（业务库 / 文档库 / 图库 / 缓存） ----
+    def _data_db(self):
+        if not self.data_config:
+            return None
+        layer = _providers_layer()
+        if layer is None:
+            raise RuntimeError("providers 适配层缺失，无法连接数据源")
+        cfg = dict(self.data_config)
+        cfg.setdefault("base_dir", str(PROJECT_DIR))
+        return layer.get_database(cfg)
+
+    def query_data(self, statement: str, limit: int = 100,
+                   params: Optional[Any] = None) -> List[Dict[str, Any]]:
+        """读数据源。SQL / Cypher / Redis 命令 / Mongo filter JSON 都走这里。"""
+        db = self._data_db()
+        if db is None:
+            return self.query_sql(statement)
+        return db.query(statement, params=params, limit=limit)
+
+    def write_data(self, statement: str, params: Optional[Any] = None) -> int:
+        """写数据源（DDL / INSERT / UPDATE / Cypher 写 / Redis 写命令）。"""
+        db = self._data_db()
+        if db is None:
+            raise RuntimeError("还没有配置数据源，无法执行写操作")
+        return db.write(statement, params=params)
+
+    def data_tables(self) -> List[str]:
+        db = self._data_db()
+        return db.collections() if db is not None else []
+
+    # ---- 执行类（统一走 sandbox.py，只有一处需要审）----
     def exec_python(self, code: str, timeout: float = 30.0) -> Dict[str, str]:
+        if _sandbox is not None:
+            return _sandbox.run_python(code, timeout=timeout)
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "snippet.py"
             path.write_text(code, encoding="utf-8")
@@ -1281,6 +1487,8 @@ class NodeContext:
                 return {"stdout": "", "stderr": f"执行超时（{timeout}s）"}
 
     def shell(self, command: str, timeout: float = 60.0) -> Dict[str, str]:
+        if _sandbox is not None:
+            return _sandbox.run_shell(command, timeout=timeout)
         proc = subprocess.run(command, shell=True, capture_output=True, text=True,
                               timeout=timeout, cwd=str(PROJECT_DIR),
                               encoding="utf-8", errors="replace")
@@ -1453,6 +1661,68 @@ class NodeContext:
                          payload=payload, timeout=120)
 
 
+# --------------------------------------------------------------------------- #
+# 项目级快捷函数：给生成的原生 agent.py 用
+# --------------------------------------------------------------------------- #
+_SHARED_CTX: Optional["NodeContext"] = None
+
+
+def _shared_context() -> "NodeContext":
+    """读 config.json 里的 embedding / vector / data 三段，造一个共享上下文。
+
+    原生 agent.py 里的节点是 `def xxx(state) -> dict`，没有 ctx。
+    这些函数让它们复用同一套 provider 适配层，
+    保证「内置 runner 预览」和「原生代码」行为一致。
+    """
+    global _SHARED_CTX
+    if _SHARED_CTX is None:
+        cfg = load_config()
+        _SHARED_CTX = NodeContext(
+            node_id="__shared__", node_name="__shared__", kind="shared",
+            params={}, payload="", state={},
+            embedding_config=cfg.get("embedding"),
+            vector_config=cfg.get("vector"),
+            data_config=cfg.get("data"),
+        )
+    return _SHARED_CTX
+
+
+def project_embed(text: str, input_type: str = "document") -> List[float]:
+    """把文本转成向量（读项目 config.json 的向量模型配置）。"""
+    ctx = _shared_context()
+    return ctx.embed_many([text], input_type=input_type)[0]
+
+
+def project_vector_upsert(text: str, metadata: Optional[Dict[str, Any]] = None,
+                          doc_id: str = "") -> Dict[str, Any]:
+    return _shared_context().vector_upsert(text, metadata=metadata, doc_id=doc_id)
+
+
+def project_vector_search(query: str, top_k: int = 4,
+                          where: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    return _shared_context().vector_search(query, top_k=top_k, where=where)
+
+
+def project_vector_collection() -> str:
+    return _shared_context().vector_collection
+
+
+def project_use_collection(name: str) -> None:
+    """切到另一个集合（节点参数里指定集合名时用）。"""
+    _shared_context().use_collection(name)
+
+
+def project_retrieve(query: str, top_k: int = 4, mode: str = "hybrid",
+                     folders: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    """从项目内文件（skills/ docs/ outputs/）召回片段。"""
+    return _shared_context().retrieve(query, top_k=top_k, mode=mode,
+                                      folders=folders)
+
+
+def project_query_data(statement: str, limit: int = 100) -> List[Dict[str, Any]]:
+    return _shared_context().query_data(statement, limit=limit)
+
+
 def _chunk(text: str, size: int) -> List[str]:
     text = text.strip()
     if not text:
@@ -1478,5 +1748,7 @@ def _open_store():
     global _STORE
     import sqlite3
     if _STORE is None:
-        _STORE = sqlite3.connect(PROJECT_DIR / ".store.db")
+        # 节点可能在别的线程里执行，连接不能绑死在创建它的线程上
+        _STORE = sqlite3.connect(PROJECT_DIR / ".store.db",
+                                 check_same_thread=False)
     return _STORE
