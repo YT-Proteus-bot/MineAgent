@@ -602,6 +602,32 @@ results = ctx.delegate_many(
 常驻调度（Router 7×24 监听 IM / GitHub 事件、Watchdog 自恢复）属于**服务层**，
 目前只在服务设置里预留了并发、超时、断点续跑等配置项，事件源接入还没做。
 
+### 主流编排架构画布
+
+项目里预置了 14 张对照画布，把市面上的编排框架还原成节点图，可以直接打开做对比：
+
+**开源**：LangGraph 状态图、CrewAI 角色流水线、CrewAI 层级模式、AutoGen 对话驱动、
+MetaGPT 软件公司、Dify Chatflow、n8n 自动化流水线、Flowise 可视化 RAG、
+Langflow 线性链、SmolAgents 代码行动
+
+**闭源**：OpenAI Agent Builder、AWS Bedrock Agents、字节 Coze Bot、DeepSeek Super-agent
+
+每张画布的节点都带真实可运行的实现，不是空壳：
+
+| 节点 | 原生模式下的实现 |
+|---|---|
+| `critic` | 让模型按标准挑问题，返回评审意见 + 是否通过 |
+| `self_check` | 逐条核对输出，返回问题清单和 ok 标志 |
+| `merge` | 多路结果保序去重合并 |
+| `intent_recognizer` | 结构化输出意图 + 置信度 |
+| `doc_loader` | 真读 pdf/docx/md/csv；输入不是文件时按正文处理 |
+| `text_splitter` | 按块大小和重叠切分 |
+| `vector_indexer` | 写进项目内 SQLite 的 chunks 表 |
+| `hybrid_retriever` | 从 chunks 表按相关度取回片段 |
+
+生成脚本见 [tools/build_framework_blueprints.py](tools/build_framework_blueprints.py)，
+批量运行与验证见 [tools/regen_and_run.py](tools/regen_and_run.py)。
+
 | 分类 | 节点 |
 | --- | --- |
 | 输入输出 | `input` 输入、`output` 输出 |

@@ -13,9 +13,19 @@ from typing import Any, Dict, List, Tuple
 from ..tool_presets import TOOL_PRESETS
 
 ROUTE_KINDS = {"router", "condition", "branch", "switch"}
+# 这些框架没有专属 codegen，统一生成 LangGraph/StateGraph 代码（header 也是 LangChain）
+_LANGGRAPH_FRAMEWORKS = {
+    "langchain", "langgraph", "custom", "dify", "metagpt",
+    "openai_agents", "smolagents", "agno", "semantic_kernel",
+}
+
 TOOL_KINDS = {
     "tool", "function", "mcp_tool", "crewai_tool", "http_request", "web_search",
     "code_interpreter", "sql_query", "rag_retriever", "file_io", "browser", "shell",
+}
+AGENT_KINDS = {
+    "agent", "worker", "supervisor", "autogen_assistant", "crewai_agent",
+    "group_chat", "debate",
 }
 LLM_KINDS = {
     "llm", "planner", "observation", "review_observation", "reflect", "critique",
@@ -280,7 +290,35 @@ def _block_llm(node: Dict[str, Any]) -> str:
     )
 
 
-def _block_agent(node: Dict[str, Any]) -> str:
+def _agent_tool_ids(spec: Dict[str, Any], node_id: str) -> List[str]:
+    """这个 agent 实际能用的工具：从它出发 BFS，遇到 tool 收下，遇到别的 agent 停。
+
+    必须和预览执行器 runner.GraphRunner.tools_for 完全一致——同一张画布在
+    「预览」和「原生」两种模式下，每个 agent 可见的工具列表不能有两套答案。
+    """
+    by_source: Dict[str, List[str]] = {}
+    for e in spec.get("edges", []):
+        by_source.setdefault(e["source"], []).append(e["target"])
+    kinds = {n["id"]: _kind_of(n) for n in spec.get("nodes", [])}
+    found: List[str] = []
+    seen = {node_id}
+    queue = [node_id]
+    while queue:
+        cur = queue.pop(0)
+        for tid in by_source.get(cur, []):
+            if tid in seen:
+                continue
+            seen.add(tid)
+            kind = kinds.get(tid)
+            if kind in TOOL_KINDS:
+                found.append(tid)
+                queue.append(tid)
+            elif kind in AGENT_KINDS:
+                continue  # 不跨 agent 借用工具
+    return found
+
+
+def _block_agent(node: Dict[str, Any], spec: Dict[str, Any] | None = None) -> str:
     fn = _pyid(node["name"])
     p = _params(node)
     mode = _text(p, "mode", "react")
@@ -289,6 +327,8 @@ def _block_agent(node: Dict[str, Any]) -> str:
         "你是一个能调用工具的智能体。回答前先想清楚需要哪些信息，"
         "必要时调用工具，最后给出最终答案。"
     )
+    # 每个 agent 只拿自己下游的工具；没有 spec（单独生成节点块）时退回全量
+    tools_var = f"TOOLS_{fn}" if spec else "TOOLS"
     return (
         f"def {fn}(state: AgentState) -> dict:\n"
         f'    """{node.get("label") or "Agent"} —— 推理模式：{mode}，最多 {max_steps} 步。"""\n'
@@ -296,11 +336,11 @@ def _block_agent(node: Dict[str, Any]) -> str:
         f'    origin = state.get("user_input", "")\n'
         f"    if origin and origin != task:\n"
         f'        task = f"{{origin}}\\n\\n## 上一轮观察 / 反馈\\n{{task}}\\n\\n请结合原始问题作答。"\n'
-        f"    agent = create_agent(\n"
+        f"    agent = _get_agent({_q(node['id'])}, lambda: create_agent(\n"
         f"        model={_llm_var(node)},\n"
-        f"        tools=TOOLS,\n"
+        f"        tools={tools_var},\n"
         f"        system_prompt={_q(system)},\n"
-        f"    )\n"
+        f"    ))\n"
         f"    try:\n"
         f"        answer = _agent_stream(agent, task, {_q(node['id'])}, {_q(node['name'])},\n"
         f"                               {max_steps * 2 + 2})\n"
@@ -322,7 +362,10 @@ def _block_router(node: Dict[str, Any]) -> str:
         _text(p, "expression") or _text(p, "condition") or _text(p, "rule")
         or _text(p, "question") or "该请求是否需要调用工具？"
     )
-    max_loops = int(_num(p, "max_loops", 0))
+    # 循环上限：默认给 4 次，避免画布上没填这个参数时第一轮就被"强制收敛"
+    max_loops = int(_num(p, "max_loops", 4))
+    # 超限后走哪条边：默认 false（多数画布用它做出口），可在节点参数里改成 true
+    exit_handle = "true" if str(_text(p, "exit_handle", "false")).lower() == "true" else "false"
     llm_var = _llm_var(node)
     name = _q(node["name"])
     nid = _q(node["id"])
@@ -338,13 +381,214 @@ def _block_router(node: Dict[str, Any]) -> str:
         f'    branch = "true" if verdict.startswith("true") else "false"\n'
         f'    rounds = int(state.get("loop_count") or 0) + 1\n'
         f"    max_loops = {max_loops}\n"
-        f'    if branch == "false" and rounds > max_loops:\n'
-        f'        branch = "true"\n'
+        f'    if rounds > max_loops and branch != {_q(exit_handle)}:\n'
+        f'        branch = {_q(exit_handle)}\n'
         f'        _emit({{"event": "log", "level": "warn", "node": {nid}, "name": {name},\n'
-        f'               "message": f"已到循环上限 {{max_loops}} 次，强制收敛"}})\n'
+        f'               "message": f"已到循环上限 {{max_loops}} 次，强制走出口"}})\n'
         f'    _emit({{"event": "route", "node": {nid}, "name": {name},\n'
         f'           "branch": branch, "reason": _brief(verdict, 120)}})\n'
         f'    return {{"data": text, "route": branch, "loop_count": rounds}}\n'
+    )
+
+
+def _block_critic(node: Dict[str, Any]) -> str:
+    """评审：让模型按给定标准挑毛病，并给出通过与否。"""
+    fn = _pyid(node["name"])
+    p = _params(node)
+    standard = _q(_text(p, "standard", "准确性、完整性、可用性"))
+    llm_var = _llm_var(node)
+    return (
+        f"def {fn}(state: AgentState) -> dict:\n"
+        f'    """{node.get("label") or "评审"} —— 按标准挑问题并判定是否通过。"""\n'
+        f'    text = str(state.get("data", ""))\n'
+        f"    standard = {standard}\n"
+        f"    review = {llm_var}.invoke([\n"
+        f'        {{"role": "system", "content": "你是严格的评审者。先列问题，再判定是否通过。"}},\n'
+        f'        {{"role": "user", "content": f"评审标准：{{standard}}\\n\\n待审内容：\\n{{text}}"}},\n'
+        f"    ]).content.strip()\n"
+        f'    passed = "不通过" not in review\n'
+        f'    _emit({{"event": "log", "node": {_q(node["id"])}, "name": {_q(node["name"])},\n'
+        f'           "message": "评审结论：" + ("通过" if passed else "不通过")}})\n'
+        f'    return {{"data": text, "review": review, "passed": passed}}\n'
+    )
+
+
+def _block_self_check(node: Dict[str, Any]) -> str:
+    """自检：确认输出是否满足约束，不满足就把问题带出去。"""
+    fn = _pyid(node["name"])
+    p = _params(node)
+    checks = _q(_text(p, "checks", "是否回答了原问题、是否有自相矛盾、是否包含未经验证的断言"))
+    llm_var = _llm_var(node)
+    return (
+        f"def {fn}(state: AgentState) -> dict:\n"
+        f'    """{node.get("label") or "自检"} —— 逐条核对输出，返回问题清单。"""\n'
+        f'    text = str(state.get("data", ""))\n'
+        f"    checks = {checks}\n"
+        f"    verdict = {llm_var}.invoke([\n"
+        f'        {{"role": "system", "content": "你是质检员，只输出发现的问题，没问题就输出 OK。"}},\n'
+        f'        {{"role": "user", "content": f"检查项：{{checks}}\\n\\n内容：\\n{{text}}"}},\n'
+        f"    ]).content.strip()\n"
+        f'    ok = verdict.upper().startswith("OK")\n'
+        f'    return {{"data": text, "check_result": verdict, "ok": ok}}\n'
+    )
+
+
+def _block_merge(node: Dict[str, Any]) -> str:
+    """合并：把上游几路结果拼成一份（保序、去重、按分隔符）。"""
+    fn = _pyid(node["name"])
+    p = _params(node)
+    sep = _text(p, "separator", "\n\n")
+    return (
+        f"def {fn}(state: AgentState) -> dict:\n"
+        f'    """{node.get("label") or "汇总"} —— 把多路结果合并成一份。"""\n'
+        f"    items = state.get(\"results\")\n"
+        f'    if not items:\n'
+        f'        items = [state.get("data", "")]\n'
+        f'    if isinstance(items, str):\n'
+        f"        items = [items]\n"
+        f'    parts, seen = [], set()\n'
+        f"    for it in items:\n"
+        f'        s = it if isinstance(it, str) else json.dumps(it, ensure_ascii=False)\n'
+        f"        s = (s or \"\").strip()\n"
+        f"        if s and s not in seen:\n"
+        f"            seen.add(s)\n"
+        f"            parts.append(s)\n"
+        f'    merged = {_q(sep)}.join(parts)\n'
+        f'    return {{"data": merged, "merged_count": len(parts)}}\n'
+    )
+
+
+def _block_system_prompt(node: Dict[str, Any]) -> str:
+    """系统提示词：按人设生成一段稳定的 system prompt，供后续节点复用。"""
+    fn = _pyid(node["name"])
+    p = _params(node)
+    persona = _q(_text(p, "persona", "你是一名严谨、务实的助手。"))
+    llm_var = _llm_var(node)
+    return (
+        f"def {fn}(state: AgentState) -> dict:\n"
+        f'    """{node.get("label") or "系统提示词"} —— 生成并放进 state，供下游复用。"""\n'
+        f"    base = {persona}\n"
+        f'    task = str(state.get("data", ""))\n'
+        f"    prompt = {llm_var}.invoke([\n"
+        f'        {{"role": "system", "content": "擅长写提示词，输出一段可直接使用的 system prompt。"}},\n'
+        f'        {{"role": "user", "content": f"人设：{{base}}\\n本次任务：{{task}}\\n请据此写出 system prompt。"}},\n'
+        f"    ]).content.strip()\n"
+        f'    return {{"data": task, "system_prompt": prompt}}\n'
+    )
+
+
+def _block_intent(node: Dict[str, Any]) -> str:
+    """意图识别：让模型从预定义意图里选一个，并给出置信度。"""
+    fn = _pyid(node["name"])
+    p = _params(node)
+    intents = p.get("intents") or ["咨询", "任务执行", "闲聊", "投诉", "其他"]
+    if not isinstance(intents, list):
+        intents = ["咨询", "任务执行", "闲聊", "投诉", "其他"]
+    llm_var = _llm_var(node)
+    return (
+        f"def {fn}(state: AgentState) -> dict:\n"
+        f'    """{node.get("label") or "意图识别"} —— 归到预定义意图之一。"""\n'
+        f'    text = str(state.get("data", ""))\n'
+        f"    intents = {json.dumps(intents, ensure_ascii=False)}\n"
+        f"    raw = {llm_var}.bind(temperature=0).invoke([\n"
+        f'        {{"role": "system", "content": "只输出 JSON，不要多余文字。"}},\n'
+        f'        {{"role": "user", "content": f"可选意图：{{intents}}\\n\\n用户输入：{{text}}\\n\\n"\n'
+        f'                                       "只输出 JSON：intent 填其中一个，confidence 填 0 到 1 的数"}},\n'
+        f"    ]).content\n"
+        f"    info = _parse_json(raw, {{}})\n"
+        f'    intent = str(info.get("intent") or "").strip()\n'
+        f"    if intent not in intents:\n"
+        f"        intent = next((i for i in intents if i in text), intents[-1])\n"
+        f"    try:\n"
+        f'        conf = float(info.get("confidence") or 0)\n'
+        f"    except (TypeError, ValueError):\n"
+        f"        conf = 0.0\n"
+        f'    return {{"data": text, "intent": intent, "confidence": conf}}\n'
+    )
+
+
+def _block_doc_loader(node: Dict[str, Any]) -> str:
+    fn = _pyid(node["name"])
+    p = _params(node)
+    default_path = _q(_text(p, "path", ""))
+    return (
+        f"def {fn}(state: AgentState) -> dict:\n"
+        f'    """{node.get("label") or "文档加载"} —— 把文本类文档读成纯文本。"""\n'
+        f"    from pathlib import Path as _Path\n"
+        f"    raw_path = {default_path} or str(state.get(\"data\", \"\")).strip()\n"
+        f"    if not raw_path:\n"
+        f'        raise ValueError("doc_loader 需要文件路径（参数 path 或输入内容）")\n'
+        f"    path = _Path(raw_path)\n"
+        f"    if not path.is_absolute():\n"
+        f"        path = _Path(__file__).resolve().parent / path\n"
+        f"    # 输入不是可读文件时，把它当成已经加载好的正文，链路照样能往下走\n"
+        f"    if not path.exists():\n"
+        f'        _emit({{"event": "log", "level": "warn", "node": {_q(node["id"])},\n'
+        f'               "name": {_q(node["name"])}, "message": "输入不是文件，按正文处理"}})\n'
+        f'        return {{"data": raw_path, "source": "inline"}}\n'
+        f"    suffix = path.suffix.lower()\n"
+        f'    if suffix == ".pdf":\n'
+        f'        try:\n'
+        f"            from pypdf import PdfReader\n"
+        f"        except ImportError as exc:\n"
+        f'            raise RuntimeError("读 PDF 需要 pypdf：pip install pypdf") from exc\n'
+        f'        text = "\\n".join((pg.extract_text() or "") for pg in PdfReader(str(path)).pages)\n'
+        f'    elif suffix == ".docx":\n'
+        f"        try:\n"
+        f"            import docx\n"
+        f"        except ImportError as exc:\n"
+        f'            raise RuntimeError("读 docx 需要 python-docx：pip install python-docx") from exc\n'
+        f'        text = "\\n".join(p_.text for p_ in docx.Document(str(path)).paragraphs)\n'
+        f"    else:\n"
+        f'        text = path.read_text(encoding="utf-8", errors="replace")\n'
+        f'    _emit({{"event": "log", "node": {_q(node["id"])}, "name": {_q(node["name"])},\n'
+        f'           "message": f"已读取 {{path.name}}，{{len(text)}} 字符"}})\n'
+        f'    return {{"data": text, "source": str(path.name)}}\n'
+    )
+
+
+def _block_splitter(node: Dict[str, Any]) -> str:
+    fn = _pyid(node["name"])
+    p = _params(node)
+    size = int(_num(p, "chunk_size", 600))
+    overlap = int(_num(p, "overlap", 80))
+    return (
+        f"def {fn}(state: AgentState) -> dict:\n"
+        f'    """{node.get("label") or "文本切分"} —— 按段落切块，带重叠。"""\n'
+        f'    text = str(state.get("data", ""))\n'
+        f"    size, overlap_chars = {size}, {overlap}\n"
+        f"    step = max(1, size - overlap_chars)\n"
+        f"    chunks = [text[i:i + size] for i in range(0, len(text), step)] if text else []\n"
+        f"    chunks = [c.strip() for c in chunks if c.strip()]\n"
+        f'    _emit({{"event": "log", "node": {_q(node["id"])}, "name": {_q(node["name"])},\n'
+        f'           "message": f"切成 {{len(chunks)}} 块"}})\n'
+        f'    return {{"data": chunks, "chunk_count": len(chunks)}}\n'
+    )
+
+
+def _block_indexer(node: Dict[str, Any]) -> str:
+    fn = _pyid(node["name"])
+    return (
+        f"def {fn}(state: AgentState) -> dict:\n"
+        f'    """{node.get("label") or "向量入库"} —— 把文本块写进项目内的 SQLite 索引。"""\n'
+        f"    import json as _json\n"
+        f"    import sqlite3\n"
+        f"    from pathlib import Path as _Path\n"
+        f"\n"
+        f"    data = state.get(\"data\")\n"
+        f"    chunks = data if isinstance(data, list) else [str(data or \"\")]\n"
+        f"    chunks = [c for c in chunks if str(c).strip()]\n"
+        f'    db = _Path(__file__).resolve().parent / ".store.db"\n'
+        f"    conn = sqlite3.connect(db)\n"
+        f"    conn.execute(\"CREATE TABLE IF NOT EXISTS chunks(id INTEGER PRIMARY KEY, text TEXT)\")\n"
+        f"    for c in chunks:\n"
+        f"        conn.execute(\"INSERT INTO chunks(text) VALUES(?)\", (str(c),))\n"
+        f"    conn.commit()\n"
+        f"    total = conn.execute(\"SELECT COUNT(*) FROM chunks\").fetchone()[0]\n"
+        f"    conn.close()\n"
+        f'    _emit({{"event": "log", "node": {_q(node["id"])}, "name": {_q(node["name"])},\n'
+        f'           "message": f"入库 {{len(chunks)}} 块，库里共 {{total}} 块"}})\n'
+        f'    return {{"data": chunks, "indexed": len(chunks), "total": total}}\n'
     )
 
 
@@ -354,15 +598,37 @@ def _block_retriever(node: Dict[str, Any]) -> str:
     top_k = int(_num(p, "top_k", 4))
     return (
         f"def {fn}(state: AgentState) -> dict:\n"
-        f'    """{node.get("label") or "检索"} —— 从向量库取回最相关的片段。"""\n'
-        f"    # 需要的话在这里初始化你的向量库，例如：\n"
-        f"    #   from langchain_chroma import Chroma\n"
-        f"    #   vectorstore = Chroma(persist_directory=\".store\", embedding_function=embeddings)\n"
-        f"    #   retriever = vectorstore.as_retriever(search_kwargs={{\"k\": {top_k}}})\n"
-        f"    query = state.get(\"data\", \"\")\n"
-        f"    docs = []  # retriever.invoke(query)\n"
-        f"    context = \"\\n\\n\".join(getattr(d, \"page_content\", str(d)) for d in docs)\n"
-        f'    return {{"data": context or query}}\n'
+        f'    """{node.get("label") or "检索"} —— 从项目内的 .store.db 里按相关度取片段。\n'
+        f"\n"
+        f"    这里给的是可运行的关键词 + 字符重合方案；想换成真正的向量库，\n"
+        f"    把 _score 换成 embedding 余弦即可，接口不用改。\n"
+        f'    """\n'
+        f"    import sqlite3\n"
+        f"    from pathlib import Path as _Path\n"
+        f"\n"
+        f'    query = str(state.get("data", ""))\n'
+        f"    top_k = {top_k}\n"
+        f'    db = _Path(__file__).resolve().parent / ".store.db"\n'
+        f"    if not db.exists():\n"
+        f'        _emit({{"event": "log", "level": "warn", "node": {_q(node["id"])},\n'
+        f'               "name": {_q(node["name"])}, "message": "索引库还不存在，先跑一次入库"}})\n'
+        f'        return {{"data": query, "docs": []}}\n'
+        f"    conn = sqlite3.connect(db)\n"
+        f"    rows = conn.execute(\"SELECT text FROM chunks\").fetchall()\n"
+        f"    conn.close()\n"
+        f"    q_tokens = set(query.lower().split())\n"
+        f"\n"
+        f"    def _score(text: str) -> float:\n"
+        f"        low = text.lower()\n"
+        f"        hit = sum(1 for w in q_tokens if w and w in low)\n"
+        f"        return hit / (len(q_tokens) or 1) + (0.5 if query and query in low else 0)\n"
+        f"\n"
+        f"    ranked = sorted(((t, _score(t)) for (t,) in rows), key=lambda x: x[1], reverse=True)\n"
+        f"    picked = [t for t, s in ranked[:top_k] if s > 0]\n"
+        f'    context = "\\n\\n".join(picked)\n'
+        f'    _emit({{"event": "retrieval", "node": {_q(node["id"])}, "name": {_q(node["name"])},\n'
+        f'           "count": len(picked)}})\n'
+        f'    return {{"data": context or query, "docs": picked, "hit": len(picked)}}\n'
     )
 
 
@@ -480,7 +746,7 @@ def _block_generic(node: Dict[str, Any]) -> str:
     )
 
 
-def node_block(node: Dict[str, Any]) -> str:
+def node_block(node: Dict[str, Any], spec: Dict[str, Any] | None = None) -> str:
     """生成单个节点在 agent.py 里的代码块。"""
     kind = _kind_of(node)
     header = _block_header(node)
@@ -492,11 +758,28 @@ def node_block(node: Dict[str, Any]) -> str:
         body = _block_output(node)
     elif kind in ("wiki_ingest", "wiki_query"):
         body = _block_wiki(node)
+    elif kind == "critic":
+        body = _block_critic(node)
+    elif kind == "self_check":
+        body = _block_self_check(node)
+    elif kind in ("merge", "join"):
+        body = _block_merge(node)
+    elif kind == "system_prompt":
+        body = _block_system_prompt(node)
+    elif kind == "intent_recognizer":
+        body = _block_intent(node)
+    elif kind == "doc_loader":
+        body = _block_doc_loader(node)
+    elif kind in ("text_splitter", "chunker"):
+        body = _block_splitter(node)
+    elif kind in ("vector_indexer", "embedding", "vector_store"):
+        body = _block_indexer(node)
     elif kind in TOOL_KINDS:
         body = _block_tool(node)
     elif kind in ROUTE_KINDS:
         body = _block_router(node)
-    elif kind in ("retriever", "vector_retriever", "rag"):
+    elif kind in ("retriever", "vector_retriever", "rag", "rag_retriever",
+                  "hybrid_retriever", "bm25_search"):
         body = _block_retriever(node)
     elif kind in ("dataset_reader", "dataset"):
         body = _block_dataset(node)
@@ -504,7 +787,7 @@ def node_block(node: Dict[str, Any]) -> str:
         body = _block_memory(node)
     elif kind == "agent" or kind in ("supervisor", "worker", "autogen_assistant",
                                      "crewai_agent", "group_chat", "debate"):
-        body = _block_agent(node)
+        body = _block_agent(node, spec)
     elif kind in LLM_KINDS:
         body = _block_llm(node)
     else:
@@ -536,7 +819,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Annotated, Any, TypedDict
 
 from langchain.agents import create_agent
 from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
@@ -554,6 +837,10 @@ llm = ChatOpenAI(
     api_key=os.environ.get("MINEAGENT_API_KEY") or "EMPTY",
     temperature=CFG.get("temperature", 0.3),
     max_tokens=CFG.get("max_tokens", 2048),
+    # 超时必须在 HTTP 层生效：节点级 _track 的超时只是兜底，
+    # 真正能中断请求的是这里（默认 120s，可用环境变量覆盖）
+    timeout=float(os.environ.get("MINEAGENT_LLM_TIMEOUT") or 120),
+    max_retries=int(os.environ.get("MINEAGENT_LLM_MAX_RETRIES") or 2),
 )
 
 # ── 运行事件：每个节点执行前后的输入/输出都回传给网页运行面板 ──────
@@ -565,6 +852,33 @@ def _emit(event: dict) -> None:
         print(EVENT_PREFIX + json.dumps(event, ensure_ascii=False, default=str), flush=True)
     except Exception:  # noqa: BLE001
         pass
+
+
+def _parse_json(text: str, default: Any = None) -> Any:
+    """从模型输出里尽力抠出 JSON（允许带 ```json 包裹或前后废话）。"""
+    raw = (text or "").strip()
+    if not raw:
+        return default if default is not None else {}
+    fence = raw.find("```")
+    if fence >= 0:
+        body = raw[fence + 3:]
+        if body.lstrip().lower().startswith("json"):
+            body = body.lstrip()[4:]
+        end = body.find("```")
+        raw = body[:end] if end >= 0 else body
+        raw = raw.strip()
+    try:
+        return json.loads(raw)
+    except Exception:
+        pass
+    start = min([i for i in (raw.find("{"), raw.find("[")) if i >= 0] or [-1])
+    end = max(raw.rfind("}"), raw.rfind("]"))
+    if start >= 0 and end > start:
+        try:
+            return json.loads(raw[start:end + 1])
+        except Exception:
+            pass
+    return default if default is not None else {}
 
 
 def _brief(value: Any, limit: int = 1500) -> Any:
@@ -617,27 +931,38 @@ def _agent_stream(agent, task: str, node_id: str = "", name: str = "",
 
 
 def _run_with_timeout(fn, state, timeout_s: float):
-    """给同步节点加超时：放到线程里跑，超时抛 TimeoutError。"""
+    """给同步节点加超时。
+
+    超时后立刻把控制权交回调用方：cancel + shutdown(wait=False)，
+    不再同步等一个仍卡在网络上的调用。真正的硬中断由模型客户端自己的
+    timeout（环境变量 MINEAGENT_LLM_TIMEOUT）兜底。
+    """
     from concurrent.futures import ThreadPoolExecutor
     from concurrent.futures import TimeoutError as FutureTimeout
 
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(fn, state)
-        try:
-            return future.result(timeout=timeout_s)
-        except FutureTimeout:
-            raise TimeoutError(f"节点执行超时（>{timeout_s:g}s）") from None
+    pool = ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(fn, state)
+    try:
+        return future.result(timeout=timeout_s)
+    except FutureTimeout:
+        future.cancel()
+        raise TimeoutError(f"节点执行超时（>{timeout_s:g}s）") from None
+    finally:
+        pool.shutdown(wait=False)
 
 
 def _retryable(exc: Exception) -> bool:
-    """只有网络 / 限流 / 超时这类瞬时错误才值得重试。"""
+    """只有网络 / 限流 / 服务端 5xx 这类明确可重放的错误才值得重试。
+
+    超时不重试：那次调用可能还在服务端跑，重试等于重复计费。
+    """
     if isinstance(exc, TimeoutError):
-        return True
+        return False
     name = type(exc).__name__.lower()
-    if any(k in name for k in ("timeout", "connection", "ratelimit")):
+    if any(k in name for k in ("connection", "ratelimit")):
         return True
     text = str(exc).lower()
-    return any(k in text for k in ("timeout", "timed out", "429", "503", "connection reset"))
+    return any(k in text for k in ("429", "503", "connection reset", "connection aborted"))
 
 
 def _track(fn, node_id: str, name: str = "", label: str = "", kind: str = "llm",
@@ -704,16 +1029,37 @@ def _track(fn, node_id: str, name: str = "", label: str = "", kind: str = "llm",
     return wrapped
 
 
-class AgentState(TypedDict, total=False):
-    """整张图共享的状态：data 在节点之间流动，route 承载分支信号。"""
+def _merge_value(old: Any, new: Any) -> Any:
+    """并行分支同时写同一个键时，用后到的值覆盖，不抛 InvalidUpdateError。"""
+    return new if new is not None else old
 
-    data: Any
-    route: str
-    history: list
-    trace: list
-    answer: Any
-    loop_count: int
-    user_input: str
+
+class AgentState(TypedDict, total=False):
+    """整张图共享的状态：data 在节点之间流动，route 承载分支信号。
+
+    并行分支（一个节点连多条出边）会同时回写，所以这些键都挂了合并函数，
+    否则 LangGraph 会报 "Can receive only one value per step"。
+    """
+
+    data: Annotated[Any, _merge_value]
+    route: Annotated[str, _merge_value]
+    history: Annotated[list, _merge_value]
+    trace: Annotated[list, _merge_value]
+    answer: Annotated[Any, _merge_value]
+    loop_count: Annotated[int, _merge_value]
+    user_input: Annotated[str, _merge_value]
+
+
+# ── agent 实例缓存：工具集和 system prompt 都是静态的，没必要每次调用重建 ──
+_AGENTS: dict = {}
+
+
+def _get_agent(key: str, build):
+    agent = _AGENTS.get(key)
+    if agent is None:
+        agent = build()
+        _AGENTS[key] = agent
+    return agent
 
 
 '''
@@ -731,7 +1077,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Annotated, Any, TypedDict
 
 from autogen import AssistantAgent, GroupChat, GroupChatManager, UserProxyAgent
 from openai import OpenAI
@@ -776,7 +1122,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Annotated, Any, TypedDict
 
 from crewai import Agent, Crew, Process, Task
 from crewai.tools import tool
@@ -859,14 +1205,29 @@ def _graph_section(spec: Dict[str, Any], framework: str) -> str:
 
     tool_names = [_pyid(nodes[i]["name"]) for i in order if _kind_of(nodes[i]) in TOOL_KINDS]
     if tool_names:
-        lines.append("# 所有工具节点汇总（agent 节点会用到）")
+        lines.append("# 全量工具（手写代码里可以直接引用；agent 默认只拿自己下游那几个）")
         lines.append(f"TOOLS = [{', '.join(tool_names)}]")
         lines.append("")
     else:
         lines.append("TOOLS: list = []")
         lines.append("")
 
-    if framework == "langchain":
+    # 每个 agent 只暴露它自己下游的工具：与预览执行器 runner.tools_for 同一套语义，
+    # 避免「检索 agent 也能看见写库工具」这种越权
+    agents_in_canvas = [nodes[i] for i in order if _kind_of(nodes[i]) in AGENT_KINDS]
+    for a in agents_in_canvas:
+        allowed = []
+        for tid in _agent_tool_ids(spec, a["id"]):
+            if tid in nodes:
+                allowed.append(_pyid(nodes[tid]["name"]))
+        lines.append(
+            f"TOOLS_{_pyid(a['name'])} = [{', '.join(allowed)}]"
+            f"  # {a.get('label') or a['name']} 可见的工具"
+        )
+    if agents_in_canvas:
+        lines.append("")
+
+    if framework in _LANGGRAPH_FRAMEWORKS:
         lines.append("builder = StateGraph(AgentState)")
         for nid in order:
             node = nodes[nid]
@@ -924,6 +1285,14 @@ def _graph_section(spec: Dict[str, Any], framework: str) -> str:
                 continue
 
             handles = {(e.get("sourceHandle") or "out") for e in normal_outs}
+            # 同一端口接了多条边：这些是并行分支，必须全部连上，
+            # 只取第一条会让下游节点变成孤岛（图跑不到终点）
+            if len(normal_outs) > 1 and len(handles) == 1 and kind not in ROUTE_KINDS:
+                for e in normal_outs:
+                    target = nodes[e["target"]]["name"]
+                    lines.append(f"builder.add_edge({_q(src_node['name'])}, {_q(target)})")
+                continue
+
             multi = len(handles) > 1 or kind in ROUTE_KINDS
             if multi:
                 mapping = {}
@@ -1016,7 +1385,7 @@ def _main_section(spec: Dict[str, Any], framework: str) -> str:
     entry = next((i for i in order if _kind_of(nodes[i]) == "input"), order[0] if order else None)
     entry_name = nodes[entry]["name"] if entry else "input"
 
-    if framework == "langchain":
+    if framework in _LANGGRAPH_FRAMEWORKS:
         body = (
             f'    config = {{"configurable": {{"thread_id": thread_id}}}} if thread_id else {{}}\n'
             f'    result = graph.invoke({{"data": user_input, "user_input": user_input, "route": ""}},\n'
@@ -1045,7 +1414,7 @@ def _main_section(spec: Dict[str, Any], framework: str) -> str:
         "    args = parser.parse_args()\n"
         "    text = args.input or input(\"请输入任务：\").strip()\n"
     )
-    if framework == "langchain":
+    if framework in _LANGGRAPH_FRAMEWORKS:
         run_main += (
             "    try:\n"
             "        answer = main(text)\n"
@@ -1113,7 +1482,7 @@ def render_agent_full(spec: Dict[str, Any], framework: str) -> tuple:
         if custom.startswith("#") and node.get("code_touched"):
             block = custom + "\n"
         else:
-            block = node_block(node)
+            block = node_block(node, spec)
         blocks.append(block)
         blocks_by_id[nid] = block.strip()
 

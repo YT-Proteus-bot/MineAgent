@@ -4,21 +4,28 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from ..config import PROJECTS_DIR
 from ..framework_templates import FRAMEWORK_INDEX
 from ..node_registry import detect_llm_usage, get_node_type
-from .native import render_agent_full
+from ..providers.bindings import (ENV_NAMES, named_bindings,
+                                  strip_secrets)
+from .graphcheck import check_code
+from .native import AGENT_KINDS, TOOL_KINDS, _kind_of, render_agent_full
 from .production import render_production_files, render_requirements_extra
 
 RUNTIME_DIR = Path(__file__).resolve().parents[1] / "runtime"
+PROVIDERS_DIR = Path(__file__).resolve().parents[1] / "providers"
 
 REQUIREMENTS = {
     # langchain 1.x：旧的 AgentExecutor / create_react_agent 已移除，改用 create_agent
     "langchain": "langchain>=1.0\nlanggraph>=1.0\nlangchain-openai>=1.0\nlangchain-core>=1.0\n",
-    "autogen": "autogen-agentchat>=0.4.0\nautogen-ext[openai]>=0.4.0\n",
+    # native.py 生成的 AutoGen 头用的是 0.2 的 `from autogen import ...` 写法，
+    # 所以这里要装 pyautogen，而不是 0.4 的 autogen-agentchat
+    "autogen": "pyautogen>=0.2.35\n",
     "crewai": "crewai>=0.60.0\n",
 }
 
@@ -383,7 +390,8 @@ if __name__ == "__main__":
 # 写项目
 # --------------------------------------------------------------------------- #
 def generate_project(name: str, slug: str, framework: str, graph: Dict[str, Any],
-                     model_config: Dict[str, Any]) -> Tuple[Path, List[str]]:
+                     model_config: Dict[str, Any],
+                     providers: Dict[str, Dict[str, Any]] | None = None) -> Tuple[Path, List[str]]:
     project_dir = PROJECTS_DIR / slug
     project_dir.mkdir(parents=True, exist_ok=True)
     nodes_dir = project_dir / "nodes"
@@ -424,9 +432,27 @@ def generate_project(name: str, slug: str, framework: str, graph: Dict[str, Any]
         shutil.copyfile(RUNTIME_DIR / fname, project_dir / fname)
         written.append(fname)
 
+    # provider 适配层：向量模型 / 向量库 / 数据源。
+    # 跟 runtime_sdk 一起走，导出的项目脱离平台也能连自己的库。
+    dst_providers = project_dir / "providers"
+    if dst_providers.exists():
+        shutil.rmtree(dst_providers, ignore_errors=True)
+    shutil.copytree(
+        PROVIDERS_DIR, dst_providers,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"))
+    written.append("providers/")
+
     # 框架入口：一整个 agent.py，就是这份画布的框架原生代码
     agent_code, node_blocks = render_agent_full(spec, framework)
     write("agent.py", agent_code)
+
+    # 生成即自检：图结构有硬伤（孤岛 / 无入边 / 工具越权）当场打出来，
+    # 不要等用户把项目跑起来才发现
+    issues = check_code(spec, agent_code, node_blocks, TOOL_KINDS, AGENT_KINDS, _kind_of)
+    if issues:
+        print(f"[codegen:{slug}] 生成自检发现 {len(issues)} 个问题", file=sys.stderr)
+        for item in issues:
+            print(f"  - {item}", file=sys.stderr)
 
     # 把每个节点在 agent.py 里的代码块写回画布数据：
     # 网页上「代码逻辑」显示的就是这段，改的也是这段
@@ -454,6 +480,28 @@ def generate_project(name: str, slug: str, framework: str, graph: Dict[str, Any]
         "max_tokens": model_config.get("max_tokens", 2048),
         "api_key_env": "MINEAGENT_API_KEY",
     }
+
+    # 向量模型 / 向量库 / 数据源：只写配置，密钥靠环境变量注入
+    runtime_providers = providers or {}
+    provider_env_lines: List[str] = []
+    for kind in ("embedding", "vector", "data"):
+        block = runtime_providers.get(kind)
+        if not block:
+            continue
+        cfg[kind] = strip_secrets(block)
+        env_name = ENV_NAMES.get(kind, f"MINEAGENT_{kind.upper()}_KEY")
+        if block.get("api_key") or block.get("password") or block.get("token"):
+            provider_env_lines.append(f"{env_name}=")
+        cfg[kind + "_env"] = env_name
+    if runtime_providers:
+        # 节点参数里可以只写个名字，到这里按名字取整份配置
+        cfg["embedding_named"] = named_bindings({"embedding": runtime_providers["embedding"]}) \
+            if runtime_providers.get("embedding") else {}
+        cfg["vector_named"] = named_bindings({"vector": runtime_providers["vector"]}) \
+            if runtime_providers.get("vector") else {}
+        cfg["data_named"] = named_bindings({"data": runtime_providers["data"]}) \
+            if runtime_providers.get("data") else {}
+
     write("config.json", json.dumps(cfg, ensure_ascii=False, indent=2))
 
     write("requirements.txt",
@@ -470,10 +518,23 @@ def generate_project(name: str, slug: str, framework: str, graph: Dict[str, Any]
         "MINEAGENT_API_KEY=sk-xxxx\n"
         f"MINEAGENT_BASE_URL={cfg['base_url']}\n"
         f"MINEAGENT_MODEL={cfg['model']}\n"
+        "\n# 模型调用超时 / 客户端重试次数（节点级超时只是兜底，这里才是硬中断）\n"
+        "MINEAGENT_LLM_TIMEOUT=120\n"
+        "MINEAGENT_LLM_MAX_RETRIES=2\n"
+        "\n# 服务鉴权 / 并发（服务设置里配过则不用改）\n"
+        "MINEAGENT_AUTH=none\n"
+        "MINEAGENT_SERVICE_KEY=\n"
+        "MINEAGENT_MAX_CONCURRENCY=4\n"
+        "\n# 向量模型 / 向量库 / 数据源的访问密钥（在网页「用户中心」配置过则不用填）\n"
+        + "".join(line + "\n" for line in provider_env_lines)
+        + "\n# 外部数据中台（服务设置 → 数据连接）\n"
+        "MINEAGENT_DATA_TOKEN=\n"
+        "# 外部评测中台（服务设置 → 评测连接）\n"
+        "MINEAGENT_EVAL_TOKEN=\n"
     )
     write(".env.example", env_example)
     write(".gitignore",
-          ".env\n.venv/\n.store.db\n__pycache__/\n*.pyc\n"
+          ".env\n.venv/\n.store.db\n*.db\n.sessions.db\n__pycache__/\n*.pyc\n"
           "outputs/*\n!outputs/.gitkeep\n")
 
     # 空目录留占位文件，保证复制 / 打包 / git 之后目录结构不丢
@@ -585,7 +646,8 @@ def _readme(name: str, slug: str, framework: str, spec: Dict[str, Any]) -> str:
         "`runtime_sdk.py`、`runner.py` 都已经放在目录里，只用 Python 标准库；",
         "只要有 Python 3.9+，换一台机器也能直接跑。",
         "",
-        "- 不要把 `nodes/` 或 `runtime_sdk.py` 拆出去单独运行",
+        "- 节点代码内联在 `agent.py` 里（不再有 `nodes/` 目录），网页上编辑的就是同一段",
+        "- 不要把 `runtime_sdk.py` / `runner.py` 拆出去单独运行",
         "- 项目目录内不要有 `__pycache__`（.gitignore 已忽略，执行器也不会生成）",
         "",
         "## 运行",
@@ -612,25 +674,45 @@ def _readme(name: str, slug: str, framework: str, spec: Dict[str, Any]) -> str:
         "## 目录",
         "",
         "```",
-        "agent.json       # 画布图定义（保存时自动覆盖）",
-        "agent.py         # 框架原生入口",
-        "runner.py        # 内置图执行器（任何画布都能跑）",
-        "runtime_sdk.py   # 节点可用的全部能力（ctx.*）",
-        "run.ps1          # Windows 一键运行",
-        "run.sh           # macOS / Linux 一键运行",
-        "nodes/           # 每个节点一个 .py，网页里编辑的就是这里",
-        "skills/          # skill.md 技能文件",
-        "config.json      # 模型配置（不含 key）",
-        "outputs/         # 运行产物",
-        ".env.example     # 复制成 .env 填 key，脱离网页独立运行用",
+        "agent.json         # 画布图定义（保存时自动覆盖）",
+        "agent.py           # 框架原生入口：一张画布 = 一个文件，节点按 ═══ 分块",
+        "runner.py          # 内置图执行器（零依赖，任何画布都能跑）",
+        "runtime_sdk.py     # 节点可用的全部能力（ctx.*）",
+        "server.py          # FastAPI 服务入口：/chat、/chat/stream、/health、/ready、/metrics",
+        "settings.py        # 服务配置（全部走环境变量）",
+        "telemetry.py       # JSON 日志 + Prometheus 指标",
+        "checkpoint.py      # 会话持久化（SQLite / Postgres）",
+        "Dockerfile         # 镜像（非 root 运行 + HEALTHCHECK）",
+        ".dockerignore      # 保证 .env 不会被打进镜像",
+        "docker-compose.yml # 一条命令起服务",
+        "integrations/      # 外部数据中台 / 评测中台连接器",
+        "tests/             # pytest 冒烟测试（不需要真实模型）",
+        "run.ps1            # Windows 一键运行",
+        "run.sh             # macOS / Linux 一键运行",
+        "skills/            # skill.md 技能文件",
+        "config.json        # 模型配置（不含 key）",
+        "outputs/           # 运行产物",
+        ".env.example       # 复制成 .env 填 key，脱离网页独立运行用",
         "```",
+        "",
+        "## 当成服务跑",
+        "",
+        "```bash",
+        "pip install -r requirements.txt",
+        "uvicorn server:app --host 0.0.0.0 --port 8000",
+        "# 或者",
+        "docker compose up --build",
+        "```",
+        "",
+        "返回里的 `usage` 是本次运行的 token 统计；`/metrics` 输出 Prometheus 文本，",
+        "`/ready` 会明确列出缺哪项配置。",
         "",
         "## 节点清单",
         "",
-        "| 节点 | 类型 | 文件 |",
-        "| --- | --- | --- |",
+        "| 节点 | 类型 |",
+        "| --- | --- |",
     ]
     for n in spec["nodes"]:
-        lines.append(f"| {n['label']} | `{n['kind']}` | `nodes/{n['file']}` |")
+        lines.append(f"| {n['label']} | `{n['kind']}` |")
     lines.append("")
     return "\n".join(lines)
