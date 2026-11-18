@@ -9,6 +9,21 @@ import {
   type NodeChange,
 } from '@xyflow/react'
 import { api, runCanvas, type RunHandle } from './api'
+import type { ConflictInfo } from './components/ConflictDialog'
+
+/** 上传模板的请求体（startUpload 与冲突重试共用） */
+export type UploadPayload = {
+  canvas_id: string
+  name: string
+  description: string
+  tags: string[]
+  author: string
+  target?: 'public' | 'private'
+  lib_id?: string
+  base_rev?: number
+  remote_slug?: string
+  force?: boolean
+}
 import type {
   AgentNode,
   AgentOrg,
@@ -23,6 +38,7 @@ import type {
   NodeStatus,
   NodeTypeDef,
   RunEvent,
+  UploadJob,
 } from './types'
 import { DEFAULT_BACKGROUND, isAgentKind } from './types'
 
@@ -180,6 +196,25 @@ export function suggestLinks(args: {
 interface AppState {
   meta: Meta | null
   canvases: CanvasSummary[]
+  uploadJobs: UploadJob[]
+  startUpload: (payload: {
+    canvas_id: string
+    name: string
+    description: string
+    tags: string[]
+    author: string
+    target?: 'public' | 'private'
+    lib_id?: string
+    base_rev?: number
+    remote_slug?: string
+    force?: boolean
+  }) => void
+  clearFinishedUploads: () => void
+  /** 同步冲突（推送 / 拉取都走这里，弹一次对话框让用户选） */
+  syncConflict: ConflictInfo | null
+  setSyncConflict: (info: ConflictInfo | null) => void
+  /** 冲突时暂存的上传参数：用户选「仍然覆盖」后拿它重试 */
+  pendingUpload: UploadPayload | null
   canvas: CanvasDetail | null
   nodes: AgentNode[]
   edges: FlowEdge[]
@@ -215,6 +250,7 @@ interface AppState {
   refreshCanvases: () => Promise<void>
   setBackground: (patch: Partial<CanvasBackground>) => Promise<void>
   setServiceConfig: (service: any) => void
+  applyToolPreset: (nodeId: string, preset: string) => Promise<void>
   uploadBackground: (file: File) => Promise<void>
   removeBackgroundImage: () => Promise<void>
   validateNow: () => Promise<void>
@@ -361,6 +397,9 @@ function edgeLabelFromHandle(handle?: string | null): string | undefined {
 export const useStore = create<AppState>((set, get) => ({
   meta: null,
   canvases: [],
+  uploadJobs: [],
+  syncConflict: null,
+  pendingUpload: null,
   canvas: null,
   nodes: [],
   edges: [],
@@ -370,8 +409,7 @@ export const useStore = create<AppState>((set, get) => ({
   highlightedNodeIds: [],
   dirty: false,
   saving: false,
-  lastSaved: '',
-  running: false,
+  lastSaved: '',  running: false,
   runEvents: [],
   runOutput: '',
   runStream: null,
@@ -511,6 +549,53 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
+  startUpload: (payload) => {
+    const id = `up-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+    const job: UploadJob = {
+      id,
+      canvasId: payload.canvas_id,
+      name: payload.name,
+      status: 'running',
+      prUrl: '',
+    }
+    set((state) => ({ uploadJobs: [...state.uploadJobs, job] }))
+    api
+      .publishTemplate(payload)
+      .then((res) => {
+        set((state) => ({
+          uploadJobs: state.uploadJobs.map((j) =>
+            j.id === id ? { ...j, status: 'ok', prUrl: res.pr_url || res.commit_url || '' } : j,
+          ),
+        }))
+        get().toast(`「${payload.name}」上传成功，已创建 PR`, 'ok')
+      })
+      .catch((e: any) => {
+        // 409 + kind=remote-changed：远端在你上次同步后变了，交给冲突对话框处理
+        if (e?.status === 409 && e?.detail?.kind === 'remote-changed') {
+          set((state) => ({
+            syncConflict: e.detail as ConflictInfo,
+            pendingUpload: payload,
+            uploadJobs: state.uploadJobs.map((j) =>
+              j.id === id ? { ...j, status: 'error', error: '远端已更新' } : j,
+            ),
+          }))
+          return
+        }
+        set((state) => ({
+          uploadJobs: state.uploadJobs.map((j) =>
+            j.id === id ? { ...j, status: 'error', error: e.message || String(e) } : j,
+          ),
+        }))
+        get().toast(`「${payload.name}」上传失败：${e.message || e}`, 'err')
+      })
+  },
+
+  setSyncConflict: (info) => set({ syncConflict: info }),
+
+  clearFinishedUploads: () => {
+    set((state) => ({ uploadJobs: state.uploadJobs.filter((j) => j.status === 'running') }))
+  },
+
   setBackground: async (patch) => {
     const canvas = get().canvas
     if (!canvas) return
@@ -531,6 +616,34 @@ export const useStore = create<AppState>((set, get) => ({
       canvas: { ...canvas, graph: { ...canvas.graph, service } },
       dirty: true,
     })
+  },
+
+  applyToolPreset: async (nodeId, preset) => {
+    const canvas = get().canvas
+    if (!canvas) return
+    try {
+      const res = await api.applyToolPreset(canvas.id, nodeId, preset)
+      set({
+        nodes: get().nodes.map((n) =>
+          n.id === nodeId
+            ? {
+                ...n,
+                data: {
+                  ...n.data,
+                  code: res.code,
+                  preview_code: res.preview_code,
+                  code_touched: false,
+                  params: res.params,
+                },
+              }
+            : n,
+        ),
+        dirty: true,
+      })
+      get().toast(`已应用内置工具：${res.label}`, 'ok')
+    } catch (err: any) {
+      get().toast(`应用工具失败：${err.message || err}`, 'err')
+    }
   },
 
   uploadBackground: async (file) => {

@@ -1,6 +1,7 @@
 """社区模板路由：GitHub 连接、发布 PR、模板列表与加载。"""
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 import uuid
@@ -131,13 +132,100 @@ def publish(payload: Dict[str, Any]):
         "mode": row["mode"] or "",
         "node_count": len(graph.get("nodes") or []),
         "created_at": now_iso(),
+        # 版本对比用：画布唯一 id、画布最后修改时间、图内容哈希
+        "canvas_id": canvas_id,
+        "canvas_updated_at": row["updated_at"],
+        "graph_hash": community.graph_hash(graph),
+        # rev 在下面冲突检测之后按"远端第几版"补上
+        "rev": 0,
     }
+    lib_id = str(payload.get("lib_id") or "")
+    lib = community.lib_by_id(lib_id) if lib_id else None
+    if lib_id and not lib:
+        raise HTTPException(404, "模板库不存在")
+    if not lib:
+        # 没指定库：用这张画布绑定的库
+        lib = community.lib_by_id(community.canvas_lib(canvas_id))
+    if not lib:
+        # 兜底：沿用旧的公共社区仓库配置
+        conf = community.cfg()
+        if not conf["repo"]:
+            raise HTTPException(400, "还没有配置模板库（用户中心 → 模板库）")
+        lib = {
+            "id": "", "name": "社区", "kind": "public",
+            "repo": conf["repo"], "branch": conf["branch"], "dir": conf["dir"],
+        }
+    target = "private" if lib.get("kind") == "private" else "public"
+    private_conf = lib
+    if target == "public":
+        # 同一张画布已有未合入的 PR 时，不允许重复上传（前端也会拦，这里防直接调 API）
+        try:
+            pending = community.pending_prs()
+        except Exception:  # noqa: BLE001
+            pending = []
+        blocked = any(
+            (p.get("canvas_id") and p["canvas_id"] == canvas_id)
+            or (not p.get("canvas_id") and p.get("name") == meta["name"])
+            for p in pending
+        )
+        if blocked:
+            raise HTTPException(409, "这张画布已有未合入的 PR，请先到 GitHub 撤销或等待合入")
+
+    # ---- 冲突检测：本地记住的远端版本 vs 远端当前版本 ----
+    # 只有「这张画布之前同步过某个模板」才需要比对；首次上传没有基线，直接走新增流程。
+    base_rev = int(payload.get("base_rev") or 0)
+    remote_slug = str(payload.get("remote_slug") or row["remote_slug"] or "").strip()
+    remote_rev = 0
+    # force=True 表示用户在冲突对话框里明确选了"仍然覆盖"
+    force = bool(payload.get("force"))
+    if remote_slug and base_rev > 0 and not force:
+        remote_meta: Dict[str, Any] = {}
+        try:
+            remote_meta = community.fetch_meta(remote_slug, conf=private_conf)
+        except Exception:  # noqa: BLE001  远端读不到就当作模板还不存在
+            remote_meta = {}
+        remote_rev = int(remote_meta.get("rev") or 0)
+        if remote_rev and remote_rev != base_rev:
+            raise HTTPException(409, {
+                "kind": "remote-changed",
+                "message": (f"远端模板在你上次同步之后又更新了"
+                            f"（你的是第 {base_rev} 版，远端现在是第 {remote_rev} 版）"),
+                "remote_slug": remote_slug,
+                "base_rev": base_rev,
+                "remote_rev": remote_rev,
+                "remote_updated_at": remote_meta.get("updated_at", ""),
+                "remote_author": remote_meta.get("author", ""),
+            })
+
+    # 版本号：更新已有模板就 +1，首次上传从 1 开始
+    meta["rev"] = (remote_rev + 1) if (remote_slug and remote_rev) else 1
+    meta["updated_at"] = now_iso()
+
     try:
-        result = community.publish(row, graph, meta, project_dir)
+        result = community.publish(
+            row, graph, meta, project_dir,
+            target=target, conf_override=private_conf,
+            slug_override=remote_slug if (remote_slug and (base_rev > 0 or force)) else "",
+        )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except community.GitHubError as exc:
         raise HTTPException(502, str(exc)) from exc
+
+    # 推送成功后记住这次同步的版本，下次才能判断"远端有没有被别人改过"
+    applied_slug = str(result.get("slug") or meta.get("slug") or "").strip()
+    next_rev = int(meta.get("rev") or 0) or ((int(remote_rev) + 1) if remote_slug else 1)
+    try:
+        with get_conn() as conn:
+            conn.execute(
+                "UPDATE canvases SET remote_slug = ?, remote_rev = ?, base_graph_hash = ? "
+                "WHERE id = ?",
+                (applied_slug, next_rev, community.graph_hash(graph), canvas_id),
+            )
+    except Exception:  # noqa: BLE001  记忆失败不影响本次推送结果
+        pass
+    result["rev"] = next_rev
+    result["remote_slug"] = applied_slug
     return result
 
 
@@ -149,18 +237,27 @@ def templates():
     return {"ok": True, "configured": True, "templates": community.list_templates()}
 
 
-@router.post("/load")
-def load_template(payload: Dict[str, Any]):
-    slug = str(payload.get("slug") or "").strip()
-    if not slug:
-        raise HTTPException(400, "缺少模板 slug")
-    try:
-        data = community.fetch_template(slug)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    except community.GitHubError as exc:
-        raise HTTPException(502, f"下载模板失败：{exc}") from exc
+@router.get("/pending")
+def pending():
+    """已上传、PR 还没合入的模板名（上传弹窗里标「已上传待合入」）。"""
+    conf = community.cfg()
+    if not conf["repo"]:
+        return {"ok": True, "pending": []}
+    return {"ok": True, "pending": community.pending_prs()}
 
+
+@router.get("/canvas-status")
+def canvas_status():
+    """公共模板元信息 + 全部 PR 状态，给上传弹窗做版本对比和 PR 状态展示。"""
+    conf = community.cfg()
+    if not conf["repo"]:
+        return {"ok": True, "templates": [], "prs": []}
+    data = community.canvas_status()
+    return {"ok": True, **data}
+
+
+def _install_template(data: Dict[str, Any]) -> Dict[str, Any]:
+    """把模板（meta + graph）安装成一张新画布。公共/私人模板共用。"""
     meta = data["meta"]
     try:
         graph = Graph(**data["graph"])
@@ -169,7 +266,7 @@ def load_template(payload: Dict[str, Any]):
     graph_dict = graph.model_dump()
     graph_dict["background"] = CanvasBackground().model_dump()
 
-    name = str(meta.get("name") or slug).strip() or slug
+    name = str(meta.get("name") or meta.get("slug") or "模板").strip() or "模板"
     framework = str(meta.get("framework") or "langchain")
     canvas_id = uuid.uuid4().hex
     with get_conn() as conn:
@@ -199,3 +296,233 @@ def load_template(payload: Dict[str, Any]):
             raise HTTPException(500, f"生成项目代码失败：{exc}") from exc
         row = _fetch(conn, canvas_id)
     return {"ok": True, "canvas": _detail(row)}
+
+
+def _private_conf(canvas_id: str) -> Dict[str, Any]:
+    conf = community.private_settings(canvas_id)
+    if not conf["repo"]:
+        raise HTTPException(400, "这张画布还没有配置私人模板库")
+    return conf
+
+
+@router.get("/libs")
+def list_libs():
+    """用户中心配置的所有模板库（公共 / 私人，可多个）。"""
+    return {"ok": True, "libs": community.template_libs()}
+
+
+@router.put("/libs")
+def save_libs(payload: Dict[str, Any]):
+    try:
+        libs = community.save_template_libs(payload.get("libs") or [])
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "libs": libs}
+
+
+@router.get("/canvas-lib")
+def read_canvas_lib(canvas_id: str):
+    return {"ok": True, "lib_id": community.canvas_lib(canvas_id)}
+
+
+@router.put("/canvas-lib")
+def write_canvas_lib(payload: Dict[str, Any]):
+    canvas_id = str(payload.get("canvas_id") or "")
+    lib_id = str(payload.get("lib_id") or "")
+    if not canvas_id:
+        raise HTTPException(400, "缺少 canvas_id")
+    if lib_id and not community.lib_by_id(lib_id):
+        raise HTTPException(400, "模板库不存在")
+    return {"ok": True, "lib_id": community.save_canvas_lib(canvas_id, lib_id)}
+
+
+@router.get("/lib-templates")
+def lib_templates(lib_id: str):
+    lib = community.lib_by_id(lib_id)
+    if not lib:
+        raise HTTPException(404, "模板库不存在")
+    return {"ok": True, "lib": lib, "templates": community.list_templates(lib)}
+
+
+@router.post("/lib-load")
+def lib_load(payload: Dict[str, Any]):
+    lib_id = str(payload.get("lib_id") or "")
+    slug = str(payload.get("slug") or "").strip()
+    lib = community.lib_by_id(lib_id)
+    if not lib:
+        raise HTTPException(404, "模板库不存在")
+    if not slug:
+        raise HTTPException(400, "缺少模板 slug")
+    try:
+        data = community.fetch_template(slug, lib)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except community.GitHubError as exc:
+        raise HTTPException(502, f"下载模板失败：{exc}") from exc
+    return _install_template(data)
+
+
+@router.get("/private-config")
+def read_private_config(canvas_id: str):
+    return {"ok": True, **community.private_settings(canvas_id)}
+
+
+@router.put("/private-config")
+def write_private_config(payload: Dict[str, Any]):
+    canvas_id = str(payload.get("canvas_id") or "")
+    if not canvas_id:
+        raise HTTPException(400, "缺少 canvas_id")
+    try:
+        conf = community.save_private_settings(canvas_id, payload)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, **conf}
+
+
+@router.get("/private-templates")
+def private_templates(canvas_id: str):
+    conf = _private_conf(canvas_id)
+    return {"ok": True, "templates": community.list_templates(conf)}
+
+
+@router.post("/private-load")
+def private_load(payload: Dict[str, Any]):
+    canvas_id = str(payload.get("canvas_id") or "")
+    slug = str(payload.get("slug") or "").strip()
+    if not canvas_id or not slug:
+        raise HTTPException(400, "缺少 canvas_id 或 slug")
+    conf = _private_conf(canvas_id)
+    try:
+        data = community.fetch_template(slug, conf)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except community.GitHubError as exc:
+        raise HTTPException(502, f"下载模板失败：{exc}") from exc
+    return _install_template(data)
+
+
+@router.post("/load")
+def load_template(payload: Dict[str, Any]):
+    """加载社区模板。
+
+    mode=new（默认）：新建一张画布
+    mode=update：用远端内容更新已有画布，会先检查本地有没有未同步的改动
+    """
+    slug = str(payload.get("slug") or "").strip()
+    if not slug:
+        raise HTTPException(400, "缺少模板 slug")
+    mode = str(payload.get("mode") or "new").lower()
+    if mode == "update":
+        return _update_from_template(slug, payload)
+    try:
+        data = community.fetch_template(slug)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except community.GitHubError as exc:
+        raise HTTPException(502, f"下载模板失败：{exc}") from exc
+    return _install_template(data)
+
+
+def _update_from_template(slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """用远端模板覆盖已有画布。本地有未同步改动时，除非显式 force，否则拒绝。"""
+    canvas_id = str(payload.get("canvas_id") or "").strip()
+    if not canvas_id:
+        raise HTTPException(400, "更新模式需要 canvas_id")
+    force = bool(payload.get("force"))
+
+    with get_conn() as conn:
+        row = _fetch(conn, canvas_id)
+    local_graph = json.loads(row["graph"] or "{}")
+    base_hash = str(row["base_graph_hash"] or "")
+    local_hash = community.graph_hash(local_graph)
+    local_changed = bool(base_hash) and local_hash != base_hash
+
+    if local_changed and not force:
+        raise HTTPException(409, {
+            "kind": "local-changed",
+            "message": "本地这张画布有还没同步到远端的修改，直接覆盖会丢掉它们",
+            "canvas_id": canvas_id,
+            "canvas_name": row["name"],
+            "remote_slug": slug,
+            "local_rev": int(row["remote_rev"] or 0),
+            "base_hash": base_hash,
+            "local_hash": local_hash,
+        })
+
+    try:
+        data = community.fetch_template(slug)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except community.GitHubError as exc:
+        raise HTTPException(502, f"下载模板失败：{exc}") from exc
+
+    meta = data.get("meta") or {}
+    try:
+        graph = Graph(**data["graph"]).model_dump()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, f"模板画布格式不合法：{exc}") from exc
+    graph["background"] = row["background"] and json.loads(
+        row["background"] or "{}") or CanvasBackground().model_dump()
+
+    remote_rev = int(meta.get("rev") or 1)
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE canvases SET graph = ?, framework = ?, mode = ?, name = ?, updated_at = ? "
+            "WHERE id = ?",
+            (json.dumps(graph, ensure_ascii=False), str(meta.get("framework") or row["framework"]),
+             str(meta.get("mode") or row["mode"] or ""),
+             str(meta.get("name") or row["name"]), now_iso(), canvas_id),
+        )
+        try:
+            _persist(conn, canvas_id, graph)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(500, f"生成项目代码失败：{exc}") from exc
+        conn.execute(
+            "UPDATE canvases SET remote_slug = ?, remote_rev = ?, base_graph_hash = ? WHERE id = ?",
+            (slug, remote_rev, community.graph_hash(graph), canvas_id),
+        )
+        updated = _fetch(conn, canvas_id)
+    return {"ok": True, "mode": "update", "rev": remote_rev, "canvas": _detail(updated)}
+
+
+@router.get("/sync-status/{canvas_id}")
+def sync_status(canvas_id: str):
+    """本地画布和它绑定的远端模板，各自有没有新变化。"""
+    with get_conn() as conn:
+        row = _fetch(conn, canvas_id)
+    graph = json.loads(row["graph"] or "{}")
+    local_hash = community.graph_hash(graph)
+    remote_slug = str(row["remote_slug"] or "")
+
+    if not remote_slug:
+        return {"ok": True, "linked": False,
+                "local_changed": False, "remote_changed": False}
+
+    # 本地有没有改动只看本地数据，不依赖网络；远端读不到时也要告诉用户本地状态
+    base_hash = str(row["base_graph_hash"] or "")
+    local_changed = bool(base_hash) and local_hash != base_hash
+    local_rev = int(row["remote_rev"] or 0)
+
+    try:
+        meta = community.fetch_meta(remote_slug)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "ok": False, "linked": True, "remote_slug": remote_slug,
+            "local_changed": local_changed, "remote_changed": False,
+            "local_rev": local_rev, "local_hash": local_hash,
+            "error": f"读不到远端模板：{exc}",
+        }
+
+    remote_rev = int(meta.get("rev") or 1)
+    return {
+        "ok": True,
+        "linked": True,
+        "remote_slug": remote_slug,
+        "local_rev": local_rev,
+        "remote_rev": remote_rev,
+        "local_changed": local_changed,
+        "remote_changed": remote_rev > local_rev,
+        "local_hash": local_hash,
+        "remote_hash": str(meta.get("graph_hash") or ""),
+        "remote_updated_at": meta.get("updated_at", ""),
+    }

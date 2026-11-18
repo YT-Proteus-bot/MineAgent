@@ -1,12 +1,15 @@
 import { useEffect, useState } from 'react'
 import { ReactFlowProvider } from '@xyflow/react'
-import { useStore } from './store'
+import { useStore, type UploadPayload } from './store'
 import TopBar from './components/TopBar'
 import FlowCanvas from './components/FlowCanvas'
 import AgentChatPanel from './components/AgentChatPanel'
 import NodeInspector from './components/NodeInspector'
 import RunPanel from './components/RunPanel'
+import UploadJobsPanel from './components/UploadJobsPanel'
+import ConflictDialog, { type ConflictChoice } from './components/ConflictDialog'
 import { CanvasModelModal, UserCenterModal } from './components/SettingsModals'
+import { api } from './api'
 
 export default function App() {
   const init = useStore((s) => s.init)
@@ -23,6 +26,77 @@ export default function App() {
 
   const [userCenterOpen, setUserCenterOpen] = useState(false)
   const [canvasModelOpen, setCanvasModelOpen] = useState(false)
+
+  const syncConflict = useStore((s) => s.syncConflict)
+  const setSyncConflict = useStore((s) => s.setSyncConflict)
+  const pendingUpload = useStore((s) => s.pendingUpload)
+  const startUpload = useStore((s) => s.startUpload)
+  const loadCanvas = useStore((s) => s.loadCanvas)
+  const refreshCanvases = useStore((s) => s.refreshCanvases)
+
+  /** 冲突对话框的选择：不自动合并，按用户选的动作执行 */
+  const onConflictChoose = async (choice: ConflictChoice) => {
+    const info = syncConflict
+    if (!info || choice === 'cancel') {
+      setSyncConflict(null)
+      return
+    }
+
+    if (info.kind === 'remote-changed') {
+      if (choice === 'overwrite' && pendingUpload) {
+        startUpload({
+          ...(pendingUpload as UploadPayload),
+          force: true,
+          base_rev: info.base_rev,
+          remote_slug: info.remote_slug,
+        })
+        toast('已按你的选择覆盖推送', 'info')
+      } else if (choice === 'pull-first') {
+        toast('请到用户中心 → 公共模板里拉取最新版，合并后再推送', 'info')
+      }
+      setSyncConflict(null)
+      return
+    }
+
+    // local-changed：拉取会覆盖本地
+    if (choice === 'overwrite' && info.remote_slug) {
+      try {
+        const res = await api.loadCommunityTemplate(info.remote_slug, {
+          mode: 'update',
+          canvasId: info.canvas_id,
+          force: true,
+        })
+        await loadCanvas(res.canvas.id)
+        await refreshCanvases()
+        toast('已用远端版本覆盖本地画布', 'ok')
+      } catch (e: any) {
+        toast(`覆盖失败：${e.message || e}`, 'err')
+      }
+    } else if (choice === 'save-as-new' && info.remote_slug) {
+      try {
+        // 先把本地当前内容另存成一张新画布，再更新原画布
+        const src = await api.getCanvas(info.canvas_id!)
+        const copy = await api.createCanvas(`${src.name}（本地副本）`, src.framework)
+        await api.saveCanvas(copy.id, {
+          nodes: src.graph.nodes,
+          edges: src.graph.edges,
+          viewport: src.graph.viewport,
+          background: src.background,
+        })
+        const res = await api.loadCommunityTemplate(info.remote_slug, {
+          mode: 'update',
+          canvasId: info.canvas_id,
+          force: true,
+        })
+        await loadCanvas(res.canvas.id)
+        await refreshCanvases()
+        toast('本地修改已另存为新画布，原画布已更新为远端版本', 'ok')
+      } catch (e: any) {
+        toast(`处理失败：${e.message || e}`, 'err')
+      }
+    }
+    setSyncConflict(null)
+  }
 
   useEffect(() => {
     init()
@@ -127,6 +201,7 @@ export default function App() {
         </aside>
       </div>
       <RunPanel />
+      <UploadJobsPanel />
 
       <div className="toasts">
         {toasts.map((t) => (
@@ -138,6 +213,13 @@ export default function App() {
 
       {userCenterOpen && <UserCenterModal onClose={() => setUserCenterOpen(false)} />}
       {canvasModelOpen && <CanvasModelModal onClose={() => setCanvasModelOpen(false)} />}
+      {syncConflict && (
+        <ConflictDialog
+          info={syncConflict}
+          onChoose={onConflictChoose}
+          onClose={() => setSyncConflict(null)}
+        />
+      )}
     </div>
   )
 }

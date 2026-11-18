@@ -16,7 +16,6 @@ ROUTE_KINDS = {"router", "condition", "branch", "switch"}
 # 这些框架没有专属 codegen，统一生成 LangGraph/StateGraph 代码（header 也是 LangChain）
 _LANGGRAPH_FRAMEWORKS = {
     "langchain", "langgraph", "custom", "dify", "metagpt",
-    "openai_agents", "smolagents", "agno", "semantic_kernel",
 }
 
 TOOL_KINDS = {
@@ -42,8 +41,20 @@ def _q(text: str) -> str:
     return json.dumps(text or "", ensure_ascii=False)
 
 
+def _ascii_id(text: str, fallback: str = "agent") -> str:
+    """只保留 ASCII 字母数字和 `_` / `-`。
+
+    有些框架（如 Semantic Kernel）要求 agent 名匹配 `^[0-9A-Za-z_-]+$`，
+    中文节点名会直接校验失败，所以生成时统一转一下。
+    """
+    out = []
+    for ch in str(text or ""):
+        out.append(ch if (ch.isascii() and (ch.isalnum() or ch in "_-")) else "_")
+    ident = "".join(out).strip("_-")
+    return (ident or fallback)[:48]
+
+
 def _pyid(name: str) -> str:
-    """把节点名变成合法的 Python 标识符。"""
     out = []
     for ch in name or "":
         if ch.isalnum() or ch == "_":
@@ -909,9 +920,14 @@ _HEADER_LANGCHAIN = '''"""{name} · {framework_label}
 from __future__ import annotations
 
 import contextvars
+import functools
+import hashlib
 import json
 import os
+import sqlite3
+import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Annotated, Any, TypedDict
 
@@ -981,6 +997,80 @@ class _UsageHandler(BaseCallbackHandler):
 _USAGE_HANDLER = _UsageHandler()
 
 
+# ── trace id：一次请求一个，日志和节点事件都带上，方便串起整条链路 ──
+_TRACE = contextvars.ContextVar("mineagent_trace", default="")
+
+
+def set_trace_id(value: str) -> None:
+    _TRACE.set(str(value or ""))
+
+
+def get_trace_id() -> str:
+    return _TRACE.get() or ""
+
+
+# ── 工具幂等：同一次运行里、同样参数只真正执行一次，重跑直接回放上次结果 ──
+_RUN_ID = uuid.uuid4().hex[:12]
+_IDEM_DB = HERE / ".store.db"
+_MISS = object()
+
+
+def _idem_key(node_id: str, arguments: dict) -> str:
+    raw = json.dumps({"run": get_trace_id() or _RUN_ID, "node": node_id, "args": arguments},
+                     ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _idem_read(key: str):
+    try:
+        conn = sqlite3.connect(str(_IDEM_DB), timeout=5)
+        try:
+            conn.execute("CREATE TABLE IF NOT EXISTS tool_calls("
+                         "key TEXT PRIMARY KEY, result TEXT, ts REAL)")
+            row = conn.execute("SELECT result FROM tool_calls WHERE key=?", (key,)).fetchone()
+        finally:
+            conn.close()
+        return json.loads(row[0]) if row else _MISS
+    except Exception:  # noqa: BLE001
+        return _MISS
+
+
+def _idem_write(key: str, value) -> None:
+    try:
+        conn = sqlite3.connect(str(_IDEM_DB), timeout=5)
+        try:
+            conn.execute("CREATE TABLE IF NOT EXISTS tool_calls("
+                         "key TEXT PRIMARY KEY, result TEXT, ts REAL)")
+            conn.execute("INSERT OR REPLACE INTO tool_calls VALUES(?,?,?)",
+                         (key, json.dumps(value, ensure_ascii=False, default=str), time.time()))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def idempotent(node_id: str):
+    """给工具加幂等：同一次运行内相同参数不再重复产生副作用。"""
+
+    def decorate(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            key = _idem_key(node_id, {"args": list(args), "kwargs": kwargs})
+            hit = _idem_read(key)
+            if hit is not _MISS:
+                _emit({"event": "log", "level": "info", "node": node_id,
+                       "message": "幂等命中，复用上次结果"})
+                return hit
+            result = fn(*args, **kwargs)
+            _idem_write(key, result)
+            return result
+
+        return wrapper
+
+    return decorate
+
+
 # ── 模型：key 从环境变量或 .env 读，不写死在代码里 ──────────────
 llm = ChatOpenAI(
     model=os.environ.get("MINEAGENT_MODEL") or CFG.get("model", "deepseek-chat"),
@@ -1005,6 +1095,8 @@ EVENT_PREFIX = "@@EVENT@@"
 
 def _emit(event: dict) -> None:
     try:
+        if "trace_id" not in event:
+            event = {**event, "trace_id": get_trace_id()}
         print(EVENT_PREFIX + json.dumps(event, ensure_ascii=False, default=str), flush=True)
     except Exception:  # noqa: BLE001
         pass
@@ -1327,6 +1419,117 @@ HEADERS = {
     "crewai": _HEADER_CREWAI,
 }
 
+# 非 LangGraph 框架在通用 header 后面追加自己的 import 与客户端初始化。
+# 节点块仍然用 langchain 的 @tool / create_agent / ChatPromptTemplate（它们是
+# 框架无关的「步骤实现」），编排层才换成目标框架的原生对象。
+_FRAMEWORK_HEADER_EXTRA = {
+    "smolagents": '''
+# ── smolagents：节点用 langchain 实现，编排与推理循环交给 smolagents ──
+from smolagents import OpenAIServerModel, Tool, ToolCallingAgent
+
+smol_model = OpenAIServerModel(
+    model_id=os.environ.get("MINEAGENT_MODEL") or CFG.get("model", "gpt-4o-mini"),
+    api_base=os.environ.get("MINEAGENT_BASE_URL") or CFG.get("base_url"),
+    api_key=os.environ.get("MINEAGENT_API_KEY") or "EMPTY",
+)
+
+
+def as_smol_tool(lc_tool) -> Tool:
+    """把 langchain 的 @tool 包成 smolagents 的 Tool。"""
+    class _Wrap(Tool):
+        name = getattr(lc_tool, "name", "tool")
+        description = getattr(lc_tool, "description", "") or ""
+        inputs = {"query": {"type": "string", "description": "工具参数"}}
+        output_type = "string"
+
+        def forward(self, query: str) -> str:
+            return str(lc_tool.invoke(query))
+
+    return _Wrap()
+''',
+    "agno": '''
+# ── agno：节点用 langchain 实现，编排与推理交给 agno Agent ──
+from agno.agent import Agent as AgnoAgent
+from agno.models.openai import OpenAIChat
+
+agno_model = OpenAIChat(
+    id=os.environ.get("MINEAGENT_MODEL") or CFG.get("model", "gpt-4o-mini"),
+    base_url=os.environ.get("MINEAGENT_BASE_URL") or CFG.get("base_url"),
+    api_key=os.environ.get("MINEAGENT_API_KEY") or "EMPTY",
+)
+
+
+def as_agno_tool(lc_tool):
+    """把 langchain 的 @tool 包成 agno 能用的普通函数（靠 docstring 描述）。"""
+    def _call(query: str = "") -> str:
+        return str(lc_tool.invoke(query))
+
+    _call.__name__ = getattr(lc_tool, "name", "tool")
+    _call.__doc__ = getattr(lc_tool, "description", "") or ""
+    return _call
+''',
+    "openai_agents": '''
+# ── OpenAI Agents SDK：节点用 langchain 实现，编排交给 Agent / Runner ──
+# 用 OpenAIChatCompletionsModel 而不是默认的 Responses API：
+# 绝大多数 OpenAI 兼容服务（含本地 vLLM / Ollama / 各家兼容网关）只实现
+# /v1/chat/completions，走 Responses 会直接 404 或解析失败。
+from agents import (Agent as OpenAIAgent, OpenAIChatCompletionsModel, Runner,
+                    function_tool)
+from openai import AsyncOpenAI
+
+agent_client = AsyncOpenAI(
+    base_url=os.environ.get("MINEAGENT_BASE_URL") or CFG.get("base_url"),
+    api_key=os.environ.get("MINEAGENT_API_KEY") or "EMPTY",
+)
+
+agent_model = OpenAIChatCompletionsModel(
+    model=os.environ.get("MINEAGENT_MODEL") or CFG.get("model", "gpt-4o-mini"),
+    openai_client=agent_client,
+)
+
+
+def as_agent_tool(lc_tool):
+    """把 langchain 的 @tool 包成 OpenAI Agents SDK 的 function_tool。"""
+    def _run(query: str = "") -> str:
+        return str(lc_tool.invoke(query))
+
+    _run.__name__ = getattr(lc_tool, "name", "tool")
+    _run.__doc__ = getattr(lc_tool, "description", "") or ""
+    return function_tool(_run)
+''',
+    "semantic_kernel": '''
+# ── Semantic Kernel：节点用 langchain 实现，编排交给 ChatCompletionAgent ──
+import asyncio
+
+from openai import AsyncOpenAI
+from semantic_kernel import Kernel
+from semantic_kernel.agents import ChatCompletionAgent
+from semantic_kernel.connectors.ai.open_ai import OpenAIChatCompletion
+
+sk_kernel = Kernel()
+sk_kernel.add_service(OpenAIChatCompletion(
+    ai_model_id=os.environ.get("MINEAGENT_MODEL") or CFG.get("model", "gpt-4o-mini"),
+    async_client=AsyncOpenAI(
+        base_url=os.environ.get("MINEAGENT_BASE_URL") or CFG.get("base_url"),
+        api_key=os.environ.get("MINEAGENT_API_KEY") or "EMPTY",
+    ),
+))
+''',
+}
+
+
+def _header_for(framework: str) -> str:
+    """按框架拼 header：LangGraph 系用原样，其余去掉 StateGraph 再加自己的部分。"""
+    if framework in _LANGGRAPH_FRAMEWORKS:
+        return _HEADER_LANGCHAIN
+    base = _HEADER_LANGCHAIN.replace(
+        "from langgraph.graph import END, START, StateGraph\n", "")
+    extra = _FRAMEWORK_HEADER_EXTRA.get(framework, "")
+    if extra:
+        anchor = 'CFG = json.loads((HERE / "config.json").read_text(encoding="utf-8"))\n'
+        base = base.replace(anchor, anchor + extra, 1)
+    return base
+
 
 def _tool_ids(spec: Dict[str, Any]) -> set:
     return {n["id"] for n in spec["nodes"] if _kind_of(n) in TOOL_KINDS}
@@ -1503,6 +1706,93 @@ def _graph_section(spec: Dict[str, Any], framework: str) -> str:
         lines.append("")
         lines.append("")
         lines.append("graph = build_graph()")
+    elif framework == "smolagents":
+        lines.append("# smolagents：每个 agent 节点变成一个 ToolCallingAgent，工具包成它的 Tool")
+        agents = [nodes[i] for i in order
+                  if _kind_of(nodes[i]) in ("agent", "worker", "supervisor")]
+        if not agents:
+            agents = [nodes[i] for i in order if _kind_of(nodes[i]) not in TOOL_KINDS][:1]
+        for a in agents:
+            fn = _pyid(a["name"])
+            allowed = [_pyid(nodes[t]["name"]) for t in _agent_tool_ids(spec, a["id"])
+                       if t in nodes]
+            tools_expr = "[" + ", ".join(f"as_smol_tool({t})" for t in allowed) + "]"
+            p = a.get("params") or {}
+            max_steps = int(_num(p, "max_steps", 6))
+            lines.append(
+                f"{fn}_agent = ToolCallingAgent(\n"
+                f"    tools={tools_expr},\n"
+                f"    model=smol_model,\n"
+                f"    max_steps={max_steps},\n"
+                f"    instructions={_q(a.get('description') or a.get('label') or '')},\n"
+                f")"
+            )
+        lines.append("")
+        lines.append("_AGENTS = [" + ", ".join(
+            f"{_pyid(a['name'])}_agent" for a in agents) + "]")
+    elif framework == "agno":
+        lines.append("# agno：每个 agent 节点变成一个 AgnoAgent")
+        agents = [nodes[i] for i in order
+                  if _kind_of(nodes[i]) in ("agent", "worker", "supervisor")]
+        if not agents:
+            agents = [nodes[i] for i in order if _kind_of(nodes[i]) not in TOOL_KINDS][:1]
+        for a in agents:
+            fn = _pyid(a["name"])
+            allowed = [_pyid(nodes[t]["name"]) for t in _agent_tool_ids(spec, a["id"])
+                       if t in nodes]
+            tools_expr = "[" + ", ".join(f"as_agno_tool({t})" for t in allowed) + "]"
+            lines.append(
+                f"{fn}_agent = AgnoAgent(\n"
+                f"    name={_q(a['name'])},\n"
+                f"    model=agno_model,\n"
+                f"    tools={tools_expr},\n"
+                f"    instructions={_q(a.get('description') or a.get('label') or '')},\n"
+                f"    markdown=False,\n"
+                f")"
+            )
+        lines.append("")
+        lines.append("_AGENTS = [" + ", ".join(
+            f"{_pyid(a['name'])}_agent" for a in agents) + "]")
+    elif framework == "openai_agents":
+        lines.append("# OpenAI Agents SDK：每个 agent 节点变成一个 Agent")
+        agents = [nodes[i] for i in order
+                  if _kind_of(nodes[i]) in ("agent", "worker", "supervisor")]
+        if not agents:
+            agents = [nodes[i] for i in order if _kind_of(nodes[i]) not in TOOL_KINDS][:1]
+        for a in agents:
+            fn = _pyid(a["name"])
+            allowed = [_pyid(nodes[t]["name"]) for t in _agent_tool_ids(spec, a["id"])
+                       if t in nodes]
+            tools_expr = "[" + ", ".join(f"as_agent_tool({t})" for t in allowed) + "]"
+            lines.append(
+                f"{fn}_agent = OpenAIAgent(\n"
+                f"    name={_q(a['name'])},\n"
+                f"    instructions={_q(a.get('description') or a.get('label') or '')},\n"
+                f"    tools={tools_expr},\n"
+                f"    model=agent_model,\n"
+                f")"
+            )
+        lines.append("")
+        lines.append("_AGENTS = [" + ", ".join(
+            f"{_pyid(a['name'])}_agent" for a in agents) + "]")
+    elif framework == "semantic_kernel":
+        lines.append("# Semantic Kernel：每个 agent 节点变成一个 ChatCompletionAgent")
+        agents = [nodes[i] for i in order
+                  if _kind_of(nodes[i]) in ("agent", "worker", "supervisor")]
+        if not agents:
+            agents = [nodes[i] for i in order if _kind_of(nodes[i]) not in TOOL_KINDS][:1]
+        for a in agents:
+            fn = _pyid(a["name"])
+            lines.append(
+                f"{fn}_agent = ChatCompletionAgent(\n"
+                f"    kernel=sk_kernel,\n"
+                f"    name={_q(_ascii_id(a['name'], a['id']))},\n"
+                f"    instructions={_q(a.get('description') or a.get('label') or '')},\n"
+                f")"
+            )
+        lines.append("")
+        lines.append("_AGENTS = [" + ", ".join(
+            f"{_pyid(a['name'])}_agent" for a in agents) + "]")
     elif framework == "autogen":
         lines.append("# AutoGen：把画布里的 agent 节点变成 AssistantAgent，按对话推进")
         agents = [nodes[i] for i in order if _kind_of(nodes[i]) in ("agent", "worker", "supervisor")]
@@ -1568,6 +1858,46 @@ def _main_section(spec: Dict[str, Any], framework: str) -> str:
             f'    data = result.get("data", "")\n'
             f'    _emit({{"event": "final", "output": data if isinstance(data, str) else _brief(data)}})\n'
             f'    return data\n'
+        )
+    elif framework == "smolagents":
+        body = (
+            f'    text = user_input\n'
+            f'    for _ag in _AGENTS:\n'
+            f'        _r = _ag.run(text)\n'
+            f'        text = getattr(_r, "content", None) or str(_r)\n'
+            f'    _emit({{"event": "final", "output": text}})\n'
+            f'    return text\n'
+        )
+    elif framework == "agno":
+        body = (
+            f'    text = user_input\n'
+            f'    for _ag in _AGENTS:\n'
+            f'        _r = _ag.run(text)\n'
+            f'        text = getattr(_r, "content", None) or str(_r)\n'
+            f'    _emit({{"event": "final", "output": text}})\n'
+            f'    return text\n'
+        )
+    elif framework == "openai_agents":
+        body = (
+            f'    text = user_input\n'
+            f'    for _ag in _AGENTS:\n'
+            f'        _r = Runner.run_sync(_ag, text)\n'
+            f'        text = getattr(_r, "final_output", None) or str(_r)\n'
+            f'    _emit({{"event": "final", "output": text}})\n'
+            f'    return text\n'
+        )
+    elif framework == "semantic_kernel":
+        body = (
+            f'    async def _run_all(text: str) -> str:\n'
+            f'        for _ag in _AGENTS:\n'
+            f'            _last = ""\n'
+            f'            async for _r in _ag.invoke(text):\n'
+            f'                _last = str(_r)\n'
+            f'            text = _last or text\n'
+            f'        return text\n'
+            f'    text = asyncio.run(_run_all(user_input))\n'
+            f'    _emit({{"event": "final", "output": text}})\n'
+            f'    return text\n'
         )
     elif framework == "autogen":
         body = (
@@ -1642,7 +1972,7 @@ def render_agent_full(spec: Dict[str, Any], framework: str) -> tuple:
     节点块会被写回画布数据，网页上「代码逻辑」显示的就是这段。
     """
     # 用 replace 而不是 str.format：模板里现在有大量代码花括号
-    header = HEADERS.get(framework, _HEADER_LANGCHAIN)
+    header = _header_for(framework)
     header = header.replace("{framework_label}", str(spec.get("framework_label", framework)))
     header = header.replace("{name}", str(spec["name"]))
     order = topo_order(spec)

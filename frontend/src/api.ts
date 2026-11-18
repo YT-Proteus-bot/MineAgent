@@ -11,10 +11,28 @@ import type {
   Meta,
   ModelConfig,
   ProjectFileEntry,
+  ProviderCatalog,
+  ProviderKind,
+  ProviderRecord,
+  ProviderTestResult,
   RunEvent,
+  TemplateLib,
 } from './types'
 
 const BASE = ''
+
+/** 带状态码和结构化 detail 的错误：冲突（409）要靠它区分是哪种冲突。 */
+export class ApiError extends Error {
+  status: number
+  detail: any
+
+  constructor(status: number, detail: any, message: string) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+    this.detail = detail
+  }
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(BASE + path, {
@@ -25,14 +43,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     },
   })
   if (!resp.ok) {
-    let detail = `${resp.status} ${resp.statusText}`
+    let detail: any = `${resp.status} ${resp.statusText}`
     try {
       const body = await resp.json()
-      detail = body.detail || JSON.stringify(body)
+      detail = body.detail ?? body
     } catch {
       /* ignore */
     }
-    throw new Error(detail)
+    const message = typeof detail === 'string' ? detail : detail?.message || JSON.stringify(detail)
+    throw new ApiError(resp.status, detail, message)
   }
   if (resp.status === 204) return undefined as T
   return (await resp.json()) as T
@@ -120,6 +139,23 @@ export const api = {
     }),
   clearNodeModel: (id: string, nodeId: string) =>
     request<{ ok: boolean }>(`/api/canvases/${id}/nodes/${nodeId}/model`, { method: 'DELETE' }),
+  applyToolPreset: (canvasId: string, nodeId: string, preset: string) =>
+    request<{
+      ok: boolean
+      preset: string
+      label: string
+      code: string
+      preview_code: string
+      params: Record<string, any>
+    }>(`/api/canvases/${canvasId}/nodes/${nodeId}/apply-tool`, {
+      method: 'POST',
+      body: JSON.stringify({ preset }),
+    }),
+  describeNode: (canvasId: string, nodeId: string) =>
+    request<{ ok: boolean; description: string }>(
+      `/api/canvases/${canvasId}/nodes/${nodeId}/describe`,
+      { method: 'POST' },
+    ),
 
   env: (id: string) => request<Record<string, any>>(`/api/canvases/${id}/env`),
   listFiles: (id: string) =>
@@ -149,6 +185,44 @@ export const api = {
       '/api/settings/models',
       { method: 'POST', body: JSON.stringify(payload) },
     ),
+
+  // ---- 向量模型 / 向量库 / 数据源 ----
+  providerCatalog: () => request<ProviderCatalog>('/api/providers/catalog'),
+  listProviders: (params?: { kind?: string; canvas_id?: string }) => {
+    const q = new URLSearchParams()
+    if (params?.kind) q.set('kind', params.kind)
+    if (params?.canvas_id) q.set('canvas_id', params.canvas_id)
+    const suffix = q.toString() ? `?${q.toString()}` : ''
+    return request<ProviderRecord[]>(`/api/providers${suffix}`)
+  },
+  createProvider: (payload: Partial<ProviderRecord> & { secret?: Record<string, string> }) =>
+    request<ProviderRecord>('/api/providers', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  updateProvider: (
+    id: string,
+    payload: Partial<ProviderRecord> & { secret?: Record<string, string> },
+  ) =>
+    request<ProviderRecord>(`/api/providers/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+  setProviderDefault: (id: string) =>
+    request<ProviderRecord>(`/api/providers/${id}/default`, { method: 'POST' }),
+  deleteProvider: (id: string) =>
+    request<{ ok: boolean }>(`/api/providers/${id}`, { method: 'DELETE' }),
+  testProvider: (payload: {
+    kind: string
+    provider: string
+    config?: Record<string, any>
+    secret?: Record<string, string>
+    id?: string
+  }) =>
+    request<ProviderTestResult>('/api/providers/test', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
 
   // ---- AI 助手历史对话 ----
   listChats: () =>
@@ -198,30 +272,146 @@ export const api = {
     request<{ url: string; state: string }>('/api/community/auth/url'),
   communityDisconnect: () =>
     request<{ ok: boolean }>('/api/community/disconnect', { method: 'POST' }),
-  publishTemplate: (payload: {
-    canvas_id: string
-    name: string
-    description: string
-    tags: string[]
-    author: string
-  }) =>
+  publishTemplate: (
+    payload: {
+      canvas_id: string
+      name: string
+      description: string
+      tags: string[]
+      author: string
+      target?: 'public' | 'private'
+      /** 目标模板库（用户中心配置的库 id） */
+      lib_id?: string
+      /** 上次同步到的远端版本，用于冲突检测 */
+      base_rev?: number
+      remote_slug?: string
+      /** 用户在冲突对话框里选了「仍然覆盖」 */
+      force?: boolean
+    },
+    signal?: AbortSignal,
+  ) =>
     request<{
       ok: boolean
-      pr_url: string
-      pr_number: number
+      target?: string
+      pr_url?: string
+      pr_number?: number
+      commit_url?: string
       branch: string
       slug: string
       files: string[]
-    }>('/api/community/publish', { method: 'POST', body: JSON.stringify(payload) }),
+    }>('/api/community/publish', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      signal,
+    }),
+  privateConfig: (canvasId: string) =>
+    request<{ ok: boolean; repo: string; branch: string; dir: string }>(
+      `/api/community/private-config?canvas_id=${encodeURIComponent(canvasId)}`,
+    ),
+  savePrivateConfig: (payload: {
+    canvas_id: string
+    repo: string
+    branch: string
+    dir: string
+  }) =>
+    request<{ ok: boolean; repo: string; branch: string; dir: string }>(
+      '/api/community/private-config',
+      { method: 'PUT', body: JSON.stringify(payload) },
+    ),
+  privateTemplates: (canvasId: string) =>
+    request<{ ok: boolean; templates: CommunityTemplate[] }>(
+      `/api/community/private-templates?canvas_id=${encodeURIComponent(canvasId)}`,
+    ),
+  privateLoad: (payload: { canvas_id: string; slug: string }) =>
+    request<{ ok: boolean; canvas: CanvasDetail }>('/api/community/private-load', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
   communityTemplates: () =>
     request<{ ok: boolean; configured: boolean; templates: CommunityTemplate[] }>(
       '/api/community/templates',
     ),
-  loadCommunityTemplate: (slug: string) =>
-    request<{ ok: boolean; canvas: CanvasDetail }>('/api/community/load', {
-      method: 'POST',
-      body: JSON.stringify({ slug }),
+  communityLibs: () =>
+    request<{ ok: boolean; libs: TemplateLib[] }>('/api/community/libs'),
+  saveCommunityLibs: (libs: TemplateLib[]) =>
+    request<{ ok: boolean; libs: TemplateLib[] }>('/api/community/libs', {
+      method: 'PUT',
+      body: JSON.stringify({ libs }),
     }),
+  canvasLib: (canvasId: string) =>
+    request<{ ok: boolean; lib_id: string }>(
+      `/api/community/canvas-lib?canvas_id=${encodeURIComponent(canvasId)}`,
+    ),
+  saveCanvasLib: (canvasId: string, libId: string) =>
+    request<{ ok: boolean; lib_id: string }>('/api/community/canvas-lib', {
+      method: 'PUT',
+      body: JSON.stringify({ canvas_id: canvasId, lib_id: libId }),
+    }),
+  libTemplates: (libId: string) =>
+    request<{ ok: boolean; lib: TemplateLib; templates: CommunityTemplate[] }>(
+      `/api/community/lib-templates?lib_id=${encodeURIComponent(libId)}`,
+    ),
+  libLoad: (libId: string, slug: string) =>
+    request<{ ok: boolean; canvas: CanvasDetail }>('/api/community/lib-load', {
+      method: 'POST',
+      body: JSON.stringify({ lib_id: libId, slug }),
+    }),
+  communityPending: () =>
+    request<{
+      ok: boolean
+      pending: { name: string; canvas_id?: string; pr_url: string; pr_number: number }[]
+    }>('/api/community/pending'),
+  communityCanvasStatus: () =>
+    request<{
+      ok: boolean
+      templates: {
+        slug?: string
+        name: string
+        canvas_id?: string
+        canvas_updated_at?: string
+        graph_hash?: string
+        node_count?: number
+        created_at?: string
+      }[]
+      prs: {
+        name: string
+        canvas_id?: string
+        state: 'open' | 'merged' | 'closed'
+        pr_number: number
+        pr_url: string
+        created_at?: string
+      }[]
+    }>('/api/community/canvas-status'),
+  loadCommunityTemplate: (
+    slug: string,
+    options?: { mode?: 'new' | 'update'; canvasId?: string; force?: boolean },
+  ) =>
+    request<{ ok: boolean; canvas: CanvasDetail; mode?: string; rev?: number }>(
+      '/api/community/load',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          slug,
+          mode: options?.mode || 'new',
+          canvas_id: options?.canvasId || '',
+          force: !!options?.force,
+        }),
+      },
+    ),
+  communitySyncStatus: (canvasId: string) =>
+    request<{
+      ok: boolean
+      linked: boolean
+      remote_slug?: string
+      local_rev?: number
+      remote_rev?: number
+      local_changed?: boolean
+      remote_changed?: boolean
+      local_hash?: string
+      remote_hash?: string
+      remote_updated_at?: string
+      error?: string
+    }>(`/api/community/sync-status/${encodeURIComponent(canvasId)}`),
 
   assistantStatus: () =>
     request<{ ready: boolean; model: string; base_url: string; hint: string }>(

@@ -14,8 +14,10 @@ from ..node_registry import detect_llm_usage, get_node_type
 from ..providers.bindings import (ENV_NAMES, named_bindings,
                                   strip_secrets)
 from .graphcheck import check_code
+from .dify import render_workflow_dsl
 from .native import AGENT_KINDS, TOOL_KINDS, _kind_of, render_agent_full
-from .production import render_production_files, render_requirements_extra
+from .production import (merge_service, render_production_files,
+                         render_requirements_extra)
 
 RUNTIME_DIR = Path(__file__).resolve().parents[1] / "runtime"
 PROVIDERS_DIR = Path(__file__).resolve().parents[1] / "providers"
@@ -27,6 +29,15 @@ REQUIREMENTS = {
     # 所以这里要装 pyautogen，而不是 0.4 的 autogen-agentchat
     "autogen": "pyautogen>=0.2.35\n",
     "crewai": "crewai>=0.60.0\n",
+    # 节点仍用 langchain 的 @tool / create_agent，编排层换成 smolagents
+    "smolagents": ("smolagents>=1.0\nlangchain>=1.0\nlangchain-openai>=1.0\n"
+                   "langchain-core>=1.0\n"),
+    "agno": ("agno\nlangchain>=1.0\nlangchain-openai>=1.0\n"
+             "langchain-core>=1.0\n"),
+    "openai_agents": ("openai-agents\nopenai\nlangchain>=1.0\n"
+                      "langchain-openai>=1.0\nlangchain-core>=1.0\n"),
+    "semantic_kernel": ("semantic-kernel\nopenai\nlangchain>=1.0\n"
+                        "langchain-openai>=1.0\nlangchain-core>=1.0\n"),
 }
 
 
@@ -428,7 +439,7 @@ def generate_project(name: str, slug: str, framework: str, graph: Dict[str, Any]
             write(f"skills/{node['name']}.md", str(skill_text).rstrip() + "\n")
 
     # 运行时
-    for fname in ("runtime_sdk.py", "runner.py"):
+    for fname in ("runtime_sdk.py", "runner.py", "sandbox.py"):
         shutil.copyfile(RUNTIME_DIR / fname, project_dir / fname)
         written.append(fname)
 
@@ -447,12 +458,14 @@ def generate_project(name: str, slug: str, framework: str, graph: Dict[str, Any]
     write("agent.py", agent_code)
 
     # 生成即自检：图结构有硬伤（孤岛 / 无入边 / 工具越权）当场打出来，
-    # 不要等用户把项目跑起来才发现
-    issues = check_code(spec, agent_code, node_blocks, TOOL_KINDS, AGENT_KINDS, _kind_of)
-    if issues:
-        print(f"[codegen:{slug}] 生成自检发现 {len(issues)} 个问题", file=sys.stderr)
-        for item in issues:
-            print(f"  - {item}", file=sys.stderr)
+    # 不要等用户把项目跑起来才发现。只有真生成了 StateGraph 的代码才有「边」可查。
+    has_graph = "build_graph(" in agent_code
+    if has_graph:
+        issues = check_code(spec, agent_code, node_blocks, TOOL_KINDS, AGENT_KINDS, _kind_of)
+        if issues:
+            print(f"[codegen:{slug}] 生成自检发现 {len(issues)} 个问题", file=sys.stderr)
+            for item in issues:
+                print(f"  - {item}", file=sys.stderr)
 
     # 把每个节点在 agent.py 里的代码块写回画布数据：
     # 网页上「代码逻辑」显示的就是这段，改的也是这段
@@ -504,13 +517,28 @@ def generate_project(name: str, slug: str, framework: str, graph: Dict[str, Any]
 
     write("config.json", json.dumps(cfg, ensure_ascii=False, indent=2))
 
-    write("requirements.txt",
-          REQUIREMENTS.get(framework, "# 无额外依赖（使用内置 runner）\n").rstrip()
-          + "\n\n# 服务化依赖（server.py）\n" + render_requirements_extra())
+    # Dify 是可视化平台：额外产出一份可直接导入的 workflow DSL + API 触发脚本
+    if framework == "dify":
+        from .dify import DIFY_CLIENT
+        write("dify_workflow.yml", render_workflow_dsl(spec, cfg))
+        write("dify_client.py", DIFY_CLIENT)
+
+    session_store = merge_service(graph.get("service"))["session"]["store"]
+    requirements_text = (
+        REQUIREMENTS.get(framework, "# 无额外依赖（使用内置 runner）\n").rstrip()
+        + "\n\n# 服务化依赖（server.py）\n" + render_requirements_extra(session_store)
+    )
+    write("requirements.txt", requirements_text)
 
     # 生产化文件：把画布的「服务设置」编译成 server / settings / telemetry / checkpoint
-    # 以及 Dockerfile、compose、CI、冒烟测试（只对可运行的框架生成）
-    for rel, content in render_production_files(spec, graph, framework).items():
+    # 以及 Dockerfile、compose、CI、冒烟测试、依赖锁与离线安装脚本
+    prod_files = render_production_files(spec, graph, framework,
+                                        requirements_text, has_graph)
+    # 换框架 / 改成没有图的画布时，上一轮生成的服务文件要清掉，不然会留一个起不来的镜像
+    for stale in ("server.py", "Dockerfile", "docker-compose.yml"):
+        if stale not in prod_files:
+            (project_dir / stale).unlink(missing_ok=True)
+    for rel, content in prod_files.items():
         write(rel, content)
 
     env_example = (
@@ -535,7 +563,7 @@ def generate_project(name: str, slug: str, framework: str, graph: Dict[str, Any]
     write(".env.example", env_example)
     write(".gitignore",
           ".env\n.venv/\n.store.db\n*.db\n.sessions.db\n__pycache__/\n*.pyc\n"
-          "outputs/*\n!outputs/.gitkeep\n")
+          "outputs/*\n!outputs/.gitkeep\nwheels/*\n!wheels/.gitkeep\n")
 
     # 空目录留占位文件，保证复制 / 打包 / git 之后目录结构不丢
     write("skills/.gitkeep", "# 技能文件（skill 节点的 skill.md）放这里\n")
@@ -547,8 +575,12 @@ def generate_project(name: str, slug: str, framework: str, graph: Dict[str, Any]
 
     write("README.md", _readme(name, slug, framework, spec))
 
-    # 顺手把画布快照存一份，方便脱离数据库回溯
-    write("canvas.snapshot.json", json.dumps(graph, ensure_ascii=False, indent=2))
+    # 顺手把画布快照存一份，方便脱离数据库回溯；
+    # framework 记进快照，离线检查 / 恢复时不用再问数据库
+    snapshot = dict(graph)
+    snapshot["framework"] = framework
+    snapshot["slug"] = spec.get("slug") or slug
+    write("canvas.snapshot.json", json.dumps(snapshot, ensure_ascii=False, indent=2))
 
     _clean_caches(project_dir)
 
@@ -678,14 +710,20 @@ def _readme(name: str, slug: str, framework: str, spec: Dict[str, Any]) -> str:
         "agent.py           # 框架原生入口：一张画布 = 一个文件，节点按 ═══ 分块",
         "runner.py          # 内置图执行器（零依赖，任何画布都能跑）",
         "runtime_sdk.py     # 节点可用的全部能力（ctx.*）",
+        "sandbox.py         # shell / exec_python 的隔离实现（MINEAGENT_SANDBOX 控制）",
         "server.py          # FastAPI 服务入口：/chat、/chat/stream、/health、/ready、/metrics",
-        "settings.py        # 服务配置（全部走环境变量）",
+        "settings.py        # 服务配置（pydantic-settings，启动即校验）",
         "telemetry.py       # JSON 日志 + Prometheus 指标",
         "checkpoint.py      # 会话持久化（SQLite / Postgres）",
+        "requirements.txt   # 依赖声明",
+        "requirements.lock.txt  # 版本锁（直接依赖全部钉死）",
+        "scripts/           # make_lock / offline_bundle / install_offline",
+        "wheels/            # 离线包目录（offline_bundle.py 把 wheel 下到这里）",
         "Dockerfile         # 镜像（非 root 运行 + HEALTHCHECK）",
         ".dockerignore      # 保证 .env 不会被打进镜像",
         "docker-compose.yml # 一条命令起服务",
         "integrations/      # 外部数据中台 / 评测中台连接器",
+        "evals/             # 评测用例 + 打分脚本（改完 agent 用它证明没变差）",
         "tests/             # pytest 冒烟测试（不需要真实模型）",
         "run.ps1            # Windows 一键运行",
         "run.sh             # macOS / Linux 一键运行",
@@ -698,14 +736,78 @@ def _readme(name: str, slug: str, framework: str, spec: Dict[str, Any]) -> str:
         "## 当成服务跑",
         "",
         "```bash",
-        "pip install -r requirements.txt",
+        "pip install -r requirements.lock.txt",
         "uvicorn server:app --host 0.0.0.0 --port 8000",
         "# 或者",
         "docker compose up --build",
         "```",
         "",
         "返回里的 `usage` 是本次运行的 token 统计；`/metrics` 输出 Prometheus 文本，",
-        "`/ready` 会明确列出缺哪项配置。",
+        "`/ready` 会明确列出缺哪项配置。配错配置时进程**直接起不来**，",
+        "想看当前生效的配置（key 会打码）：",
+        "",
+        "```bash",
+        "python settings.py",
+        "```",
+        "",
+        "## 离线部署（客户机房没有外网）",
+        "",
+        "```bash",
+        "# ① 在一台能上网、Python 版本与目标机一致的机器上打离线包",
+        "python scripts/offline_bundle.py      # 生成 wheels/",
+        "",
+        "# ② 整个项目目录（含 wheels/）拷到目标机，然后",
+        "./scripts/install_offline.sh          # Linux / macOS",
+        ".\\scripts\\install_offline.ps1         # Windows",
+        "```",
+        "",
+        "`requirements.lock.txt` 是生成时的版本锁；依赖变动后可以用",
+        "`python scripts/make_lock.py` 在装好依赖的环境里重新锁定。",
+        "",
+        "## 改动后怎么证明没变差",
+        "",
+        "```bash",
+        "python evals/run.py --check   # CI：只校验用例格式与打分逻辑，不调模型",
+        "python evals/run.py           # 真跑：需要 key，结果写到 evals/report.json",
+        "```",
+        "",
+        "用例在 `evals/cases.jsonl`，一行一条；`pass_rate` 掉了就是改坏了。",
+        "每次请求都会带 `X-Trace-Id`（也可以由调用方传进来），日志和节点事件里都带这个 id，",
+        "排查问题时按 trace id 一搜就是完整一条链路。",
+        "",
+        "## 执行沙箱",
+        "",
+        "节点里的 `ctx.shell()` / `ctx.exec_python()` 都走 `sandbox.py`，由 `MINEAGENT_SANDBOX` 控制：",
+        "",
+        "| 取值 | 行为 |",
+        "| --- | --- |",
+        "| `restricted`（默认） | 限项目目录、清掉密钥环境变量、超时、输出截断 |",
+        "| `none` | 不额外限制，只保留超时与输出截断（仅本地开发用） |",
+        "| `container` | 在 docker 里跑：无网络、只读根、限内存/CPU/PID；**没装 docker 会直接报错**，不会悄悄退回宿主 |",
+        "",
+        "节点勾了「工具调用幂等」后，同一次运行里相同参数只会真正执行一次，重跑直接回放结果",
+        "（记录在同目录 `.store.db` 的 `tool_calls` 表）。",
+        "",
+        "## 人工审批（挂起 / 放行）",
+        "",
+        "画布上的 `human_approval` 节点会真的把整条 run 挂起，等外部放行后再继续：",
+        "",
+        "```bash",
+        "# ① 发起：可能直接返回结果，也可能返回待审批",
+        "curl -X POST localhost:8000/chat -H 'Content-Type: application/json' \\",
+        "     -d '{\"message\":\"草稿\",\"thread_id\":\"t1\"}'",
+        "# → {\"status\":\"interrupted\",\"interrupt\":{\"question\":\"…\"},\"thread_id\":\"t1\"}",
+        "",
+        "# ② 看看停在哪",
+        "curl localhost:8000/runs/t1",
+        "",
+        "# ③ 放行（decision 也可以是 reject）",
+        "curl -X POST localhost:8000/resume -H 'Content-Type: application/json' \\",
+        "     -d '{\"thread_id\":\"t1\",\"decision\":\"approve\"}'",
+        "```",
+        "",
+        "挂起状态靠 checkpointer 保存：`MINEAGENT_SESSION_STORE=sqlite`（默认）重启也能续跑，",
+        "`none` 只在进程内有效，`postgres` 适合多副本部署。",
         "",
         "## 节点清单",
         "",

@@ -19,6 +19,9 @@ CREATE TABLE IF NOT EXISTS canvases (
     background    TEXT NOT NULL DEFAULT '{}',
     rules         TEXT NOT NULL DEFAULT '[]',
     mode          TEXT NOT NULL DEFAULT '',
+    remote_slug   TEXT NOT NULL DEFAULT '',
+    remote_rev    INTEGER NOT NULL DEFAULT 0,
+    base_graph_hash TEXT NOT NULL DEFAULT '',
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL
 );
@@ -61,6 +64,24 @@ CREATE TABLE IF NOT EXISTS agent_models (
     updated_at     TEXT NOT NULL,
     PRIMARY KEY (canvas_id, node_id)
 );
+
+-- 向量模型 / 向量库 / 数据源的实例配置
+-- config 存非密文字段（JSON），secret_cipher 存密文字段的加密 JSON
+CREATE TABLE IF NOT EXISTS providers (
+    id            TEXT PRIMARY KEY,
+    kind          TEXT NOT NULL,
+    provider      TEXT NOT NULL,
+    name          TEXT NOT NULL DEFAULT '',
+    config        TEXT NOT NULL DEFAULT '{}',
+    secret_cipher TEXT NOT NULL DEFAULT '',
+    scope         TEXT NOT NULL DEFAULT 'global',
+    canvas_id     TEXT NOT NULL DEFAULT '',
+    is_default    INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_providers_kind ON providers(kind, scope, canvas_id);
 """
 
 
@@ -100,6 +121,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE canvases ADD COLUMN rules TEXT NOT NULL DEFAULT '[]'")
     if "mode" not in cols:
         conn.execute("ALTER TABLE canvases ADD COLUMN mode TEXT NOT NULL DEFAULT ''")
+    # ---- 远端同步：记住这张画布绑定的模板、上次同步的版本和图哈希 ----
+    if "remote_slug" not in cols:
+        conn.execute("ALTER TABLE canvases ADD COLUMN remote_slug TEXT NOT NULL DEFAULT ''")
+    if "remote_rev" not in cols:
+        conn.execute("ALTER TABLE canvases ADD COLUMN remote_rev INTEGER NOT NULL DEFAULT 0")
+    if "base_graph_hash" not in cols:
+        conn.execute("ALTER TABLE canvases ADD COLUMN base_graph_hash TEXT NOT NULL DEFAULT ''")
 
 
 def get_setting(key: str, default: str = "") -> str:
@@ -114,4 +142,65 @@ def set_setting(key: str, value: str) -> None:
             "INSERT INTO app_settings(key, value, updated_at) VALUES(?,?,?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
             (key, value, now_iso()),
+        )
+
+
+# --------------------------------------------------------------------------- #
+# providers：向量模型 / 向量库 / 数据源
+# --------------------------------------------------------------------------- #
+def list_providers(kind: str = "", scope: str = "", canvas_id: str = "") -> list:
+    sql = "SELECT * FROM providers WHERE 1=1"
+    args: list = []
+    if kind:
+        sql += " AND kind = ?"
+        args.append(kind)
+    if scope:
+        sql += " AND scope = ?"
+        args.append(scope)
+    if canvas_id:
+        sql += " AND (scope = 'global' OR canvas_id = ?)"
+        args.append(canvas_id)
+    sql += " ORDER BY kind, is_default DESC, created_at ASC"
+    with get_conn() as conn:
+        return [dict(row) for row in conn.execute(sql, args)]
+
+
+def get_provider(provider_id: str) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM providers WHERE id = ?",
+                           (provider_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def save_provider(record: dict) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO providers(id, kind, provider, name, config, secret_cipher,"
+            " scope, canvas_id, is_default, created_at, updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(id) DO UPDATE SET provider=excluded.provider, name=excluded.name,"
+            " config=excluded.config, secret_cipher=excluded.secret_cipher,"
+            " scope=excluded.scope, canvas_id=excluded.canvas_id,"
+            " is_default=excluded.is_default, updated_at=excluded.updated_at",
+            (record["id"], record["kind"], record["provider"], record.get("name", ""),
+             record.get("config", "{}"), record.get("secret_cipher", ""),
+             record.get("scope", "global"), record.get("canvas_id", ""),
+             int(record.get("is_default", 0)), record.get("created_at") or now_iso(),
+             now_iso()),
+        )
+
+
+def delete_provider(provider_id: str) -> bool:
+    with get_conn() as conn:
+        cur = conn.execute("DELETE FROM providers WHERE id = ?", (provider_id,))
+    return cur.rowcount > 0
+
+
+def clear_provider_default(kind: str, scope: str, canvas_id: str = "") -> None:
+    """同一作用域内只允许一个默认项。"""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE providers SET is_default = 0 WHERE kind = ? AND scope = ? "
+            "AND canvas_id = ?",
+            (kind, scope, canvas_id),
         )

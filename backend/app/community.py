@@ -9,15 +9,18 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
+import re
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .db import get_setting
+from .db import get_setting, set_setting
 from .security import decrypt
 
 GITHUB_API = "https://api.github.com"
@@ -61,6 +64,78 @@ def cfg() -> Dict[str, Any]:
 
 def token() -> str:
     return decrypt(get_setting("github_token_cipher", ""))
+
+
+def private_settings(canvas_id: str) -> Dict[str, Any]:
+    """兼容旧配置：画布级单个私人库（新结构改用 template_libs + canvas_lib）。"""
+    raw = get_setting(f"private_repo_{canvas_id}", "")
+    try:
+        data = json.loads(raw) if raw else {}
+    except Exception:  # noqa: BLE001
+        data = {}
+    return {
+        "repo": str(data.get("repo") or "").strip(),
+        "branch": str(data.get("branch") or "main").strip() or "main",
+        "dir": str(data.get("dir") or "templates").strip().strip("/") or "templates",
+    }
+
+
+def template_libs() -> List[Dict[str, Any]]:
+    """用户中心配置的模板库列表（公共 / 私人，可有多个）。"""
+    raw = get_setting("template_libs", "")
+    if raw:
+        try:
+            data = json.loads(raw)
+            return data if isinstance(data, list) else []
+        except Exception:  # noqa: BLE001
+            return []
+    # 首次使用：把旧的社区仓库配置迁移成一个公共库
+    repo = get_setting("community_repo", "").strip()
+    if not repo:
+        return []
+    return [{
+        "id": "public-default",
+        "name": "社区模板库",
+        "kind": "public",
+        "repo": repo,
+        "branch": get_setting("community_branch", "main").strip() or "main",
+        "dir": (get_setting("community_dir", "templates") or "templates").strip().strip("/") or "templates",
+    }]
+
+
+def save_template_libs(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    cleaned: List[Dict[str, Any]] = []
+    for item in items or []:
+        repo = str(item.get("repo") or "").strip()
+        if not repo:
+            continue
+        parse_repo(repo)
+        cleaned.append({
+            "id": str(item.get("id") or f"lib-{uuid.uuid4().hex[:8]}"),
+            "name": str(item.get("name") or repo).strip()[:60] or repo,
+            "kind": "private" if str(item.get("kind") or "") == "private" else "public",
+            "repo": repo,
+            "branch": str(item.get("branch") or "main").strip() or "main",
+            "dir": str(item.get("dir") or "templates").strip().strip("/") or "templates",
+        })
+    set_setting("template_libs", json.dumps(cleaned, ensure_ascii=False))
+    return cleaned
+
+
+def lib_by_id(lib_id: str) -> Optional[Dict[str, Any]]:
+    for item in template_libs():
+        if item.get("id") == lib_id:
+            return item
+    return None
+
+
+def canvas_lib(canvas_id: str) -> str:
+    return get_setting(f"canvas_lib_{canvas_id}", "")
+
+
+def save_canvas_lib(canvas_id: str, lib_id: str) -> str:
+    set_setting(f"canvas_lib_{canvas_id}", lib_id)
+    return lib_id
 
 
 def parse_repo(repo: str) -> Tuple[str, str]:
@@ -166,7 +241,7 @@ def oauth_authorize_url(base_url: str, state: str) -> str:
     params = {
         "client_id": conf["client_id"],
         "redirect_uri": f"{base_url.rstrip('/')}/api/github/callback",
-        "scope": "public_repo read:user",
+        "scope": "repo read:user",
         "state": state,
     }
     return OAUTH_AUTHORIZE + "?" + urllib.parse.urlencode(params)
@@ -211,8 +286,8 @@ def _raw_json(owner: str, repo: str, branch: str, path: str) -> Dict[str, Any]:
     return payload
 
 
-def existing_slugs(token_str: str = "") -> set:
-    conf = cfg()
+def existing_slugs(token_str: str = "", conf: Optional[Dict[str, Any]] = None) -> set:
+    conf = conf or cfg()
     if not conf["repo"]:
         return set()
     owner, repo = parse_repo(conf["repo"])
@@ -226,8 +301,8 @@ def existing_slugs(token_str: str = "") -> set:
     return {item.get("name", "") for item in items if item.get("type") == "dir"}
 
 
-def list_templates() -> List[Dict[str, Any]]:
-    conf = cfg()
+def list_templates(conf: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    conf = conf or cfg()
     if not conf["repo"]:
         return []
     owner, repo = parse_repo(conf["repo"])
@@ -254,13 +329,93 @@ def list_templates() -> List[Dict[str, Any]]:
     return out
 
 
-def fetch_template(slug: str) -> Dict[str, Any]:
-    conf = cfg()
+def fetch_template(slug: str, conf: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    conf = conf or cfg()
     owner, repo = parse_repo(conf["repo"])
     safe_slug = urllib.parse.quote(slug, safe="")
     meta = _raw_json(owner, repo, conf["branch"], f"{conf['dir']}/{slug}/meta.json")
     canvas = _raw_json(owner, repo, conf["branch"], f"{conf['dir']}/{slug}/canvas.json")
     return {"meta": meta, "graph": canvas}
+
+
+def graph_hash(graph: Dict[str, Any]) -> str:
+    """画布内容哈希：判断本地/远端是否真的变了。
+
+    只算图像内容（节点、边、视口），不含背景和运行时配置，
+    否则改个底色也会被判定成"有修改"。
+    """
+    clean = sanitize_graph(graph or {})
+    return hashlib.sha256(
+        json.dumps(clean, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:16]
+
+
+def fetch_meta(slug: str, conf: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """只取远端模板的 meta.json（查版本号用，不下载整张画布）。"""
+    conf = conf or cfg()
+    owner, repo = parse_repo(conf["repo"])
+    return _raw_json(owner, repo, conf["branch"], f"{conf['dir']}/{slug}/meta.json")
+
+
+def pending_prs() -> List[Dict[str, Any]]:
+    """已上传但还没合入的模板（open PR）：标题形如「新增社区模板：<画布名>」。"""
+    conf = cfg()
+    if not conf["repo"] or not token():
+        return []
+    owner, repo = parse_repo(conf["repo"])
+    try:
+        prs = api("GET", f"/repos/{owner}/{repo}/pulls?state=open&per_page=100", token() or "")
+    except GitHubError:
+        return []
+    out: List[Dict[str, Any]] = []
+    for pr in prs if isinstance(prs, list) else []:
+        title = str(pr.get("title") or "").strip()
+        name = title.split("：", 1)[1].strip() if "：" in title else title
+        body = str(pr.get("body") or "")
+        match = re.search(r"canvas_id[：:]\s*([0-9a-zA-Z]+)", body)
+        out.append({
+            "name": name,
+            "canvas_id": match.group(1) if match else "",
+            "pr_url": pr.get("html_url"),
+            "pr_number": pr.get("number"),
+        })
+    return out
+
+
+def canvas_status() -> Dict[str, Any]:
+    """公共模板元信息 + 全部 PR 状态（open / merged / closed）。
+
+    上传弹窗用它做两件事：比较本地画布与公共模板的版本、显示 PR 是否已合入。
+    """
+    conf = cfg()
+    if not conf["repo"]:
+        return {"templates": [], "prs": []}
+    owner, repo = parse_repo(conf["repo"])
+    try:
+        templates = list_templates()
+    except Exception:  # noqa: BLE001
+        templates = []
+    try:
+        prs = api("GET", f"/repos/{owner}/{repo}/pulls?state=all&per_page=100", token() or "")
+    except GitHubError:
+        prs = []
+    out: List[Dict[str, Any]] = []
+    for pr in prs if isinstance(prs, list) else []:
+        title = str(pr.get("title") or "").strip()
+        name = title.split("：", 1)[1].strip() if "：" in title else title
+        body = str(pr.get("body") or "")
+        match = re.search(r"canvas_id[：:]\s*([0-9a-zA-Z]+)", body)
+        merged = bool(pr.get("merged_at"))
+        state = "merged" if merged else ("open" if pr.get("state") == "open" else "closed")
+        out.append({
+            "name": name,
+            "canvas_id": match.group(1) if match else "",
+            "state": state,
+            "pr_url": pr.get("html_url"),
+            "pr_number": pr.get("number"),
+            "created_at": pr.get("created_at") or "",
+        })
+    return {"templates": templates, "prs": out}
 
 
 # --------------------------------------------------------------------------- #
@@ -278,10 +433,11 @@ def _unique_slug(name: str, taken: set) -> str:
     return slug
 
 
-def _pr_body(meta: Dict[str, Any], files: List[str]) -> str:
+def _pr_body(meta: Dict[str, Any], files: List[str], canvas_id: str = "") -> str:
     tags = "、".join(meta.get("tags") or []) or "（无）"
     return (
         f"## 新社区模板：{meta.get('name')}\n\n"
+        f"- canvas_id：{canvas_id or '（未记录）'}\n"
         f"- 作者：{meta.get('author') or '匿名'}\n"
         f"- 框架：{meta.get('framework')}\n"
         f"- 节点数：{meta.get('node_count')}\n"
@@ -292,23 +448,98 @@ def _pr_body(meta: Dict[str, Any], files: List[str]) -> str:
     )
 
 
+def _commit_files(target: str, token_str: str, base_sha: str, tpl_dir: str,
+                  slug: str, payload: Dict[str, str], meta: Dict[str, Any]) -> Dict[str, Any]:
+    """把 payload 里的文件一次性提交成一个 commit（Git Data API）。"""
+    blob_shas: Dict[str, str] = {}
+    for path, content in payload.items():
+        blob = api("POST", f"/repos/{target}/git/blobs", token_str,
+                   {"content": content, "encoding": "utf-8"})
+        blob_shas[path] = blob["sha"]
+    tree = api("POST", f"/repos/{target}/git/trees", token_str, {
+        "base_tree": base_sha,
+        "tree": [
+            {"path": f"{tpl_dir}/{slug}/{path}", "mode": "100644",
+             "type": "blob", "sha": sha}
+            for path, sha in blob_shas.items()
+        ],
+    })
+    return api("POST", f"/repos/{target}/git/commits", token_str, {
+        "message": f"feat(template): {slug} · {meta['name']}",
+        "tree": tree["sha"],
+        "parents": [base_sha],
+    })
+
+
 def publish(canvas_row, graph: Dict[str, Any], meta: Dict[str, Any],
-            project_dir: Path) -> Dict[str, Any]:
-    conf = cfg()
+            project_dir: Path, target: str = "public",
+            conf_override: Optional[Dict[str, Any]] = None,
+            slug_override: str = "") -> Dict[str, Any]:
+    """发布模板。
+
+    - target=public：推分支 + 建 PR（社区仓库，没写权限就 fork）
+    - target=private：直接提交到画布配置的私人库分支，不走 PR
+    - slug_override：传了就更新这个已有模板（覆盖目录），不传则新建一个 slug
+    """
+    conf = conf_override or cfg()
     token_str = token()
-    if not conf["repo"]:
-        raise ValueError("还没有配置社区仓库（用户中心 → 社区模板）")
+    canvas_id = ""
+    try:
+        canvas_id = str(canvas_row["id"] or "")
+    except Exception:  # noqa: BLE001
+        canvas_id = ""
+    if not conf.get("repo"):
+        raise ValueError("还没有配置模板仓库（上传弹窗 → 私人库，或用户中心 → 社区模板）")
     if not token_str:
         raise ValueError("还没有连接 GitHub（用户中心 → 社区模板）")
     owner, repo = parse_repo(conf["repo"])
-    branch = conf["branch"]
+    branch = conf.get("branch") or "main"
+    tpl_dir = conf.get("dir") or "templates"
 
     user = github_user(token_str)
-    login = user.get("login") or conf["login"] or "user"
+    login = user.get("login") or conf.get("login") or "user"
+
+    slug = str(slug_override or "").strip() or _unique_slug(
+        meta["name"], existing_slugs(token_str, conf))
+    meta["slug"] = slug
+    files = collect_project_files(project_dir)
+    meta["project_files"] = list(files.keys())
+    payload = {
+        "meta.json": json.dumps(meta, ensure_ascii=False, indent=2),
+        "canvas.json": json.dumps(sanitize_graph(graph), ensure_ascii=False, indent=2),
+    }
+    for name, content in files.items():
+        payload[f"project/{name}"] = content
 
     repo_info = api("GET", f"/repos/{owner}/{repo}", token_str)
     can_push = bool((repo_info.get("permissions") or {}).get("push"))
-    target = f"{owner}/{repo}"
+
+    if target == "private":
+        if not can_push:
+            raise GitHubError(f"没有 {owner}/{repo} 的写权限")
+        ref = api("GET", f"/repos/{owner}/{repo}/git/ref/heads/"
+                  f"{urllib.parse.quote(branch, safe='/')}", token_str)
+        base_sha = (ref.get("object") or {}).get("sha")
+        if not base_sha:
+            raise GitHubError(f"读不到 {owner}/{repo} 的分支 {branch}")
+        commit = _commit_files(f"{owner}/{repo}", token_str, base_sha, tpl_dir,
+                               slug, payload, meta)
+        api("PATCH", f"/repos/{owner}/{repo}/git/refs/heads/"
+            f"{urllib.parse.quote(branch, safe='/')}", token_str,
+            {"sha": commit["sha"]})
+        return {
+            "ok": True,
+            "target": "private",
+            "repo": f"{owner}/{repo}",
+            "branch": branch,
+            "commit": commit.get("sha"),
+            "commit_url": commit.get("html_url"),
+            "slug": slug,
+            "files": list(payload.keys()),
+        }
+
+    # public：没权限就 fork，然后建分支 + PR
+    target_repo = f"{owner}/{repo}"
     head_prefix = ""
     if not can_push:
         api("POST", f"/repos/{owner}/{repo}/forks", token_str)
@@ -318,48 +549,30 @@ def publish(canvas_row, graph: Dict[str, Any], meta: Dict[str, Any],
                 break
             except GitHubError:
                 time.sleep(1.5)
-        target = f"{login}/{repo}"
+        target_repo = f"{login}/{repo}"
         head_prefix = f"{login}:"
 
-    slug = _unique_slug(meta["name"], existing_slugs(token_str))
-    # 目录名就是 slug，必须写回 meta，否则社区列表里读不到（旧模板的兜底在 list_templates）
-    meta["slug"] = slug
     branch_name = f"template/{slug}-{int(time.time())}"
-    ref = api("GET", f"/repos/{target}/git/ref/heads/{urllib.parse.quote(branch, safe='')}", token_str)
+    ref = api("GET", f"/repos/{target_repo}/git/ref/heads/"
+              f"{urllib.parse.quote(branch, safe='')}", token_str)
     base_sha = (ref.get("object") or {}).get("sha")
     if not base_sha:
-        raise GitHubError(f"读不到 {target} 的分支 {branch}")
-    api("POST", f"/repos/{target}/git/refs", token_str,
+        raise GitHubError(f"读不到 {target_repo} 的分支 {branch}")
+    api("POST", f"/repos/{target_repo}/git/refs", token_str,
         {"ref": f"refs/heads/{branch_name}", "sha": base_sha})
-
-    files = collect_project_files(project_dir)
-    meta["project_files"] = list(files.keys())
-    tpl_dir = conf["dir"]
-    payload = {
-        "meta.json": json.dumps(meta, ensure_ascii=False, indent=2),
-        "canvas.json": json.dumps(sanitize_graph(graph), ensure_ascii=False, indent=2),
-    }
-    for name, content in files.items():
-        payload[f"project/{name}"] = content
-
-    for path, content in payload.items():
-        api("PUT",
-            f"/repos/{target}/contents/{urllib.parse.quote(f'{tpl_dir}/{slug}/{path}', safe='/')}",
-            token_str,
-            {
-                "message": f"feat(template): {slug} · {meta['name']}",
-                "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
-                "branch": branch_name,
-            })
-
+    commit = _commit_files(target_repo, token_str, base_sha, tpl_dir, slug, payload, meta)
+    api("PATCH", f"/repos/{target_repo}/git/refs/heads/"
+        f"{urllib.parse.quote(branch_name, safe='/')}", token_str,
+        {"sha": commit["sha"]})
     pr = api("POST", f"/repos/{owner}/{repo}/pulls", token_str, {
         "title": f"新增社区模板：{meta['name']}",
         "head": f"{head_prefix}{branch_name}",
         "base": branch,
-        "body": _pr_body(meta, list(payload.keys())),
+        "body": _pr_body(meta, list(payload.keys()), canvas_id),
     })
     return {
         "ok": True,
+        "target": "public",
         "pr_url": pr.get("html_url"),
         "pr_number": pr.get("number"),
         "branch": branch_name,
