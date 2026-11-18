@@ -543,7 +543,29 @@ export const useStore = create<AppState>((set, get) => ({
 
   refreshCanvases: async () => {
     try {
-      set({ canvases: await api.listCanvases() })
+      const list = await api.listCanvases()
+      set({ canvases: list })
+      // 拉一次同步概览，把"远端有没有新版"合并进画布列表（失败不影响列表本身）
+      try {
+        const overview = await api.communitySyncOverview()
+        const byId = new Map(overview.items.map((i) => [i.canvas_id, i]))
+        set((state) => ({
+          canvases: state.canvases.map((c) => {
+            const item = byId.get(c.id)
+            if (!item) return c
+            return {
+              ...c,
+              remote_slug: item.remote_slug || c.remote_slug,
+              remote_name: item.remote_name || c.remote_name,
+              remote_rev: item.remote_rev ?? c.remote_rev,
+              remote_changed: !!item.remote_changed,
+              local_changed: !!item.local_changed,
+            }
+          }),
+        }))
+      } catch {
+        /* 没连 GitHub 或没绑模板时会失败，忽略 */
+      }
     } catch {
       /* ignore */
     }

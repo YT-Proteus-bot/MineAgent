@@ -398,6 +398,22 @@ export const api = {
         }),
       },
     ),
+  communitySyncOverview: () =>
+    request<{
+      ok: boolean
+      items: {
+        canvas_id: string
+        canvas_name: string
+        remote_slug: string
+        remote_lib: string
+        remote_name: string
+        local_rev: number
+        remote_rev: number
+        remote_changed: boolean
+        local_changed: boolean
+        remote_updated_at: string
+      }[]
+    }>('/api/community/sync-overview'),
   communitySyncStatus: (canvasId: string) =>
     request<{
       ok: boolean

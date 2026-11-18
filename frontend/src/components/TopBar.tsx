@@ -44,6 +44,27 @@ export default function TopBar({ onOpenUserCenter, onOpenCanvasModel }: Props) {
   const [serviceOpen, setServiceOpen] = useState(false)
   const [githubOpen, setGithubOpen] = useState(false)
   const refreshCanvases = useStore((s) => s.refreshCanvases)
+  const setSyncConflict = useStore((s) => s.setSyncConflict)
+
+  /** 画布下拉里的「更新」：走方案 A —— 先查本地有没有未同步改动，有冲突交给对话框 */
+  const updateFromRemote = async (c: { id: string; name: string; remote_slug?: string }) => {
+    if (!c.remote_slug) return
+    try {
+      const res = await api.loadCommunityTemplate(c.remote_slug, {
+        mode: 'update',
+        canvasId: c.id,
+      })
+      await refreshCanvases()
+      if (c.id === canvas?.id) await loadCanvas(c.id)
+      toast(`「${c.name}」已更新到第 ${res.rev ?? '?'} 版`, 'ok')
+    } catch (e: any) {
+      if (e?.status === 409 && e?.detail?.kind === 'local-changed') {
+        setSyncConflict(e.detail)
+        return
+      }
+      toast(`更新失败：${e.message || e}`, 'err')
+    }
+  }
 
   const currentFw = meta?.frameworks.find((f) => f.id === canvas?.framework)
   // 当前框架支持的模式；没选过就用默认的第一个
@@ -139,7 +160,38 @@ export default function TopBar({ onOpenUserCenter, onOpenCanvasModel }: Props) {
                 }}
               >
                 <span>▦</span>
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.name}</span>
+                <span
+                  style={{
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    minWidth: 0,
+                  }}
+                >
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {c.name}
+                    {c.remote_slug ? (
+                      <span className="dim small">
+                        （{c.remote_name || c.remote_slug}）
+                      </span>
+                    ) : null}
+                  </span>
+                  {c.remote_changed ? (
+                    <button
+                      className="sm primary"
+                      style={{ padding: '0 6px', height: 18, fontSize: 11 }}
+                      title="远端有新版本，点击按冲突规则更新"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        void updateFromRemote(c)
+                      }}
+                    >
+                      更新
+                    </button>
+                  ) : null}
+                </span>
                 <span className="sub">{c.node_count} 节点</span>
               </div>
             ))}
@@ -250,21 +302,6 @@ export default function TopBar({ onOpenUserCenter, onOpenCanvasModel }: Props) {
         {running ? '运行中' : '运行'}
       </button>
 
-      <button
-        onClick={async () => {
-          if (!canvas) return
-          if (dirty) {
-            const ok = await save()
-            if (!ok) return
-          }
-          setUploadOpen(true)
-        }}
-        disabled={!canvas}
-        title="把当前画布和项目文件贡献为社区模板（自动创建 GitHub PR，不含任何密钥）"
-      >
-        <span>☁</span> 上传模板
-      </button>
-
       <div className="spacer" />
 
       {dirty && <span className="badge warn">未保存</span>}
@@ -367,8 +404,9 @@ export default function TopBar({ onOpenUserCenter, onOpenCanvasModel }: Props) {
         )}
       </Popover>
 
-      <button onClick={onOpenCanvasModel} title="配置这个画布用的大模型与 key">
-        <span>⚙</span> 模型
+      <button onClick={onOpenCanvasModel}
+              title="这张画布的对话模型、向量模型、向量库与数据源">
+        <span>⚙</span> 画布配置
       </button>
 
       <Popover
@@ -421,6 +459,24 @@ export default function TopBar({ onOpenUserCenter, onOpenCanvasModel }: Props) {
               <div style={{ flex: 1 }}>
                 <div>公共模板</div>
                 <div className="dim small">浏览社区画布，一键加载</div>
+              </div>
+            </div>
+            <div
+              className="menu-item"
+              onClick={async () => {
+                close()
+                if (!canvas) return
+                if (dirty) {
+                  const ok = await save()
+                  if (!ok) return
+                }
+                setUploadOpen(true)
+              }}
+            >
+              <span className="ico">☁</span>
+              <div style={{ flex: 1 }}>
+                <div>上传模板</div>
+                <div className="dim small">把当前画布贡献为社区模板（自动建 PR）</div>
               </div>
             </div>
           </>

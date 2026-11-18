@@ -218,9 +218,11 @@ def publish(payload: Dict[str, Any]):
     try:
         with get_conn() as conn:
             conn.execute(
-                "UPDATE canvases SET remote_slug = ?, remote_rev = ?, base_graph_hash = ? "
-                "WHERE id = ?",
-                (applied_slug, next_rev, community.graph_hash(graph), canvas_id),
+                "UPDATE canvases SET remote_slug = ?, remote_rev = ?, base_graph_hash = ?, "
+                "remote_lib = ?, remote_name = ? WHERE id = ?",
+                (applied_slug, next_rev, community.graph_hash(graph),
+                 ("private:" + str(private_conf.get("repo", ""))) if target == "private" else "public",
+                 str(meta.get("name") or applied_slug), canvas_id),
             )
     except Exception:  # noqa: BLE001  记忆失败不影响本次推送结果
         pass
@@ -256,7 +258,7 @@ def canvas_status():
     return {"ok": True, **data}
 
 
-def _install_template(data: Dict[str, Any]) -> Dict[str, Any]:
+def _install_template(data: Dict[str, Any], lib: str = "public") -> Dict[str, Any]:
     """把模板（meta + graph）安装成一张新画布。公共/私人模板共用。"""
     meta = data["meta"]
     try:
@@ -269,6 +271,9 @@ def _install_template(data: Dict[str, Any]) -> Dict[str, Any]:
     name = str(meta.get("name") or meta.get("slug") or "模板").strip() or "模板"
     framework = str(meta.get("framework") or "langchain")
     canvas_id = uuid.uuid4().hex
+    remote_slug = str(meta.get("slug") or "")
+    remote_rev = int(meta.get("rev") or 1)
+    remote_name = str(meta.get("name") or remote_slug)
     with get_conn() as conn:
         display = f"{name}（社区）"
         final_slug = unique_slug(display, lambda s: conn.execute(
@@ -283,12 +288,14 @@ def _install_template(data: Dict[str, Any]) -> Dict[str, Any]:
         }
         conn.execute(
             "INSERT INTO canvases(id,name,slug,framework,graph,model_config,background,mode,"
-            "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "remote_slug,remote_rev,base_graph_hash,remote_lib,remote_name,"
+            "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (canvas_id, display, final_slug, framework,
              json.dumps(graph_dict, ensure_ascii=False),
              json.dumps(default_model, ensure_ascii=False),
              json.dumps(graph_dict["background"], ensure_ascii=False),
-             str(meta.get("mode") or ""), ts, ts),
+             str(meta.get("mode") or ""), ts, ts,
+             remote_slug, remote_rev, community.graph_hash(graph_dict), lib, remote_name),
         )
         try:
             _persist(conn, canvas_id, graph_dict, touch=False)
@@ -313,8 +320,33 @@ def list_libs():
 
 @router.put("/libs")
 def save_libs(payload: Dict[str, Any]):
+    """保存模板库前，用用户 token 逐个校验仓库是否存在，并记录 public/private。"""
+    items = payload.get("libs") or []
+    if not community.token():
+        raise HTTPException(400, "还没有连接 GitHub，无法校验仓库")
+    checked: List[Dict[str, Any]] = []
+    for item in items:
+        repo = str(item.get("repo") or "").strip()
+        if not repo:
+            continue
+        try:
+            owner_name, repo_name = community.parse_repo(repo)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        target = f"{owner_name}/{repo_name}"
+        try:
+            info = community.repo_info(target)
+        except community.GitHubError as exc:
+            raise HTTPException(400, f"{target} 校验失败：{exc}") from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        checked.append({
+            **item,
+            "repo": target,
+            "visibility": "private" if info.get("private") else "public",
+        })
     try:
-        libs = community.save_template_libs(payload.get("libs") or [])
+        libs = community.save_template_libs(checked)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     return {"ok": True, "libs": libs}
@@ -398,7 +430,7 @@ def private_load(payload: Dict[str, Any]):
         raise HTTPException(400, str(exc)) from exc
     except community.GitHubError as exc:
         raise HTTPException(502, f"下载模板失败：{exc}") from exc
-    return _install_template(data)
+    return _install_template(data, lib=f"private:{conf.get('repo', '')}")
 
 
 @router.post("/load")
@@ -478,11 +510,86 @@ def _update_from_template(slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(500, f"生成项目代码失败：{exc}") from exc
         conn.execute(
-            "UPDATE canvases SET remote_slug = ?, remote_rev = ?, base_graph_hash = ? WHERE id = ?",
-            (slug, remote_rev, community.graph_hash(graph), canvas_id),
+            "UPDATE canvases SET remote_slug = ?, remote_rev = ?, base_graph_hash = ?, "
+            "remote_lib = ?, remote_name = ? WHERE id = ?",
+            (slug, remote_rev, community.graph_hash(graph),
+             str(row["remote_lib"] or "public"), str(meta.get("name") or slug), canvas_id),
         )
         updated = _fetch(conn, canvas_id)
     return {"ok": True, "mode": "update", "rev": remote_rev, "canvas": _detail(updated)}
+
+
+@router.get("/sync-overview")
+def sync_overview():
+    """把所有绑定了远端的画布，连同"远端有没有新版"一次性算出来。
+
+    按库分组只拉一次模板列表，避免每个画布一次 GitHub 请求。
+    """
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, name, remote_slug, remote_rev, remote_lib, base_graph_hash, graph "
+            "FROM canvases WHERE remote_slug != ''"
+        ).fetchall()
+    if not rows:
+        return {"ok": True, "items": []}
+
+    cache: Dict[str, Dict[str, Any]] = {}
+
+    def templates_of(lib: str, canvas_id: str) -> Dict[str, Any]:
+        if lib in cache:
+            return cache[lib]
+        try:
+            if lib.startswith("private:"):
+                conf = community.private_settings(canvas_id)
+                repo = lib.split(":", 1)[1]
+                if repo:
+                    conf = {**conf, "repo": repo}
+                items = community.list_templates(conf) if conf.get("repo") else []
+            else:
+                items = community.list_templates(community.cfg())
+            cache[lib] = {str(t.get("slug") or ""): t for t in items}
+        except Exception:  # noqa: BLE001  某个库读不到不影响其它画布
+            cache[lib] = {}
+        return cache[lib]
+
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        slug = str(row["remote_slug"] or "")
+        lib = str(row["remote_lib"] or "public")
+        local_rev = int(row["remote_rev"] or 0)
+        meta = templates_of(lib, row["id"]).get(slug) or {}
+        remote_rev = int(meta.get("rev") or 0)
+
+        graph = json.loads(row["graph"] or "{}")
+        base_hash = str(row["base_graph_hash"] or "")
+        local_changed = bool(base_hash) and community.graph_hash(graph) != base_hash
+
+        out.append({
+            "canvas_id": row["id"],
+            "canvas_name": row["name"],
+            "remote_slug": slug,
+            "remote_lib": lib,
+            "remote_name": str(meta.get("name") or slug),
+            "local_rev": local_rev,
+            "remote_rev": remote_rev,
+            # 远端读不到时 remote_rev=0，按"没有更新"处理，不打扰用户
+            "remote_changed": bool(remote_rev and remote_rev > local_rev),
+            "local_changed": local_changed,
+            "remote_updated_at": meta.get("updated_at", ""),
+        })
+
+    # 顺手把模板名写回画布表，画布下拉里直接能显示，不用每次再查
+    try:
+        with get_conn() as conn:
+            for item in out:
+                conn.execute(
+                    "UPDATE canvases SET remote_name = ? WHERE id = ?",
+                    (item["remote_name"], item["canvas_id"]),
+                )
+    except Exception:  # noqa: BLE001  兼容还没这一列的老库
+        pass
+
+    return {"ok": True, "items": out}
 
 
 @router.get("/sync-status/{canvas_id}")

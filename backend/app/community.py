@@ -109,14 +109,15 @@ def save_template_libs(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         repo = str(item.get("repo") or "").strip()
         if not repo:
             continue
-        parse_repo(repo)
+        owner_name, repo_name = parse_repo(repo)
         cleaned.append({
             "id": str(item.get("id") or f"lib-{uuid.uuid4().hex[:8]}"),
             "name": str(item.get("name") or repo).strip()[:60] or repo,
             "kind": "private" if str(item.get("kind") or "") == "private" else "public",
-            "repo": repo,
+            "repo": f"{owner_name}/{repo_name}",
             "branch": str(item.get("branch") or "main").strip() or "main",
             "dir": str(item.get("dir") or "templates").strip().strip("/") or "templates",
+            "visibility": "private" if str(item.get("visibility") or "") == "private" else "public",
         })
     set_setting("template_libs", json.dumps(cleaned, ensure_ascii=False))
     return cleaned
@@ -138,10 +139,25 @@ def save_canvas_lib(canvas_id: str, lib_id: str) -> str:
     return lib_id
 
 
+def repo_info(target: str) -> Dict[str, Any]:
+    """用当前用户 token 查一个仓库：存在性、可见性（public/private）。"""
+    token_str = token()
+    if not token_str:
+        raise ValueError("还没有连接 GitHub，无法校验仓库")
+    return api("GET", f"/repos/{target}", token_str)
+
+
 def parse_repo(repo: str) -> Tuple[str, str]:
-    parts = [p for p in (repo or "").replace(" ", "").split("/") if p]
+    """接受 owner/repo，也接受完整 GitHub 仓库 URL（会去掉 https://github.com/ 和 .git）。"""
+    raw = (repo or "").strip()
+    for prefix in ("https://github.com/", "http://github.com/", "git@github.com:"):
+        if raw.startswith(prefix):
+            raw = raw[len(prefix):]
+    if raw.endswith(".git"):
+        raw = raw[:-4]
+    parts = [p for p in raw.replace(" ", "").split("/") if p]
     if len(parts) != 2:
-        raise ValueError("仓库格式应为 owner/repo，例如 yourname/MineAgent-Templates")
+        raise ValueError("仓库格式应为 owner/repo，也可以直接粘贴 GitHub 仓库 URL")
     return parts[0], parts[1]
 
 

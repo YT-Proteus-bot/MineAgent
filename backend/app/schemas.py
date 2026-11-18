@@ -104,6 +104,16 @@ class CanvasSummary(BaseModel):
     node_count: int
     created_at: str
     updated_at: str
+    # ---- 远端同步状态（没绑模板时都是空/0）----
+    remote_slug: str = ""
+    remote_rev: int = 0
+    remote_lib: str = ""
+    # 远端版本比本地记录的新
+    remote_changed: bool = False
+    # 本地有未同步的改动
+    local_changed: bool = False
+    # 远端模板名（列表里显示用）
+    remote_name: str = ""
 
 
 class CanvasDetail(CanvasSummary):
@@ -185,3 +195,49 @@ class AgentNodeModel(BaseModel):
     api_key_mask: str = ""
     api_key_env: str = ""
     inherit: bool = True  # True = 跟随画布/全局配置
+
+
+# --------------------------------------------------------------------------- #
+# 向量模型 / 向量库 / 数据源
+# --------------------------------------------------------------------------- #
+class ProviderIn(BaseModel):
+    """新建 / 更新一条 provider 配置。
+
+    config 只放非密文字段；secret 只在写入时出现（密文字段单独加密存储）。
+    """
+
+    kind: str = Field(description="embedding | vector | data")
+    provider: str = Field(default="", description="catalog 里的厂商 id")
+    name: str = ""
+    config: Dict[str, Any] = Field(default_factory=dict)
+    secret: Optional[Dict[str, Any]] = None
+    scope: str = "canvas"          # 现在一律是 canvas；global 只为兼容老数据
+    canvas_id: str = ""
+    is_default: bool = False
+
+
+class ProviderOut(BaseModel):
+    id: str
+    kind: str
+    provider: str
+    name: str
+    label: str = ""
+    config: Dict[str, Any] = Field(default_factory=dict)
+    secret_mask: Dict[str, str] = Field(default_factory=dict)
+    scope: str = "global"
+    canvas_id: str = ""
+    is_default: bool = False
+    status: str = "ready"
+    created_at: str = ""
+    updated_at: str = ""
+
+
+class ProviderTestIn(BaseModel):
+    """连接测试：可以测未保存的草稿，也可以测已存记录。"""
+
+    kind: str
+    provider: str = ""
+    config: Dict[str, Any] = Field(default_factory=dict)
+    secret: Optional[Dict[str, Any]] = None
+    id: Optional[str] = None       # 已存记录时复用其密文与缺省值
+    canvas_id: str = ""

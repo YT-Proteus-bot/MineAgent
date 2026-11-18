@@ -22,6 +22,8 @@ CREATE TABLE IF NOT EXISTS canvases (
     remote_slug   TEXT NOT NULL DEFAULT '',
     remote_rev    INTEGER NOT NULL DEFAULT 0,
     base_graph_hash TEXT NOT NULL DEFAULT '',
+    remote_lib    TEXT NOT NULL DEFAULT '',
+    remote_name   TEXT NOT NULL DEFAULT '',
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL
 );
@@ -128,6 +130,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE canvases ADD COLUMN remote_rev INTEGER NOT NULL DEFAULT 0")
     if "base_graph_hash" not in cols:
         conn.execute("ALTER TABLE canvases ADD COLUMN base_graph_hash TEXT NOT NULL DEFAULT ''")
+    # 从哪个库拉的：public / private:owner/repo
+    if "remote_lib" not in cols:
+        conn.execute("ALTER TABLE canvases ADD COLUMN remote_lib TEXT NOT NULL DEFAULT ''")
+    # 远端模板名（画布下拉里显示用）
+    if "remote_name" not in cols:
+        conn.execute("ALTER TABLE canvases ADD COLUMN remote_name TEXT NOT NULL DEFAULT ''")
 
 
 def get_setting(key: str, default: str = "") -> str:

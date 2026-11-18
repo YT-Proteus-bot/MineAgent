@@ -9,14 +9,19 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException
 
 from ..codegen import generate_project, unique_slug
+from ..codegen.native import TOOL_KINDS, node_block
+from ..code_summary import summarize_code
 from ..config import BACKGROUND_DIR, PROJECTS_DIR
 from ..constraints import validate as validate_graph
 from ..db import get_conn, get_setting, now_iso, set_setting
 from ..framework_templates import FRAMEWORK_INDEX, build_graph
+from ..node_templates import CODE_TEMPLATES
+from ..providers.bindings import resolve_runtime_providers
 from ..schemas import (AgentNodeModel, CanvasBackground, CanvasCreate, CanvasDetail,
                        CanvasSummary, CanvasUpdate, ConstraintReport, GlobalSettings, Graph,
                        ModelConfig, SaveResult)
 from ..security import decrypt, encrypt, mask
+from ..tool_presets import TOOL_PRESETS, get_summary
 
 router = APIRouter(prefix="/api/canvases", tags=["canvases"])
 
@@ -88,10 +93,19 @@ def load_node_models(canvas_id: str) -> Dict[str, Dict[str, Any]]:
 
 def _summary(row) -> CanvasSummary:
     graph = json.loads(row["graph"] or "{}")
+    keys = row.keys() if hasattr(row, "keys") else []
+    remote_slug = str(row["remote_slug"] or "") if "remote_slug" in keys else ""
+    remote_lib = str(row["remote_lib"] or "") if "remote_lib" in keys else ""
+    remote_rev = int(row["remote_rev"] or 0) if "remote_rev" in keys else 0
+    remote_name = str(row["remote_name"] or "") if "remote_name" in keys else ""
     return CanvasSummary(
         id=row["id"], name=row["name"], slug=row["slug"], framework=row["framework"],
         node_count=len(graph.get("nodes", [])),
         created_at=row["created_at"], updated_at=row["updated_at"],
+        remote_slug=remote_slug,
+        remote_rev=remote_rev,
+        remote_lib=remote_lib,
+        remote_name=remote_name,
     )
 
 
@@ -152,9 +166,11 @@ def resolve_runtime_model(canvas_row) -> Dict[str, Any]:
 def save_canvas(row, graph: Dict[str, Any]) -> tuple[str, List[str]]:
     """把图写入数据库并把代码落到 projects/<slug>/。"""
     cfg = resolve_runtime_model(row)
+    # 向量模型 / 向量库 / 数据源：画布默认优先，兜底到全局
+    providers = resolve_runtime_providers(row["id"])
     project_dir, files = generate_project(
         name=row["name"], slug=row["slug"], framework=row["framework"],
-        graph=graph, model_config=cfg,
+        graph=graph, model_config=cfg, providers=providers,
     )
     return str(project_dir), files
 
@@ -302,6 +318,16 @@ def save_canvas_endpoint(canvas_id: str, graph: Graph, force: bool = False):
         row = _fetch(conn, canvas_id)
         rules = _row_to_rules(row)
         graph_dict = graph.model_dump()
+        # 工类节点：说明还是通用占位文案时，按代码自动生成一句话介绍
+        for node in graph_dict.get("nodes") or []:
+            data = node.get("data") or {}
+            if data.get("kind") not in TOOL_KINDS:
+                continue
+            desc = (data.get("description") or "").strip()
+            if desc and not desc.startswith(("占位工具", "工具的通用节点", "工具的通用")):
+                continue
+            code = data.get("code") or data.get("preview_code") or ""
+            data["description"] = summarize_code(code)
         # 保存不拦人（可能只是编辑中间态），但把违规项一并返回，前端据此提示
         report = validate_graph(graph_dict, rules)
         # 先生成代码：过程中会把每个节点在 agent.py 里的代码块写回 graph_dict，
@@ -422,11 +448,79 @@ def delete_canvas(canvas_id: str):
         conn.execute("DELETE FROM canvases WHERE id = ?", (canvas_id,))
         conn.execute("DELETE FROM runs WHERE canvas_id = ?", (canvas_id,))
         conn.execute("DELETE FROM agent_models WHERE canvas_id = ?", (canvas_id,))
+        # 向量模型 / 向量库 / 数据源是画布级配置，跟着画布一起删
+        conn.execute("DELETE FROM providers WHERE canvas_id = ?", (canvas_id,))
     target = (PROJECTS_DIR / row["slug"]).resolve()
     if target.parent == PROJECTS_DIR.resolve() and target.exists():
         shutil.rmtree(target, ignore_errors=True)
     remove_background_files(canvas_id)
     return {"ok": True}
+
+
+@router.post("/{canvas_id}/nodes/{node_id}/describe")
+def describe_node(canvas_id: str, node_id: str):
+    """根据节点代码生成一句话介绍，写回节点说明。"""
+    with get_conn() as conn:
+        row = _fetch(conn, canvas_id)
+        graph = json.loads(row["graph"] or "{}")
+        node = next((n for n in graph.get("nodes") or [] if n["id"] == node_id), None)
+        if node is None:
+            raise HTTPException(404, "节点不存在")
+        data = node.setdefault("data", {})
+        code = data.get("code") or data.get("preview_code") or ""
+        summary = summarize_code(code)
+        data["description"] = summary
+        conn.execute(
+            "UPDATE canvases SET graph = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(graph, ensure_ascii=False), now_iso(), canvas_id),
+        )
+    return {"ok": True, "description": summary}
+
+
+@router.post("/{canvas_id}/nodes/{node_id}/apply-tool")
+def apply_tool_preset(canvas_id: str, node_id: str, payload: Dict[str, Any]):
+    """给 tool 节点套用内置工具：写入预览代码 + agent.py 原生代码。"""
+    preset = str(payload.get("preset") or "")
+    with get_conn() as conn:
+        row = _fetch(conn, canvas_id)
+        graph = json.loads(row["graph"] or "{}")
+        node = next((n for n in graph.get("nodes") or [] if n["id"] == node_id), None)
+        if node is None:
+            raise HTTPException(404, "节点不存在")
+        data = node.setdefault("data", {})
+        params = data.setdefault("params", {})
+        params["preset"] = preset
+        # 节点说明改成「这段代码实际干了什么」，替掉通用模板文案
+        if preset in TOOL_PRESETS:
+            data["description"] = get_summary(preset) or TOOL_PRESETS[preset]["description"]
+
+        spec_node = {
+            "id": node_id,
+            "kind": data.get("kind") or "tool",
+            "name": data.get("name") or node_id,
+            "label": data.get("label") or "工具",
+            "description": data.get("description") or "",
+            "params": params,
+            "model": data.get("model"),
+        }
+        block = node_block(spec_node).strip()
+        data["code"] = block
+        data["preview_code"] = (TOOL_PRESETS[preset]["preview"] if preset in TOOL_PRESETS
+                                else CODE_TEMPLATES.get("tool", ""))
+        data["code_touched"] = False
+        data["code_generated"] = True
+        conn.execute(
+            "UPDATE canvases SET graph = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(graph, ensure_ascii=False), now_iso(), canvas_id),
+        )
+    return {
+        "ok": True,
+        "preset": preset,
+        "label": TOOL_PRESETS.get(preset, {}).get("label", "自定义"),
+        "code": block,
+        "preview_code": data["preview_code"],
+        "params": params,
+    }
 
 
 def remove_background_files(canvas_id: str) -> int:

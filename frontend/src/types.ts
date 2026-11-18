@@ -102,7 +102,7 @@ export interface GraphPayload {
   service?: ServiceConfig
 }
 
-/** 画布级「服务设置」：入口 / 会话与并发 / 可观测 / 安全 */
+/** 画布级「服务设置」：入口 / 会话与并发 / 可观测 / 安全 / 数据 / 评测 */
 export interface ServiceConfig {
   entry: { mode: string; path: string; auth: string; cors: string }
   session: { store: string; max_turns: number; ttl_minutes: number }
@@ -115,6 +115,28 @@ export interface ServiceConfig {
     budget_usd: number
   }
   security: { sandbox: string; guardrail: string; pii: boolean; audit: boolean }
+  data: {
+    enabled: boolean
+    kind: string
+    base_url: string
+    auth: string
+    secret_ref: string
+    datasets: { logical: string; physical: string; mode: string }[]
+    timeout_s: number
+    pii_fields: string[]
+  }
+  eval: {
+    enabled: boolean
+    kind: string
+    base_url: string
+    auth: string
+    secret_ref: string
+    project: string
+    evalsets: { logical: string; remote: string }[]
+    report_on_run: boolean
+    pass_rate: number
+    latency_p95_ms: number
+  }
 }
 
 export const DEFAULT_SERVICE: ServiceConfig = {
@@ -123,6 +145,28 @@ export const DEFAULT_SERVICE: ServiceConfig = {
   runtime: { max_concurrency: 4, queue_limit: 100, run_timeout_s: 600, resume: false },
   observability: { log_level: 'info', json_logs: true, metrics: true, trace_sample: 1, budget_usd: 0 },
   security: { sandbox: 'restricted', guardrail: 'log', pii: false, audit: true },
+  data: {
+    enabled: false,
+    kind: 'http',
+    base_url: '',
+    auth: 'bearer',
+    secret_ref: 'MINEAGENT_DATA_TOKEN',
+    datasets: [],
+    timeout_s: 30,
+    pii_fields: [],
+  },
+  eval: {
+    enabled: false,
+    kind: 'http',
+    base_url: '',
+    auth: 'bearer',
+    secret_ref: 'MINEAGENT_EVAL_TOKEN',
+    project: '',
+    evalsets: [],
+    report_on_run: true,
+    pass_rate: 0.8,
+    latency_p95_ms: 8000,
+  },
 }
 
 export interface ModelConfig {
@@ -163,6 +207,17 @@ export interface CanvasSummary {
   node_count: number
   created_at: string
   updated_at: string
+  /** 绑定的远端模板（没同步过就是空） */
+  remote_slug?: string
+  remote_rev?: number
+  /** 来源库：public 或 private:owner/repo */
+  remote_lib?: string
+  /** 远端模板名（下拉里括号显示） */
+  remote_name?: string
+  /** 远端有比本地记录更新的版本 */
+  remote_changed?: boolean
+  /** 本地有没同步出去的改动 */
+  local_changed?: boolean
 }
 
 export interface CanvasDetail extends CanvasSummary {
@@ -187,6 +242,8 @@ export interface NodeParamDef {
   placeholder: string
   options?: { value: string; label: string }[]
   help?: string
+  /** 这个参数要选画布里的哪类实例（embedding / vector / data） */
+  source?: ProviderKind
 }
 
 export interface NodeDoc {
@@ -293,7 +350,41 @@ export interface Meta {
   all_modes?: AgentModeDef[]
   constraint_rules: ConstraintRuleDef[]
   custom_rule_types: CustomRuleType[]
+  /** 内置工具清单：tool 节点的下拉与专属参数 */
+  tool_presets?: ToolPreset[]
   version: string
+}
+
+export interface ToolPreset {
+  id: string
+  label: string
+  description: string
+  /** 一句话说清这段代码干了什么，套用后会写进节点说明 */
+  summary?: string
+  args: string
+  params: { key: string; label: string; default: any }[]
+}
+
+/** 用户中心配置的模板库（公共 / 私人，可有多个） */
+export interface TemplateLib {
+  id: string
+  name: string
+  kind: 'public' | 'private'
+  repo: string
+  branch: string
+  dir: string
+  /** 保存时用用户 token 校验出的仓库可见性 */
+  visibility?: 'public' | 'private'
+}
+
+/** 后台上传任务：点上传后立即关闭弹窗，任务在后台跑 */
+export interface UploadJob {
+  id: string
+  canvasId: string
+  name: string
+  status: 'running' | 'ok' | 'error'
+  prUrl: string
+  error?: string
 }
 
 export interface RunEvent {
@@ -352,4 +443,81 @@ export interface ProjectFileEntry {
   path: string
   size: number
   language: string
+}
+
+/* ---------------- 向量模型 / 向量库 / 数据源 ---------------- */
+export type ProviderKind = 'embedding' | 'vector' | 'data'
+
+export interface ProviderField {
+  key: string
+  label: string
+  required: boolean
+  /** 密钥类字段：单独加密存储，接口只回显掩码 */
+  secret: boolean
+  default: any
+  placeholder: string
+  kind: 'text' | 'password' | 'number' | 'select' | 'textarea'
+  help: string
+  options?: string[]
+}
+
+export interface ProviderModelDef {
+  id: string
+  dim: number
+}
+
+export interface CatalogItem {
+  id: string
+  label: string
+  group: string
+  protocol: string
+  /** ready = 已实现；planned = 已列入、适配器后续补齐 */
+  status: 'ready' | 'planned'
+  pip: string
+  fields: ProviderField[]
+  help: string
+  base_url: string
+  key_required: boolean
+  models: ProviderModelDef[]
+}
+
+export interface CatalogKind {
+  id: ProviderKind
+  label: string
+  desc: string
+  items: CatalogItem[]
+}
+
+export interface ProviderCatalog {
+  groups: Record<string, string>
+  kinds: CatalogKind[]
+}
+
+export interface ProviderRecord {
+  id: string
+  kind: ProviderKind
+  provider: string
+  name: string
+  label: string
+  config: Record<string, any>
+  /** 密钥字段的掩码，形如 sk-****abcd */
+  secret_mask: Record<string, string>
+  scope: string
+  canvas_id: string
+  is_default: boolean
+  status: string
+  created_at: string
+  updated_at: string
+}
+
+export interface ProviderTestResult {
+  ok: boolean
+  message: string
+  hint?: string
+  stage?: string
+  protocol?: string
+  dim?: number
+  latency_ms?: number
+  tables?: string[]
+  error?: string
 }
