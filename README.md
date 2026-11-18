@@ -317,10 +317,16 @@ MineAgent/
 │  │  ├─ framework_templates.py # 10 个框架 + 各自的架构图模板 + 自动布局
 │  │  ├─ codegen/generators.py  # 画布 → 独立 Agent 项目的代码生成
 │  │  ├─ codegen/production.py  # 服务设置 → server.py / Dockerfile / CI 等生产化文件
+│  │  ├─ providers/             # ★ 向量模型 / 向量库 / 数据源的适配层
+│  │  │  ├─ catalog*.py         #   枚举清单（纯数据，加一家只改这里）
+│  │  │  ├─ embedding.py        #   6 类 embedding 协议
+│  │  │  ├─ vectorstore.py      #   14 个向量库适配器
+│  │  │  ├─ datastore.py        #   6 类数据库协议
+│  │  │  └─ bindings.py         #   画布/全局配置解析、密钥环境变量
 │  │  ├─ runtime/
 │  │  │  ├─ runtime_sdk.py      # 节点可用的 ctx 能力（会被复制进每个项目）
 │  │  │  └─ runner.py           # 内置图执行器（会被复制进每个项目）
-│  │  └─ routers/               # canvases / run / projects / settings / meta
+│  │  └─ routers/               # canvases / run / projects / settings / providers / meta
 │  ├─ data/                     # mineagent.db、master.key、运行日志、背景图（不入库）
 │  └─ requirements.txt
 ├─ frontend/
@@ -353,8 +359,9 @@ tests/              # pytest 冒烟测试（不需要真实模型）
 agent.json          # 画布图定义（节点、连线、参数、节点代码）
 runner.py           # 零依赖预览执行器（不装框架也能在这里跑一遍）
 runtime_sdk.py      # runner 用的运行时（只用标准库）
+providers/          # 向量模型 / 向量库 / 数据源适配层（和平台同一个实现）
 run.ps1 / run.sh    # 一键运行
-config.json         # 模型配置（不含 key）
+config.json         # 模型配置 + 向量与数据源配置（不含 key）
 .env.example        # 脱离网页独立运行时，复制成 .env 填 key
 skills/             # skill.md 技能文件
 outputs/            # 运行产物
@@ -755,6 +762,80 @@ Langflow 线性链、SmolAgents 代码行动
 
 ---
 
+## 向量模型 / 向量库 / 数据源
+
+入口在「用户中心」的三个页签里，和对话模型并列：**向量模型**、**向量库**、**数据源**。
+配好之后，`embedding` / `vector_indexer` / `vector_store` / `hybrid_retriever` 这些节点
+会自动用上；不配则回退到内置实现，画布照样能跑。
+
+### 内置清单
+
+| 类别 | 数量 | 覆盖 |
+| --- | --- | --- |
+| 向量模型 | 38 家 / 350+ 模型 | OpenAI、Azure、通义、智谱、硅基流动、火山、混元、千帆、百川、MiniMax、Cohere、Jina、Voyage、Gemini、Mistral、Together、Fireworks、DeepInfra、Nebius、Nomic、Mixedbread、Upstage、Snowflake、Vertex、Bedrock，以及 Ollama / TEI / vLLM / LM Studio / Xinference / LocalAI / FastChat，和 FastEmbed / sentence-transformers 进程内直跑 |
+| 向量库 | 46 个（42 个已实现） | 内置 SQLite、sqlite-vec、Chroma、pgvector / pgvecto.rs / GaussDB、Qdrant、Milvus/Zilliz、Weaviate、LanceDB、FAISS、Elasticsearch、OpenSearch、Redis、Pinecone、DuckDB VSS、ClickHouse、Typesense、Upstash、Turbopuffer、Azure AI Search、ArangoDB、Vectara、Vespa、SurrealDB、Couchbase、Oracle、SAP HANA、Vertex AI、MySQL 家族（MariaDB/TiDB/OceanBase/Doris/StarRocks/SingleStore）、MongoDB Atlas；剩百度向量数据库 / DashVector / 腾讯云 / VikingDB 四家待补（需对应云账号验证） |
+| 数据源 | 48 个（6 类已实现） | 内置 SQLite、PostgreSQL、MySQL、MongoDB、Redis、Neo4j；关系 / 文档 / 图 / KV / 时序共 48 个已枚举 |
+
+「已实现」和「即将支持」在下拉里会标出来，未实现的不能选，不会让你配完才发现跑不起来。
+
+### 三个约定
+
+**1. 只认「设为默认」的配置。** 同一个作用域（全局 / 画布）里只有一个默认项；
+随手建了一条但没设默认，不会悄悄影响所有画布。画布默认优先于全局默认。
+
+**2. 密钥加密落库，只走环境变量。** 密钥字段单独加密存在 `providers` 表，
+接口只回显 `sk-****abcd`；生成项目时 `config.json` 里只有 `api_key_env` 的名字
+（`MINEAGENT_EMB_KEY` / `MINEAGENT_VEC_KEY` / `MINEAGENT_DATA_KEY`），
+值由运行时通过环境变量注入子进程，**不会写进任何项目文件**。
+
+**3. 依赖是懒加载的。** 没装 `chromadb` 时选不了 Chroma 的节点不会把流程跑崩，
+而是返回一条可照做的提示：`需要 chromadb → 运行 pip install chromadb`。
+主 `requirements.txt` 仍然只有框架本身那几个包。
+
+### 节点里怎么用
+
+```python
+ctx.embed(text)                        # 单条文本 → 向量（走配置的向量模型）
+ctx.embed_many(texts)                  # 批量
+ctx.vector_upsert(text, metadata={})   # 写入配置的向量库
+ctx.vector_search(query, top_k=4, where={"source": "faq"})
+ctx.use_collection("another")          # 临时换集合
+ctx.query_data("SELECT * FROM orders") # 读数据源（SQL / Cypher / Redis 命令）
+ctx.write_data("INSERT INTO ...")      # 写数据源
+```
+
+节点代码里不需要区分底层是 Chroma 还是 Qdrant——切换库只改配置，代码不用动。
+
+### 换模型必须重建索引
+
+不同 embedding 模型的向量维度不同，混用会得到毫无意义的相似度。
+所以集合会记下首次入库时的维度与模型指纹，**维度不一致直接报错**并提示重建，
+而不是静默返回垃圾结果。
+
+```python
+# 换模型后的正确做法
+ctx.vector_store_drop("docs")   # 清空旧集合
+# 再用新模型重新跑一遍 vector_indexer
+```
+
+### 导出的项目怎么连
+
+`providers/` 目录会跟着 `runtime_sdk.py` 一起复制进 `projects/<画布>/`，
+所以导出的项目脱离平台也能连自己的向量库：
+
+```bash
+# 1) 装你用的那个库
+pip install qdrant-client
+
+# 2) 在 .env 里填密钥（网页上配过的话可以跳过）
+MINEAGENT_VEC_KEY=your-token
+
+# 3) config.json 里已经有连接配置了，直接跑
+python runner.py --input "你的问题"
+```
+
+---
+
 ## 节点代码能用到什么
 
 每个节点就是 `nodes/<name>.py` 里的一个 `run(ctx)` 函数，`ctx` 提供：
@@ -775,6 +856,8 @@ ctx.http(...) / ctx.search() / ctx.fetch_text() / ctx.mcp_call(...)
 ctx.skill(name, inline)     # 读 skills/*.md 或直接用内联的 skill.md 内容
 ctx.remember() / ctx.recall() / ctx.history()
 ctx.retrieve() / ctx.embed() / ctx.vector_upsert() / ctx.vector_search()
+ctx.embed_many() / ctx.use_collection() / ctx.vector_delete() / ctx.vector_store_drop()
+ctx.query_data() / ctx.write_data() / ctx.data_tables()   # 数据源（SQL / Cypher / Redis）
 ctx.exec_python() / ctx.shell() / ctx.read_file() / ctx.write_file() / ctx.query_sql()
 ctx.log() / ctx.emit() / ctx.route()
 ```

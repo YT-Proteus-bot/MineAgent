@@ -97,6 +97,8 @@ def _llm_decl(node: Dict[str, Any]) -> str:
         f"    base_url={base_expr},\n"
         f'    api_key=os.environ.get("{env}") or os.environ.get("MINEAGENT_API_KEY") or "EMPTY",\n'
         f"    temperature={temp_expr},\n"
+        f"    timeout=float(os.environ.get(\"MINEAGENT_LLM_TIMEOUT\") or 120),\n"
+        f"    callbacks=[_USAGE_HANDLER],\n"
         f")\n"
     )
 
@@ -567,28 +569,123 @@ def _block_splitter(node: Dict[str, Any]) -> str:
 
 
 def _block_indexer(node: Dict[str, Any]) -> str:
+    """向量类节点：复用项目自带的 providers 适配层。
+
+    配置读 config.json，所以同一段代码在 SQLite / Chroma / Qdrant / pgvector /
+    Milvus 之间切换不用改；导出的项目脱离平台也照样能跑。
+    """
     fn = _pyid(node["name"])
+    kind = _kind_of(node)
+    p = _params(node)
+    collection = _text(p, "collection", "")
+    nid = _q(node["id"])
+    nname = _q(node["name"])
+    use_coll = f"    project_use_collection({_q(collection)})\n" if collection else ""
+
+    if kind == "embedding":
+        return (
+            f"def {fn}(state: AgentState) -> dict:\n"
+            f'    """{node.get("label") or "向量化"} —— 走 config.json 里配置的向量模型。"""\n'
+            f"    from runtime_sdk import project_embed\n"
+            f'    text = str(state.get("data", ""))\n'
+            f"    vec = project_embed(text)\n"
+            f'    _emit({{"event": "embedding", "node": {nid}, "name": {nname},\n'
+            f'           "dim": len(vec)}})\n'
+            f'    return {{"data": vec, "text": text, "dim": len(vec)}}\n'
+        )
+
+    if kind == "vector_store":
+        action = str(_text(p, "action", "search")).lower()
+        top_k = int(_num(p, "top_k", 4))
+        raw_where = p.get("where")
+        where_literal = "None"
+        if isinstance(raw_where, str) and raw_where.strip():
+            try:
+                where_literal = json.dumps(json.loads(raw_where), ensure_ascii=False)
+            except Exception:  # noqa: BLE001
+                where_literal = "None"
+        elif isinstance(raw_where, dict):
+            where_literal = json.dumps(raw_where, ensure_ascii=False)
+
+        if action == "upsert":
+            return (
+                f"def {fn}(state: AgentState) -> dict:\n"
+                f'    """{node.get("label") or "向量库"} —— 写入 config.json 里配置的向量库。"""\n'
+                f"    from runtime_sdk import project_vector_upsert\n"
+                f"    from runtime_sdk import project_use_collection\n"
+                f"{use_coll}"
+                f'    text = str(state.get("data", ""))\n'
+                f'    result = project_vector_upsert(text, {{"node": {nname}}})\n'
+                f'    _emit({{"event": "log", "node": {nid}, "name": {nname},\n'
+                f'           "message": f"已写入 {{result.get(\'backend\')}}"}})\n'
+                f'    return {{"data": result, "id": result.get("id")}}\n'
+            )
+        return (
+            f"def {fn}(state: AgentState) -> dict:\n"
+            f'    """{node.get("label") or "向量库"} —— 从 config.json 里配置的向量库检索。"""\n'
+            f"    from runtime_sdk import project_vector_search\n"
+            f"    from runtime_sdk import project_use_collection\n"
+            f"{use_coll}"
+            f'    query = str(state.get("data", ""))\n'
+            f"    hits = project_vector_search(query, top_k={top_k}, where={where_literal})\n"
+            f'    _emit({{"event": "retrieval", "node": {nid}, "name": {nname},\n'
+            f'           "count": len(hits)}})\n'
+            f'    return {{"data": hits, "query": query, "hit": len(hits)}}\n'
+        )
+
+    # vector_indexer：批量入库
     return (
         f"def {fn}(state: AgentState) -> dict:\n"
-        f'    """{node.get("label") or "向量入库"} —— 把文本块写进项目内的 SQLite 索引。"""\n'
-        f"    import json as _json\n"
-        f"    import sqlite3\n"
-        f"    from pathlib import Path as _Path\n"
-        f"\n"
-        f"    data = state.get(\"data\")\n"
-        f"    chunks = data if isinstance(data, list) else [str(data or \"\")]\n"
-        f"    chunks = [c for c in chunks if str(c).strip()]\n"
-        f'    db = _Path(__file__).resolve().parent / ".store.db"\n'
-        f"    conn = sqlite3.connect(db)\n"
-        f"    conn.execute(\"CREATE TABLE IF NOT EXISTS chunks(id INTEGER PRIMARY KEY, text TEXT)\")\n"
-        f"    for c in chunks:\n"
-        f"        conn.execute(\"INSERT INTO chunks(text) VALUES(?)\", (str(c),))\n"
-        f"    conn.commit()\n"
-        f"    total = conn.execute(\"SELECT COUNT(*) FROM chunks\").fetchone()[0]\n"
-        f"    conn.close()\n"
-        f'    _emit({{"event": "log", "node": {_q(node["id"])}, "name": {_q(node["name"])},\n'
-        f'           "message": f"入库 {{len(chunks)}} 块，库里共 {{total}} 块"}})\n'
-        f'    return {{"data": chunks, "indexed": len(chunks), "total": total}}\n'
+        f'    """{node.get("label") or "向量入库"} —— 写进 config.json 里配置的向量库。"""\n'
+        f"    from runtime_sdk import project_vector_upsert\n"
+        f"    from runtime_sdk import project_use_collection\n"
+        f"{use_coll}"
+        f'    data = state.get("data")\n'
+        f"    # 上游直接给向量说明接线错了：入库要接在文本后面\n"
+        f"    if isinstance(data, list) and data and all(isinstance(x, (int, float)) for x in data):\n"
+        f'        _emit({{"event": "log", "level": "warn", "node": {nid}, "name": {nname},\n'
+        f'               "message": "上游是向量而不是文本：vector_indexer 应接在文本节点后面"}})\n'
+        f'        return {{"data": data, "indexed": 0, "skipped": "vector_input"}}\n'
+        f"    if isinstance(data, list) and data and all(isinstance(x, str) for x in data):\n"
+        f"        chunks = data\n"
+        f"    else:\n"
+        f'        chunks = [str(data or "")]\n'
+        f'    chunks = [c for c in chunks if str(c).strip()]\n'
+        f"    for chunk in chunks:\n"
+        f'        project_vector_upsert(str(chunk), {{"node": {nname}}})\n'
+        f'    _emit({{"event": "log", "node": {nid}, "name": {nname},\n'
+        f'           "message": f"入库 {{len(chunks)}} 块"}})\n'
+        f'    return {{"data": chunks, "indexed": len(chunks)}}\n'
+    )
+
+
+def _block_hybrid(node: Dict[str, Any]) -> str:
+    """混合检索：向量库 + 文件关键词各取一份。"""
+    fn = _pyid(node["name"])
+    p = _params(node)
+    top_k = int(_num(p, "top_k", 4))
+    nid = _q(node["id"])
+    nname = _q(node["name"])
+    raw_where = p.get("where")
+    where_literal = "None"
+    if isinstance(raw_where, str) and raw_where.strip():
+        try:
+            where_literal = json.dumps(json.loads(raw_where), ensure_ascii=False)
+        except Exception:  # noqa: BLE001
+            where_literal = "None"
+    elif isinstance(raw_where, dict):
+        where_literal = json.dumps(raw_where, ensure_ascii=False)
+    return (
+        f"def {fn}(state: AgentState) -> dict:\n"
+        f'    """{node.get("label") or "混合检索"} —— 向量库召回 + 文件关键词召回。"""\n'
+        f"    from runtime_sdk import project_retrieve, project_vector_search\n"
+        f'    query = str(state.get("data", ""))\n'
+        f"    hits = project_vector_search(query, top_k={top_k}, where={where_literal})\n"
+        f'    keywords = project_retrieve(query, top_k={top_k}, mode="keyword")\n'
+        f'    _emit({{"event": "retrieval", "node": {nid}, "name": {nname},\n'
+        f'           "vector": len(hits), "keyword": len(keywords)}})\n'
+        f'    return {{"data": hits or keywords, "query": query,\n'
+        f'             "vector": hits, "keyword": keywords}}\n'
     )
 
 
@@ -774,6 +871,8 @@ def node_block(node: Dict[str, Any], spec: Dict[str, Any] | None = None) -> str:
         body = _block_splitter(node)
     elif kind in ("vector_indexer", "embedding", "vector_store"):
         body = _block_indexer(node)
+    elif kind == "hybrid_retriever":
+        body = _block_hybrid(node)
     elif kind in TOOL_KINDS:
         body = _block_tool(node)
     elif kind in ROUTE_KINDS:
@@ -815,6 +914,7 @@ _HEADER_LANGCHAIN = '''"""{name} · {framework_label}
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 import time
@@ -822,6 +922,7 @@ from pathlib import Path
 from typing import Annotated, Any, TypedDict
 
 from langchain.agents import create_agent
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
@@ -829,6 +930,62 @@ from langgraph.graph import END, START, StateGraph
 
 HERE = Path(__file__).resolve().parent
 CFG = json.loads((HERE / "config.json").read_text(encoding="utf-8"))
+
+
+# ── token 用量：按运行上下文累计，一次 run 结束由 take_usage() 取走 ──
+# 用 ContextVar 而不是线程局部变量：节点是在线程池里执行的，只有复制上下文
+# （_run_with_timeout 里做了）才能把用量带回来。
+_USAGE = contextvars.ContextVar("mineagent_usage", default=None)
+
+
+def reset_usage() -> None:
+    _USAGE.set({"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0})
+
+
+def _usage_add(usage) -> None:
+    """累计一次模型调用的 token（同时兼容 OpenAI 和 LangChain 的字段名）。"""
+    if not isinstance(usage, dict):
+        return
+    bucket = _USAGE.get()
+    if bucket is None:
+        reset_usage()
+        bucket = _USAGE.get()
+    for dst, keys in (("prompt_tokens", ("input_tokens", "prompt_tokens")),
+                      ("completion_tokens", ("output_tokens", "completion_tokens")),
+                      ("total_tokens", ("total_tokens",))):
+        for key in keys:
+            value = usage.get(key)
+            if value:
+                try:
+                    bucket[dst] += int(value)
+                except (TypeError, ValueError):
+                    pass
+                break
+    bucket["calls"] += 1
+
+
+def take_usage() -> dict:
+    """取走本次运行的用量统计，并清空。"""
+    bucket = dict(_USAGE.get() or {"prompt_tokens": 0, "completion_tokens": 0,
+                                   "total_tokens": 0, "calls": 0})
+    reset_usage()
+    return bucket
+
+
+class _UsageHandler(BaseCallbackHandler):
+    """把所有模型调用的 token 用量记进当前运行上下文。
+
+    挂在模型实例上，invoke / stream / create_agent 内部的调用都能覆盖到，
+    比在每个节点里手写记账可靠。
+    """
+
+    def on_llm_end(self, response, **kwargs):  # noqa: D401
+        llm_output = getattr(response, "llm_output", None) or {}
+        _usage_add(llm_output.get("token_usage") or llm_output.get("usage"))
+
+
+_USAGE_HANDLER = _UsageHandler()
+
 
 # ── 模型：key 从环境变量或 .env 读，不写死在代码里 ──────────────
 llm = ChatOpenAI(
@@ -841,6 +998,11 @@ llm = ChatOpenAI(
     # 真正能中断请求的是这里（默认 120s，可用环境变量覆盖）
     timeout=float(os.environ.get("MINEAGENT_LLM_TIMEOUT") or 120),
     max_retries=int(os.environ.get("MINEAGENT_LLM_MAX_RETRIES") or 2),
+    # 流式调用也要带上 token 用量（OpenAI 兼容接口需要显式要 usage）。
+    # 个别服务商不认 stream_options，遇到就设 MINEAGENT_STREAM_USAGE=0 关掉。
+    stream_usage=str(os.environ.get("MINEAGENT_STREAM_USAGE", "1")).lower() not in ("0", "false", "no"),
+    # callbacks 挂在模型上：所有节点（含 create_agent 内部）的调用都会记账
+    callbacks=[_USAGE_HANDLER],
 )
 
 # ── 运行事件：每个节点执行前后的输入/输出都回传给网页运行面板 ──────
@@ -894,8 +1056,12 @@ def _stream(model, messages, node_id: str = "", name: str = "", interval: float 
     """逐段调模型：边生成边把 token 推给运行面板，最后拼成完整文本。"""
     parts: list = []
     last = 0.0
+    usage_seen = None
     try:
         for chunk in model.stream(messages):
+            meta = getattr(chunk, "usage_metadata", None)
+            if meta:
+                usage_seen = meta
             text = getattr(chunk, "content", "")
             if not isinstance(text, str) or not text:
                 continue
@@ -907,6 +1073,9 @@ def _stream(model, messages, node_id: str = "", name: str = "", interval: float 
     except Exception:  # noqa: BLE001
         msg = model.invoke(messages)
         return str(getattr(msg, "content", msg))
+    if usage_seen:
+        # 流式返回的用量：on_llm_end 拿到的 llm_output 可能是空的，这里补一次
+        _usage_add(usage_seen)
     return "".join(parts)
 
 
@@ -941,7 +1110,9 @@ def _run_with_timeout(fn, state, timeout_s: float):
     from concurrent.futures import TimeoutError as FutureTimeout
 
     pool = ThreadPoolExecutor(max_workers=1)
-    future = pool.submit(fn, state)
+    # 复制上下文：节点里累计的 token 用量要能带回调用方
+    ctx = contextvars.copy_context()
+    future = pool.submit(ctx.run, fn, state)
     try:
         return future.result(timeout=timeout_s)
     except FutureTimeout:
@@ -1079,7 +1250,12 @@ import os
 from pathlib import Path
 from typing import Annotated, Any, TypedDict
 
-from autogen import AssistantAgent, GroupChat, GroupChatManager, UserProxyAgent
+try:
+    from autogen import AssistantAgent, GroupChat, GroupChatManager, UserProxyAgent
+except ImportError as _missing:  # pragma: no cover
+    raise SystemExit(
+        f"缺少 AutoGen 依赖（{_missing}）。先执行：pip install pyautogen ，装好后重新运行本文件即可。"
+    ) from _missing
 from openai import OpenAI
 
 HERE = Path(__file__).resolve().parent
@@ -1124,8 +1300,13 @@ import os
 from pathlib import Path
 from typing import Annotated, Any, TypedDict
 
-from crewai import Agent, Crew, Process, Task
-from crewai.tools import tool
+try:
+    from crewai import Agent, Crew, Process, Task
+    from crewai.tools import tool
+except ImportError as _missing:  # pragma: no cover
+    raise SystemExit(
+        f"缺少 CrewAI 依赖（{_missing}）。先执行：pip install crewai ，装好后重新运行本文件即可。"
+    ) from _missing
 from langchain_openai import ChatOpenAI
 
 HERE = Path(__file__).resolve().parent
