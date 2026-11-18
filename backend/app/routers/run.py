@@ -197,7 +197,12 @@ async def run_canvas(canvas_id: str, payload: RunRequest):
         project_dir, _files = save_canvas(row, graph_dict)
 
     run_id = uuid.uuid4().hex
-    env = os.environ.copy()
+    # 只从画布配置派生模型环境：平台进程里如果残留 MINEAGENT_API_KEY / OPENAI_API_KEY 之类，
+    # 一旦透给生成物就会出现「用了一个不知道哪来的 key」的 401
+    LEAKY = ("MINEAGENT_API_KEY", "MINEAGENT_BASE_URL", "MINEAGENT_MODEL",
+             "MINEAGENT_INPUT_FILES", "MINEAGENT_PROVIDER",
+             "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY")
+    env = {k: v for k, v in os.environ.items() if k not in LEAKY}
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"
     env["PYTHONUNBUFFERED"] = "1"
