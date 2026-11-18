@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class FlowNodeData(BaseModel):
@@ -29,6 +29,10 @@ class FlowNodeData(BaseModel):
     org: Dict[str, Any] = Field(default_factory=dict)
     # 节点级模型（不含明文 key，key 单独加密存在 agent_models 表）
     model: Optional[Dict[str, Any]] = None
+
+
+# React Flow 里注册的自定义节点类型；kind 一定放在 data.kind 里
+RF_NODE_TYPES = {"agent"}
 
 
 class FlowNode(BaseModel):
@@ -69,6 +73,20 @@ class Graph(BaseModel):
     background: CanvasBackground = Field(default_factory=CanvasBackground)
     # 画布级「服务设置」：入口 / 会话并发 / 可观测 / 安全
     service: Dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("nodes")
+    @classmethod
+    def _normalize_node_type(cls, nodes: List[FlowNode]) -> List[FlowNode]:
+        """React Flow 只注册了 agent 这一种自定义节点（前端 nodeTypes = {agent}）。
+
+        type 若写成 kind（input / hybrid_retriever 等）会落到 React Flow 的内置兜底节点，
+        渲染成没有内容的小白块：节点在、数据也在，只是画不出来。
+        这里统一纠正，避免通过 API 或助手 apply_ops 建的画布再踩同一个坑。
+        """
+        for node in nodes:
+            if (node.type or "").strip() not in RF_NODE_TYPES:
+                node.type = "agent"
+        return nodes
 
 
 class ModelConfig(BaseModel):
