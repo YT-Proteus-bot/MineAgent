@@ -174,8 +174,14 @@ export default function TopBar({ onOpenUserCenter, onOpenCanvasModel }: Props) {
                     <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
                       {c.name}
                       {c.remote_slug ? (
-                        <span className="dim small">
-                          （{c.remote_name || c.remote_slug}）
+                        <span
+                          className="dim small"
+                          title={`对应远端模板：${c.remote_name || c.remote_slug}\n所在库：${
+                            c.remote_lib_label || '公共模板库'
+                          }`}
+                        >
+                          （{c.remote_lib_label || '公共模板库'}
+                          {c.remote_name ? ` · ${c.remote_name}` : ''}）
                         </span>
                       ) : null}
                     </span>

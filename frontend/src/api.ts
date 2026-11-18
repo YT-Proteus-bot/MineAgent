@@ -85,6 +85,12 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(graph || {}),
     }),
+  /** 把 AI 助手生成的画布草稿替换到当前画布 */
+  applyDraft: (id: string, draft: Record<string, any>) =>
+    request<{ ok: boolean; canvas: CanvasDetail; constraints: ConstraintReport }>(
+      `/api/canvases/${id}/apply-draft`,
+      { method: 'POST', body: JSON.stringify({ draft }) },
+    ),
   setRules: (id: string, rules: CustomRule[]) =>
     request<{ ok: boolean; rules: CustomRule[] }>(`/api/canvases/${id}/rules`, {
       method: 'PUT',
@@ -406,6 +412,7 @@ export const api = {
         canvas_name: string
         remote_slug: string
         remote_lib: string
+        remote_lib_label: string
         remote_name: string
         local_rev: number
         remote_rev: number

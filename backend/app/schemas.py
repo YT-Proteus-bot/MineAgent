@@ -108,6 +108,8 @@ class CanvasSummary(BaseModel):
     remote_slug: str = ""
     remote_rev: int = 0
     remote_lib: str = ""
+    # 库的可读名称：公共模板库 / 私人库 owner/repo
+    remote_lib_label: str = ""
     # 远端版本比本地记录的新
     remote_changed: bool = False
     # 本地有未同步的改动
@@ -241,3 +243,36 @@ class ProviderTestIn(BaseModel):
     secret: Optional[Dict[str, Any]] = None
     id: Optional[str] = None       # 已存记录时复用其密文与缺省值
     canvas_id: str = ""
+
+
+# --------------------------------------------------------------------------- #
+# AI 助手生成画布的草稿
+# --------------------------------------------------------------------------- #
+class DraftNode(BaseModel):
+    """助手给出的一个节点。key 只在草稿内部用于连线引用。"""
+
+    key: str = ""
+    kind: str
+    label: str = ""
+    name: str = ""
+    params: Dict[str, Any] = Field(default_factory=dict)
+    code: str = ""
+
+
+class DraftEdge(BaseModel):
+    source: str
+    target: str
+    branch: str = ""
+
+
+class CanvasDraft(BaseModel):
+    """一张完整画布的草稿：节点 + 连线。"""
+
+    nodes: List[DraftNode] = Field(default_factory=list)
+    edges: List[DraftEdge] = Field(default_factory=list)
+
+
+class ApplyDraftRequest(BaseModel):
+    draft: CanvasDraft
+    # 是否把助手写的节点代码当作「手改」保留（默认保留）
+    keep_code: bool = True

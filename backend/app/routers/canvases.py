@@ -14,12 +14,14 @@ from ..code_summary import summarize_code
 from ..config import BACKGROUND_DIR, PROJECTS_DIR
 from ..constraints import validate as validate_graph
 from ..db import get_conn, get_setting, now_iso, set_setting
-from ..framework_templates import FRAMEWORK_INDEX, build_graph
+from ..framework_templates import FRAMEWORK_INDEX, auto_layout, build_graph
+from ..node_registry import NODE_INDEX, get_node_type
 from ..node_templates import CODE_TEMPLATES
 from ..providers.bindings import resolve_runtime_providers
-from ..schemas import (AgentNodeModel, CanvasBackground, CanvasCreate, CanvasDetail,
-                       CanvasSummary, CanvasUpdate, ConstraintReport, GlobalSettings, Graph,
-                       ModelConfig, SaveResult)
+from ..schemas import (AgentNodeModel, ApplyDraftRequest, CanvasBackground,
+                       CanvasCreate, CanvasDetail, CanvasSummary, CanvasUpdate,
+                       ConstraintReport, GlobalSettings, Graph, ModelConfig,
+                       SaveResult)
 from ..security import decrypt, encrypt, mask
 from ..tool_presets import TOOL_PRESETS, get_summary
 
@@ -91,6 +93,15 @@ def load_node_models(canvas_id: str) -> Dict[str, Dict[str, Any]]:
     return out
 
 
+def _lib_label(lib: str) -> str:
+    """库标识转可读名：public → 公共模板库，private:owner/repo → 私人库 owner/repo。"""
+    lib = (lib or "").strip()
+    if lib.startswith("private:"):
+        repo = lib.split(":", 1)[1].strip()
+        return f"私人库 {repo}" if repo else "私人库"
+    return "公共模板库"
+
+
 def _summary(row) -> CanvasSummary:
     graph = json.loads(row["graph"] or "{}")
     keys = row.keys() if hasattr(row, "keys") else []
@@ -105,6 +116,7 @@ def _summary(row) -> CanvasSummary:
         remote_slug=remote_slug,
         remote_rev=remote_rev,
         remote_lib=remote_lib,
+        remote_lib_label=_lib_label(remote_lib) if remote_slug else "",
         remote_name=remote_name,
     )
 
@@ -235,6 +247,107 @@ def create_canvas(payload: CanvasCreate):
 def get_canvas(canvas_id: str):
     with get_conn() as conn:
         return _detail(_fetch(conn, canvas_id))
+
+
+@router.post("/{canvas_id}/apply-draft")
+def apply_draft(canvas_id: str, payload: ApplyDraftRequest):
+    """把助手生成的画布草稿落成真正的画布。
+
+    草稿只描述「有哪些节点、怎么连」，这里负责补全每个节点的类型默认值、
+    默认代码、自动布局，然后整张替换当前画布的图。项目文件不会在这里生成，
+    用户点保存或运行时再编译（和手动编辑的路径一致）。
+    """
+    draft = payload.draft
+    if not draft.nodes:
+        raise HTTPException(400, "草稿里没有节点")
+
+    key_to_id: Dict[str, str] = {}
+    nodes: List[Dict[str, Any]] = []
+    unknown: List[str] = []
+    for idx, item in enumerate(draft.nodes, 1):
+        # 注意不能用 get_node_type：它对未知类型会兜底成 llm，校验就被绕过了
+        meta = NODE_INDEX.get(item.kind)
+        if not meta:
+            unknown.append(item.kind)
+            continue
+        key = (item.key or f"k{idx}").strip() or f"k{idx}"
+        if key in key_to_id:
+            key = f"{key}_{idx}"
+        node_id = f"n{idx}"
+        key_to_id[key] = node_id
+
+        # 参数默认值来自节点类型定义，草稿里给了就覆盖
+        defaults = {p["key"]: p.get("default") for p in meta.get("params") or []}
+        params = {**defaults, **(item.params or {})}
+        code = (item.code or "").strip()
+
+        nodes.append({
+            "id": node_id,
+            "type": "agent",
+            "position": {"x": 0, "y": 0},
+            "data": {
+                "kind": item.kind,
+                "label": item.label or meta["label"],
+                "name": item.name or f"{item.kind}_{idx}",
+                "description": meta["description"],
+                "code": code or meta["default_code"],
+                "language": meta["language"],
+                "params": params,
+                "status": "idle",
+                # 助手写了代码就按「手改」保留，保存时不被重新生成覆盖
+                "code_touched": bool(code) and payload.keep_code,
+            },
+        })
+
+    if unknown:
+        raise HTTPException(
+            400, f"草稿里有不存在的节点类型：{'、'.join(sorted(set(unknown)))}")
+
+    edges: List[Dict[str, Any]] = []
+    for idx, edge in enumerate(draft.edges or [], 1):
+        src = key_to_id.get(edge.source)
+        dst = key_to_id.get(edge.target)
+        if not src or not dst:
+            raise HTTPException(
+                400, f"连线引用了不存在的节点：{edge.source} → {edge.target}")
+        handle = (edge.branch or "").strip() or None
+        edges.append({
+            "id": f"e{idx}__{src}__{dst}" + (f"__{handle}" if handle else ""),
+            "source": src,
+            "sourceHandle": handle,
+            "target": dst,
+            "targetHandle": "in",
+            "label": handle,
+            "data": {},
+        })
+
+    nodes = auto_layout(nodes, edges)
+
+    with get_conn() as conn:
+        row = _fetch(conn, canvas_id)
+        old = json.loads(row["graph"] or "{}")
+        graph_dict: Dict[str, Any] = {
+            "nodes": nodes,
+            "edges": edges,
+            "viewport": {"x": 0, "y": 0, "zoom": 0.85},
+        }
+        # 背景和服务设置不属于「编排」，替换图时保留
+        if old.get("background"):
+            graph_dict["background"] = old["background"]
+        if old.get("service"):
+            graph_dict["service"] = old["service"]
+        conn.execute(
+            "UPDATE canvases SET graph = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(graph_dict, ensure_ascii=False), now_iso(), canvas_id))
+        try:
+            rules = json.loads(row["rules"] or "[]")
+        except Exception:  # noqa: BLE001
+            rules = []
+
+    report = validate_graph(graph_dict, rules)
+    with get_conn() as conn:
+        updated = _fetch(conn, canvas_id)
+    return {"ok": True, "canvas": _detail(updated), "constraints": report}
 
 
 @router.patch("/{canvas_id}", response_model=CanvasDetail)

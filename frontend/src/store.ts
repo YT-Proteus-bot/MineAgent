@@ -556,6 +556,8 @@ export const useStore = create<AppState>((set, get) => ({
             return {
               ...c,
               remote_slug: item.remote_slug || c.remote_slug,
+              remote_lib: item.remote_lib || c.remote_lib,
+              remote_lib_label: item.remote_lib_label || c.remote_lib_label,
               remote_name: item.remote_name || c.remote_name,
               remote_rev: item.remote_rev ?? c.remote_rev,
               remote_changed: !!item.remote_changed,

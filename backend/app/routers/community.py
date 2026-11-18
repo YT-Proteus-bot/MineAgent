@@ -320,31 +320,52 @@ def list_libs():
 
 @router.put("/libs")
 def save_libs(payload: Dict[str, Any]):
-    """保存模板库前，用用户 token 逐个校验仓库是否存在，并记录 public/private。"""
+    """保存模板库前逐个校验：重复的、GitHub 上找不到的都不保存，并一次列出所有问题。"""
     items = payload.get("libs") or []
     if not community.token():
         raise HTTPException(400, "还没有连接 GitHub，无法校验仓库")
     checked: List[Dict[str, Any]] = []
-    for item in items:
+    seen: Dict[str, int] = {}
+    errors: List[str] = []
+    for index, item in enumerate(items, start=1):
         repo = str(item.get("repo") or "").strip()
+        label = str(item.get("name") or "").strip() or f"第 {index} 个仓库"
         if not repo:
+            errors.append(f"「{label}」的仓库地址必填")
             continue
         try:
             owner_name, repo_name = community.parse_repo(repo)
         except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
+            errors.append(f"「{label}」格式不对：{exc}")
+            continue
         target = f"{owner_name}/{repo_name}"
+        if target.lower() in seen:
+            errors.append(f"「{label}」重复添加：{target} 和第 {seen[target.lower()]} 个仓库是同一个")
+            continue
+        seen[target.lower()] = index
         try:
             info = community.repo_info(target)
         except community.GitHubError as exc:
-            raise HTTPException(400, f"{target} 校验失败：{exc}") from exc
+            scopes = community.token_scopes()
+            if "repo" not in scopes:
+                errors.append(
+                    f"「{label}」在 GitHub 上找不到或无权访问：{target}"
+                    f"（当前授权只有 {', '.join(sorted(scopes)) or '未知'}，"
+                    f"读私有仓库需要 repo 权限，请到用户中心 → GitHub 账户断开后重新连接）"
+                )
+            else:
+                errors.append(f"「{label}」在 GitHub 上找不到或无权访问：{target}")
+            continue
         except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
+            errors.append(f"「{label}」校验失败：{exc}")
+            continue
         checked.append({
             **item,
             "repo": target,
             "visibility": "private" if info.get("private") else "public",
         })
+    if errors:
+        raise HTTPException(400, "没有保存，以下模板库不符合要求：" + "；".join(errors))
     try:
         libs = community.save_template_libs(checked)
     except ValueError as exc:
@@ -519,6 +540,19 @@ def _update_from_template(slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     return {"ok": True, "mode": "update", "rev": remote_rev, "canvas": _detail(updated)}
 
 
+def _lib_label(lib: str) -> str:
+    """把库标识转成能直接显示的名字。
+
+    public              → 公共模板库
+    private:owner/repo  → 私人库 owner/repo
+    """
+    lib = (lib or "").strip()
+    if lib.startswith("private:"):
+        repo = lib.split(":", 1)[1].strip()
+        return f"私人库 {repo}" if repo else "私人库"
+    return "公共模板库"
+
+
 @router.get("/sync-overview")
 def sync_overview():
     """把所有绑定了远端的画布，连同"远端有没有新版"一次性算出来。
@@ -569,6 +603,8 @@ def sync_overview():
             "canvas_name": row["name"],
             "remote_slug": slug,
             "remote_lib": lib,
+            # 可读的库名：不管这张画布是拉下来的还是本地原创推上去的，都指向同一个远端库
+            "remote_lib_label": _lib_label(lib),
             "remote_name": str(meta.get("name") or slug),
             "local_rev": local_rev,
             "remote_rev": remote_rev,

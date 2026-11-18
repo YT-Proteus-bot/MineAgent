@@ -212,6 +212,8 @@ export interface CanvasSummary {
   remote_rev?: number
   /** 来源库：public 或 private:owner/repo */
   remote_lib?: string
+  /** 库的可读名称：公共模板库 / 私人库 owner/repo */
+  remote_lib_label?: string
   /** 远端模板名（下拉里括号显示） */
   remote_name?: string
   /** 远端有比本地记录更新的版本 */
