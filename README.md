@@ -740,6 +740,144 @@ results = ctx.delegate_many(
 常驻调度（Router 7×24 监听 IM / GitHub 事件、Watchdog 自恢复）属于**服务层**，
 目前只在服务设置里预留了并发、超时、断点续跑等配置项，事件源接入还没做。
 
+### 工具节点的预设（73 个）
+
+拖一个 `tool` 节点进来，在「节点详情」里选预设，参数和代码会一起填好，不用自己写。
+每个预设都有两份实现：`preview`（零依赖预览用）和 `native`（生成 `agent.py` 用）。
+
+**网络与搜索（17）**
+
+| 预设 | 作用 |
+| --- | --- |
+| `web_search` | 用 DuckDuckGo 搜索并返回前几条结果摘要（依赖 `ddgs`） |
+| `http_get` | 抓取一个 URL 的文本（只读，超时 20 秒） |
+| `http_post` | 向一个 URL POST JSON，返回响应文本 |
+| `web_fetch` | 抓取一个 URL 的正文文本（前 8000 字） |
+| `scrape_links` | 抓取页面并提取所有链接（含锚文本），可按关键词过滤 |
+| `jina_reader` | 用 Jina Reader 把任意 URL 转成干净 Markdown（免费额度） |
+| `wikipedia` | 查维基百科词条摘要（免费、无需 key） |
+| `arxiv` | 按关键词搜 arXiv 论文，返回标题、作者、摘要和链接 |
+| `pubmed` | 查 PubMed 医学文献摘要（NCBI 公共接口） |
+| `rss_feed` | 读取 RSS / Atom 源的最新条目 |
+| `github_api` | 查仓库 / issue / PR / 用户（有 token 可提高额度） |
+| `dns_lookup` | 查域名的 A / AAAA / MX / TXT 记录 |
+| `ip_info` | 查 IP 的国家、地区、ISP |
+| `open_meteo` | 查城市当前天气与未来三天预报 |
+| `webhook_send` | 向任意 Webhook 发消息（Slack / 飞书 / 钉钉 / Discord 通用） |
+| `tavily_search` | Tavily 深度搜索，返回带来源的摘要（需 `TAVILY_API_KEY`） |
+| `serper_search` | Serper.dev 的 Google 搜索结果（需 `SERPER_API_KEY`） |
+
+**文件与目录（8）**
+
+| 预设 | 作用 |
+| --- | --- |
+| `read_file` | 读取项目目录内的文本文件（默认 8000 字） |
+| `read` | 按行读取项目内文本文件，支持 offset / limit |
+| `write` | 把内容写入项目内的文件（自动建目录） |
+| `edit` | 把文件里的 old 文本替换成 new（只替换第一处） |
+| `glob` | 按 glob 模式列出项目内的文件 |
+| `grep` | 用正则搜索项目内文件内容，返回路径、行号和命中行 |
+| `working_directory` | 不带参数返回当前目录；带参数则切换过去 |
+| `read_image` | 返回图片的文件大小与路径（不加载像素） |
+
+**命令与代码（5）**
+
+| 预设 | 作用 |
+| --- | --- |
+| `pwsh` | 在本机执行一条 PowerShell 命令 |
+| `bash` | 在本机执行一条 shell 命令（Windows 走 cmd，其他走 bash） |
+| `python_repl` | 在子进程里跑一段 Python，返回 stdout / stderr |
+| `workflow` | 执行项目内 `workflows/<name>.py` 的 `run()` |
+| `calculator` | 安全地计算四则运算表达式（不执行任意代码） |
+
+**数据与文本处理（12）**
+
+| 预设 | 作用 |
+| --- | --- |
+| `sql_query` | 对项目内的 SQLite 执行只读查询 |
+| `csv_query` | 把 CSV 当表查：列筛选、排序、取前 N 行 |
+| `json_query` | 从 JSON 文本里按 `a.b.0.c` 路径取值 |
+| `regex_extract` | 用正则从文本里抽出所有匹配（可只取第 1 个分组） |
+| `hash_text` | 算 md5 / sha1 / sha256，常用于校验与去重 |
+| `base64_codec` | Base64 编码或解码（支持 URL-safe） |
+| `uuid_gen` | 生成指定数量的 UUID4 |
+| `diff_text` | 比较两段文本，输出逐行差异 |
+| `markdown_to_html` | 把 Markdown 渲染成 HTML 片段 |
+| `html_to_text` | 去掉标签、脚本和样式，只留可读正文 |
+| `pdf_extract` | 从 PDF 里抽取文本（需 `pypdf`） |
+| `docx_extract` | 从 `.docx` 里抽取段落文本（需 `python-docx`） |
+
+**Office 文档（3）** — 都需要本机装 LibreOffice（`soffice`）
+
+| 预设 | 作用 |
+| --- | --- |
+| `office_convert` | 用 LibreOffice 把文档转成 PDF |
+| `office_render` | 用 LibreOffice 把文档渲染成 PNG |
+| `office_recalculate` | 重算表格公式并另存 |
+
+**知识与检索（2）**
+
+| 预设 | 作用 |
+| --- | --- |
+| `knowledge_search` | 从项目 `skills/docs/outputs` 里召回片段（预览模式） |
+| `skill` | 从项目 `skills/` 目录读取指定技能文件 |
+
+**多 Agent 协作（5）**
+
+| 预设 | 作用 |
+| --- | --- |
+| `subagent` | 用项目里的大模型独立跑一个子任务，返回结果 |
+| `list_agents` | 从 `agent.json` 里读出画布上的 agent 节点 |
+| `send_message` | 把消息追加到 `.agents/<name>.inbox.jsonl` |
+| `wait_agent` | 轮询 `.agents/<name>.outbox.jsonl`，返回最后一条输出 |
+| `interrupt_agent` | 写 `.agents/<name>.cancel` 标记，请求目标 agent 停止 |
+
+**团队任务（4）** — 基于项目内 `.team.db`
+
+| 预设 | 作用 |
+| --- | --- |
+| `team_task_create` | 插入一条任务，返回 id |
+| `team_task_get` | 按 id 读取一条任务 |
+| `team_task_list` | 列出任务，可按状态过滤 |
+| `team_task_update` | 更新任务的状态或负责人 |
+
+**目标与交付（5）**
+
+| 预设 | 作用 |
+| --- | --- |
+| `todo_write` | 把待办列表写到项目根目录 `TODO.md` |
+| `create_goal` | 把目标写进项目内 `.goal.json` |
+| `get_goal` | 读取 `.goal.json` 的对象与状态 |
+| `update_goal` | 更新目标状态并追加一条历史记录 |
+| `present` | 把产物路径登记到 `.presented.json` |
+
+**会话与调度（6）**
+
+| 预设 | 作用 |
+| --- | --- |
+| `session_search` | 在项目内 `.sessions.jsonl` 里按关键词搜索 |
+| `session_trace` | 按 `session_id` 取出一次会话的全部记录 |
+| `schedule_create` | 把定时任务写进 `.schedules.json`（装 crontab 后生效） |
+| `schedule_list` | 返回 `.schedules.json` 的内容 |
+| `schedule_edit` | 修改指定定时任务的 cron 或命令 |
+| `schedule_view` | 查看单个定时任务的配置 |
+
+**交互与审批（2）**
+
+| 预设 | 作用 |
+| --- | --- |
+| `ask_user_question` | 在命令行里向用户提问并返回回答；非交互环境返回提示 |
+| `propose_action` | 把动作写进 `.actions.json` 等待审批 |
+
+**其他（4）**
+
+| 预设 | 作用 |
+| --- | --- |
+| `ralph` | 反复调用模型直到自评完成，返回最后一轮结果 |
+| `current_time` | 返回服务器当前时间（ISO 格式） |
+| `load_workspace_dependencies` | 返回 Python 解释器和 site-packages 路径 |
+| `wolfram_alpha` | 数学 / 知识计算（需 `WOLFRAM_APP_ID`） |
+
 ### 主流编排架构画布
 
 项目里预置了 14 张对照画布，把市面上的编排框架还原成节点图，可以直接打开做对比：
