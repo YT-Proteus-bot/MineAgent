@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Tuple
 
+from ..tool_presets import TOOL_PRESETS
+
 ROUTE_KINDS = {"router", "condition", "branch", "switch"}
 TOOL_KINDS = {
     "tool", "function", "mcp_tool", "crewai_tool", "http_request", "web_search",
@@ -180,6 +182,22 @@ def _block_tool(node: Dict[str, Any]) -> str:
     kind = _kind_of(node)
     p = _params(node)
     desc = node.get("description") or node.get("label") or "工具"
+
+    # 内置工具预设：直接生成对应实现，不再是空占位
+    preset = _text(p, "preset", "")
+    spec = TOOL_PRESETS.get(preset) if preset else None
+    if spec:
+        body = spec["native"]
+        for placeholder, key in (("__URL__", "url"), ("__BODY__", "body"), ("__PATH__", "path")):
+            body = body.replace(placeholder, _text(p, key, ""))
+        arg = spec.get("args") or "query: str"
+        return (
+            f"@tool\n"
+            f"def {fn}({arg}) -> str:\n"
+            f'    """{desc}"""\n'
+            f"{body}"
+        )
+
     if kind == "web_search":
         body = (
             '    from langchain_community.tools import DuckDuckGoSearchRun\n'
@@ -348,6 +366,28 @@ def _block_retriever(node: Dict[str, Any]) -> str:
     )
 
 
+def _block_dataset(node: Dict[str, Any]) -> str:
+    """数据集读取节点：按逻辑名从外部数据中台取数（连接配置在 integrations.json）。"""
+    fn = _pyid(node["name"])
+    p = _params(node)
+    dataset = _text(p, "dataset", "")
+    filters = p.get("filters") or {}
+    if isinstance(filters, str):
+        try:
+            filters = json.loads(filters) if filters.strip() else {}
+        except Exception:  # noqa: BLE001
+            filters = {}
+    limit = int(_num(p, "limit", 100))
+    return (
+        f"def {fn}(state: AgentState) -> dict:\n"
+        f'    """{node.get("label") or "数据集读取"} —— 从外部数据中台按逻辑名取数。"""\n'
+        f"    from integrations.data_client import read_dataset\n"
+        f"    rows = read_dataset({_q(dataset)}, filters={json.dumps(filters, ensure_ascii=False)},\n"
+        f"                        limit={limit})\n"
+        f'    return {{"data": rows, "dataset": {_q(dataset)}}}\n'
+    )
+
+
 def _block_memory(node: Dict[str, Any]) -> str:
     fn = _pyid(node["name"])
     limit = int(_num(_params(node), "window", 10))
@@ -357,6 +397,74 @@ def _block_memory(node: Dict[str, Any]) -> str:
         f'    history = list(state.get("history") or [])\n'
         f'    history.append(str(state.get("data", "")))\n'
         f'    return {{"data": state.get("data", ""), "history": history[-{limit}:]}}\n'
+    )
+
+
+def _block_wiki(node: Dict[str, Any]) -> str:
+    """LLM Wiki 节点：入库时让模型读懂并写成可读页面，查询时直接读页。
+
+    这两块用纯 Python + llm 实现，不 import runtime_sdk，
+    保证 agent.py 拿出去仍然是自包含的。
+    """
+    fn = _pyid(node["name"])
+    p = _params(node)
+    if _kind_of(node) == "wiki_ingest":
+        title_expr = _q(_text(p, "title"))
+        source_expr = _q(_text(p, "source"))
+        return (
+            f"def {fn}(state: AgentState) -> dict:\n"
+            f'    """Wiki 入库：让模型提炼标题 / 摘要 / 要点，写成一页 markdown。"""\n'
+            f"    import json as _json\n"
+            f"    from pathlib import Path as _Path\n"
+            f"\n"
+            f'    wiki = _Path(__file__).resolve().parent / "wiki"\n'
+            f"    wiki.mkdir(exist_ok=True)\n"
+            f'    text = str(state.get("data", "") or "")\n'
+            f"    info = {{}}\n"
+            f"    try:\n"
+            f"        raw = llm.invoke(\n"
+            f'            "把下面这段资料整理成一页 wiki，只输出 JSON："\n'
+            f"            '{{\"title\": \"\", \"summary\": \"\", \"points\": []}}'\n"
+            f'            "\\n\\n" + text[:4000]\n'
+            f"        ).content\n"
+            f'        s, e = raw.find("{{"), raw.rfind("}}")\n'
+            f"        if s >= 0 and e > s:\n"
+            f"            info = _json.loads(raw[s:e + 1])\n"
+            f"    except Exception:\n"
+            f"        info = {{}}\n"
+            f'    title = {title_expr} or str(info.get("title") or "").strip() or text[:24]\n'
+            f'    slug = "".join(c if (c.isalnum() or c in "-_") else "-" for c in title.lower())[:48] or "page"\n'
+            f'    summary = str(info.get("summary") or "").strip()\n'
+            f'    points = info.get("points") or []\n'
+            f'    lines = ["# " + title, "", "## 摘要", "", summary, "", "## 要点", ""]\n'
+            f'    lines += ["- " + str(x) for x in points]\n'
+            f'    lines += ["", "## 原文", "", text[:8000], ""]\n'
+            f'    (wiki / (slug + ".md")).write_text("\\n".join(lines), encoding="utf-8")\n'
+            f'    return {{"data": _json.dumps({{"slug": slug, "title": title, "source": {source_expr}}},\n'
+            f'                              ensure_ascii=False)}}\n'
+        )
+
+    top_k = int(_num(p, "top_k", 3))
+    return (
+        f"def {fn}(state: AgentState) -> dict:\n"
+        f'    """Wiki 检索：列出现有页面，按字面重合粗排后取前几页。"""\n'
+        f"    from pathlib import Path as _Path\n"
+        f"\n"
+        f'    wiki = _Path(__file__).resolve().parent / "wiki"\n'
+        f'    query = str(state.get("data", "") or "")\n'
+        f"    pages = []\n"
+        f"    if wiki.exists():\n"
+        f'        for f in sorted(wiki.glob("*.md")):\n'
+        f'            pages.append({{"slug": f.stem,\n'
+        f'                           "text": f.read_text(encoding="utf-8", errors="replace")[:4000]}})\n'
+        f"    if not pages:\n"
+        f'        return {{"data": ""}}\n'
+        f"    words = [w for w in query.lower().split() if w]\n"
+        f"    pages.sort(key=lambda pg: sum(1 for w in words if w in pg[\"text\"].lower()),\n"
+        f"               reverse=True)\n"
+        f"    top = pages[:{top_k}]\n"
+        f'    context = "\\n\\n".join("## " + pg["slug"] + "\\n" + pg["text"] for pg in top)\n'
+        f'    return {{"data": context}}\n'
     )
 
 
@@ -382,12 +490,16 @@ def node_block(node: Dict[str, Any]) -> str:
         body = _block_input(node)
     elif kind == "output":
         body = _block_output(node)
+    elif kind in ("wiki_ingest", "wiki_query"):
+        body = _block_wiki(node)
     elif kind in TOOL_KINDS:
         body = _block_tool(node)
     elif kind in ROUTE_KINDS:
         body = _block_router(node)
     elif kind in ("retriever", "vector_retriever", "rag"):
         body = _block_retriever(node)
+    elif kind in ("dataset_reader", "dataset"):
+        body = _block_dataset(node)
     elif kind in ("memory", "conversation_memory"):
         body = _block_memory(node)
     elif kind == "agent" or kind in ("supervisor", "worker", "autogen_assistant",

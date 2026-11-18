@@ -538,6 +538,33 @@ resp = ctx.judge(
 节点会自动回退到普通模型判断（结果里 `engine` 字段标明是 `jev` 还是 `llm`）。
 只有 422 这类「请求本身写错了」才会真的报错。
 
+### LLM Wiki：入库时就理解，而不是查询时才拼
+
+传统 RAG 是「查询时做功」——入库只切块存向量，用户提问的瞬间才开始算。
+[LLM Wiki](https://m.leiphone.com/category/ai/Q24LRPqt1A6EUYiv.html)（Karpathy 的构想）反过来：
+**入库时就读懂内容、提炼成互相链接的页面**，查询时直接读已经组织好的整页。
+
+MineAgent 加了两个节点：
+
+| 节点 | 做什么 |
+|---|---|
+| `wiki_ingest` | 把内容交给模型提炼标题、摘要、要点，写成一页 markdown 落到 `wiki/` |
+| `wiki_query` | 列出 wiki 页，按字面重合粗排，命中不明确时让模型从候选里挑 |
+
+存储就是**项目里的 `wiki/` 目录**，每页一个 `.md`，外加 `index.json` 记索引：
+
+```
+wiki/
+  index.json                       # 标题、摘要、互链、更新时间
+  订单退款政策.md                    # 页面正文（摘要 + 要点 + 原文）
+```
+
+好处是**可读、可编辑、可带走**——你可以直接打开 md 改内容，也可以用 git 管版本，
+而不是像向量库那样只能靠工具读。SDK 侧对应 `ctx.wiki_ingest / wiki_query / wiki_pages / wiki_read`。
+
+`agent.py` 里这两个节点也用纯 Python 实现（不 import runtime_sdk），
+所以导出的项目即使删掉 SDK 也能跑。
+
 | 分类 | 节点 |
 | --- | --- |
 | 输入输出 | `input` 输入、`output` 输出 |

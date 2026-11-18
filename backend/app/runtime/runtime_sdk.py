@@ -264,6 +264,13 @@ def cosine(a: Iterable[float], b: Iterable[float]) -> float:
     return sum(x * y for x, y in zip(a, b))
 
 
+def _wiki_slug(text: str) -> str:
+    """把标题变成安全的文件名：保留中英文数字，其余压成连字符。"""
+    s = re.sub(r"[^\w\u4e00-\u9fff]+", "-", (text or "").strip().lower())
+    s = s.strip("-")[:48]
+    return s or "page"
+
+
 # --------------------------------------------------------------------------- #
 # 节点上下文
 # --------------------------------------------------------------------------- #
@@ -744,6 +751,144 @@ class NodeContext:
         if not isinstance(resp, dict) or "answers" not in resp:
             raise RuntimeError(f"Jev 返回格式异常：{str(resp)[:200]}")
         return resp
+
+    # ---- LLM Wiki：入库时就理解，而不是查询时才拼 ----
+    def wiki_ingest(self, text: str, title: str = "", source: str = "",
+                    links: Optional[List[str]] = None) -> Dict[str, Any]:
+        """把一段内容整理成一个 wiki 页面落到 wiki/ 目录。
+
+        和传统 RAG 的区别：切块入库之后还会让模型读懂、提炼摘要和要点、
+        建议互链，写成一页可读的 markdown。查询时直接读页，而不是从碎片里拼。
+        """
+        wiki_dir = PROJECT_DIR / "wiki"
+        wiki_dir.mkdir(parents=True, exist_ok=True)
+        body = (text or "").strip()
+        if not body:
+            raise ValueError("wiki_ingest 需要内容")
+
+        data: Dict[str, Any] = {}
+        try:
+            data = self.json_prompt(
+                "把这段资料整理成一页 wiki：给标题、三到五条要点、一两句摘要，"
+                "并指出它可能和哪些主题相关（主题名用简短名词）。",
+                schema={"title": "", "summary": "", "points": [], "links": []},
+                context=f"原始标题：{title or '（无）'}\n内容：\n{body[:6000]}",
+            ) or {}
+        except Exception:  # noqa: BLE001
+            data = {}
+
+        page_title = title or str(data.get("title") or "").strip() or body[:24]
+        slug = _wiki_slug(page_title)
+        points = data.get("points") or []
+        related = links or data.get("links") or []
+        summary = str(data.get("summary") or "").strip()
+
+        lines = [
+            "---",
+            f"title: {page_title}",
+            f"slug: {slug}",
+            f"source: {source or 'inline'}",
+            f"updated: {time.strftime('%Y-%m-%dT%H:%M:%S')}",
+            f"links: [{', '.join(str(x) for x in related)}]",
+            "---",
+            "",
+            f"# {page_title}",
+            "",
+        ]
+        if summary:
+            lines += ["## 摘要", "", summary, ""]
+        if points:
+            lines += ["## 要点", ""] + [f"- {p}" for p in points] + [""]
+        lines += ["## 原文", "", body[:8000], ""]
+        if related:
+            lines += ["## 相关", ""] + [f"- [[{x}]]" for x in related] + [""]
+
+        path = wiki_dir / f"{slug}.md"
+        path.write_text("\n".join(lines), encoding="utf-8")
+
+        index = self.wiki_index()
+        index[slug] = {
+            "title": page_title,
+            "summary": summary,
+            "links": [str(x) for x in related],
+            "source": source or "inline",
+            "updated": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }
+        (wiki_dir / "index.json").write_text(
+            json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        self.emit("wiki_ingest", {"slug": slug, "title": page_title})
+        return {"slug": slug, "title": page_title, "path": f"wiki/{slug}.md",
+                "points": len(points), "links": related}
+
+    def wiki_index(self) -> Dict[str, Any]:
+        """读 wiki/index.json（没有就返回空表）。"""
+        path = PROJECT_DIR / "wiki" / "index.json"
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def wiki_pages(self) -> List[Dict[str, Any]]:
+        """列出所有 wiki 页面（按更新时间倒序）。"""
+        idx = self.wiki_index()
+        items = [{"slug": k, **v} for k, v in idx.items() if isinstance(v, dict)]
+        items.sort(key=lambda x: str(x.get("updated", "")), reverse=True)
+        return items
+
+    def wiki_read(self, slug: str) -> str:
+        """读一整页 wiki 的 markdown。"""
+        path = PROJECT_DIR / "wiki" / f"{_wiki_slug(slug)}.md"
+        if not path.exists():
+            raise FileNotFoundError(f"没有这个 wiki 页面：{slug}")
+        return path.read_text(encoding="utf-8", errors="replace")
+
+    def wiki_query(self, query: str, top_k: int = 3) -> List[Dict[str, Any]]:
+        """在 wiki 里找最相关的页面。
+
+        先用标题/摘要/要点的字面重合粗排（便宜），命中不明确时再让模型
+        从候选里挑——比向量检索更能利用"入库时已经理解过的结构"。
+        """
+        pages = self.wiki_pages()
+        if not pages:
+            return []
+        q_tokens = set(re.findall(r"[\w\u4e00-\u9fff]+", (query or "").lower()))
+
+        scored: List[Dict[str, Any]] = []
+        for p in pages:
+            hay = f"{p.get('title','')} {p.get('summary','')} {' '.join(map(str, p.get('links') or []))}"
+            hay_tokens = set(re.findall(r"[\w\u4e00-\u9fff]+", hay.lower()))
+            overlap = len(q_tokens & hay_tokens) / (len(q_tokens) or 1)
+            scored.append({**p, "score": round(overlap, 4)})
+        scored.sort(key=lambda x: x["score"], reverse=True)
+        top = scored[: max(top_k * 2, 4)]
+
+        # 粗排没有明显命中的，交给模型从候选里挑
+        if not top or top[0]["score"] == 0:
+            try:
+                picked = self.json_prompt(
+                    "下面是知识库里的页面，挑出和问题最相关的几个（只返回 slug）。",
+                    schema={"slugs": []},
+                    context="问题：" + (query or "") + "\n页面：" + json.dumps(
+                        [{"slug": p["slug"], "title": p.get("title", "")} for p in scored[:12]],
+                        ensure_ascii=False),
+                ) or {}
+                want = set(picked.get("slugs") or [])
+                top = [p for p in scored if p["slug"] in want] or top
+            except Exception:  # noqa: BLE001
+                pass
+
+        out: List[Dict[str, Any]] = []
+        for p in top[:top_k]:
+            try:
+                content = self.wiki_read(p["slug"])
+            except Exception:  # noqa: BLE001
+                content = ""
+            out.append({**p, "content": content[:4000]})
+        return out
 
     # ---- 向量 ----
     def embed(self, text: str) -> List[float]:

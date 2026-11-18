@@ -626,3 +626,37 @@ def run(ctx: NodeContext):
 '''
 
 EXT_TEMPLATES = E
+
+E["wiki_ingest"] = '''from runtime_sdk import NodeContext
+
+
+def run(ctx: NodeContext):
+    """Wiki 入库：让模型读懂内容，提炼成带摘要、要点和互链的页面。
+
+    和传统 RAG 的区别在"功夫花在哪"：
+    传统 RAG 入库只切块 + 向量化，查询时才算；
+    这里入库时就理解、提炼、建立互链，查询时直接读页。
+    """
+    result = ctx.wiki_ingest(
+        ctx.text,
+        title=ctx.params.get("title") or "",
+        source=ctx.params.get("source") or "",
+    )
+    ctx.emit("wiki_ingest", result)
+    return result
+'''
+
+E["wiki_query"] = '''from runtime_sdk import NodeContext
+
+
+def run(ctx: NodeContext):
+    """Wiki 检索：先按标题/摘要字面粗排，命中不明确时让模型从候选里挑。"""
+    pages = ctx.wiki_query(ctx.text, top_k=int(ctx.params.get("top_k", 3)))
+    ctx.emit("wiki_query", {"count": len(pages)})
+    if not pages:
+        return {"query": ctx.text, "pages": [], "context": ""}
+    context = "\\n\\n".join(
+        f"## {p.get('title') or p.get('slug')}\\n{p.get('content','')}" for p in pages
+    )
+    return {"query": ctx.text, "pages": pages, "context": context}
+'''

@@ -9,6 +9,7 @@ from typing import Any, Dict, List
 
 from .node_templates import CODE_TEMPLATES
 from .node_templates_ext import EXT_TEMPLATES
+from .tool_presets import TOOL_PRESETS
 
 ALL_TEMPLATES = {**CODE_TEMPLATES, **EXT_TEMPLATES}
 
@@ -98,8 +99,12 @@ _DEFS: List[tuple] = [
     ("evaluator", "质量评估", "llm", "◷", "给产出打 0-100 分，驱动循环是否继续。", ["out"], [], "python"),
 
     # ---------------- 工具与能力 ----------------
-    ("tool", "工具 Tool", "tool", "⚙", "工具的通用节点，被 Agent 调用或直接执行。", ["out"],
-     [P("name", "工具名", "tool"), P("query", "默认参数", "")], "python"),
+    ("tool", "工具 Tool", "tool", "⚙", "占位工具：直接回显输入；右键「套用内置工具」或编辑代码后生效。", ["out"],
+     [P("preset", "内置工具", "",
+        options=[{"value": k, "label": v["label"]} for k, v in TOOL_PRESETS.items()]
+        + [{"value": "", "label": "自定义（自己写代码）"}],
+        help_text="选中后会自动填好这个工具的代码；换成「自定义」则保留你自己写的实现。"),
+      P("name", "工具名", "tool"), P("query", "默认参数", "")], "python"),
     ("function", "自定义函数", "tool", "ƒ", "写任意 Python 逻辑的节点。", ["out"], [], "python"),
     ("http_request", "HTTP 请求", "tool", "↗", "调用外部 REST 接口。", ["out"],
      [P("url", "URL", "https://httpbin.org/get"), P("method", "方法", "GET")], "python"),
@@ -186,6 +191,12 @@ _DEFS: List[tuple] = [
     ("text_splitter", "文本切分", "rag", "⑂", "按段落和长度切块，支持重叠。", ["out"],
      [P("chunk_size", "块大小", 600), P("overlap", "重叠字符", 80)], "python"),
     ("chunk_refiner", "分块精炼", "rag", "◇", "给每个 chunk 补语义标题，便于召回与展示。", ["out"], [], "python"),
+    ("wiki_ingest", "Wiki 入库", "rag", "📖",
+     "入库时就读懂内容，提炼成带摘要、要点和互链的 wiki 页面（而不是只切块存向量）。",
+     ["out"], [P("title", "页面标题", ""), P("source", "来源标记", "")], "python"),
+    ("wiki_query", "Wiki 检索", "rag", "🔎",
+     "在 wiki 里找最相关的页面，直接读已整理好的整页内容，而不是拼碎片。",
+     ["out"], [P("top_k", "返回页数", 3)], "python"),
     ("vector_indexer", "向量入库", "rag", "⤓", "把文本块写进项目内向量库。", ["out"], [], "python"),
     ("hybrid_retriever", "混合检索", "rag", "⊚", "向量召回 + 关键词召回各取一份。", ["out"],
      [P("top_k", "每路条数", 4)], "python"),
@@ -200,6 +211,11 @@ _DEFS: List[tuple] = [
     ("rag_evaluator", "RAG 质量评估", "rag", "◑", "评估答案是否被检索内容支撑。", ["out"], [], "python"),
 
     # ---------------- 数据与存储 ----------------
+    ("dataset_reader", "数据集读取", "data", "▤",
+     "按逻辑数据集名从外部数据中台取数（连接配置在「服务设置 → 数据中台」）。", ["out"],
+     [P("dataset", "数据集逻辑名", "", help_text="填 integrations.json 里 datasets 的逻辑名，物理表在服务设置里映射。"),
+      P("filters", "过滤条件（JSON）", {}, help_text="例如 {\"status\": \"paid\"}，会原样传给数据中台。"),
+      P("limit", "条数上限", 100)], "python"),
     ("db_write", "数据写入", "data", "⤒", "执行 INSERT / UPDATE / DELETE，默认禁用需显式放行。", ["out"],
      [P("sql", "写语句", ""), P("allow", "允许写入", False)], "python"),
     ("kv_store", "键值存储", "data", "▣", "KV 读写，适合存中间结果。", ["out"],
