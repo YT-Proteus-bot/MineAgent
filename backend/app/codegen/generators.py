@@ -814,6 +814,8 @@ def _readme(name: str, slug: str, framework: str, spec: Dict[str, Any]) -> str:
         "- 接 OTel：`MINEAGENT_OTEL_ENDPOINT=http://collector:4318/v1/traces`，",
         "  需要 `pip install opentelemetry-sdk opentelemetry-exporter-otlp-proto-http`；",
         "  没装会在启动日志里明确告警，不会静默不导出",
+        "- 装了 OTel 后每个节点也会是一个子 span（带 `node.id` / `node.kind`），",
+        "  在 Jaeger/Tempo 里能直接看到「请求 → 哪几个节点各花多久」",
         "- 看板：`docs/grafana-dashboard.json` 可直接 import 到 Grafana，导入时选一下 Prometheus 数据源",
         "- 成本：填 `MINEAGENT_PRICE_INPUT_PER_1K` / `_OUTPUT_PER_1K` 后，响应里的 `usage.cost_usd` 就是本次花费，",
         "  `/metrics` 会累加 `mineagent_cost_usd_total`；设 `MINEAGENT_BUDGET_USD` 后超预算直接 429",

@@ -956,6 +956,7 @@ _HEADER_LANGCHAIN = '''"""{name} · {framework_label}
 """
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import functools
 import hashlib
@@ -1052,6 +1053,27 @@ def set_trace_id(value: str) -> None:
 
 def get_trace_id() -> str:
     return _TRACE.get() or ""
+
+
+# ── 节点级 span：装了 OTel SDK 就产生 span，没装是空操作 ──
+try:
+    from opentelemetry import trace as _otel_trace
+
+    _NODE_TRACER = _otel_trace.get_tracer("mineagent.nodes")
+except Exception:  # noqa: BLE001
+    _NODE_TRACER = None
+
+
+@contextlib.contextmanager
+def _node_span(name: str, kind: str, node_id: str):
+    """给一个节点的执行包一层 span；父 span 是服务端中间件开的请求 span。"""
+    if _NODE_TRACER is None:
+        yield None
+        return
+    with _NODE_TRACER.start_as_current_span(name) as current:
+        current.set_attribute("node.id", str(node_id))
+        current.set_attribute("node.kind", str(kind))
+        yield current
 
 
 # ── 工具幂等：同一次运行里、同样参数只真正执行一次，重跑直接回放上次结果 ──
@@ -1297,7 +1319,8 @@ def _track(fn, node_id: str, name: str = "", label: str = "", kind: str = "llm",
         attempt = 0
         while True:
             try:
-                out = _run_with_timeout(fn, state, timeout_s) if timeout_s > 0 else fn(state)
+                with _node_span(name or node_id, kind, node_id):
+                    out = _run_with_timeout(fn, state, timeout_s) if timeout_s > 0 else fn(state)
                 break
             except GraphInterrupt:
                 # 人工审批的挂起信号，必须原样抛给 LangGraph：
