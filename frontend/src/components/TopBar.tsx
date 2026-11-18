@@ -150,51 +150,53 @@ export default function TopBar({ onOpenUserCenter, onOpenCanvasModel }: Props) {
         {(close) => (
           <>
             <div className="group-title">我的画布（{canvases.length}）</div>
-            {canvases.map((c) => (
-              <div
-                key={c.id}
-                className={`menu-item${c.id === canvas?.id ? ' active' : ''}`}
-                onClick={() => {
-                  loadCanvas(c.id)
-                  close()
-                }}
-              >
-                <span>▦</span>
-                <span
-                  style={{
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 6,
-                    minWidth: 0,
+            <div className="menu-scroll">
+              {canvases.map((c) => (
+                <div
+                  key={c.id}
+                  className={`menu-item${c.id === canvas?.id ? ' active' : ''}`}
+                  onClick={() => {
+                    loadCanvas(c.id)
+                    close()
                   }}
                 >
-                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                    {c.name}
-                    {c.remote_slug ? (
-                      <span className="dim small">
-                        （{c.remote_name || c.remote_slug}）
-                      </span>
+                  <span>▦</span>
+                  <span
+                    style={{
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      minWidth: 0,
+                    }}
+                  >
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {c.name}
+                      {c.remote_slug ? (
+                        <span className="dim small">
+                          （{c.remote_name || c.remote_slug}）
+                        </span>
+                      ) : null}
+                    </span>
+                    {c.remote_changed ? (
+                      <button
+                        className="sm primary"
+                        style={{ padding: '0 6px', height: 18, fontSize: 11 }}
+                        title="远端有新版本，点击按冲突规则更新"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          void updateFromRemote(c)
+                        }}
+                      >
+                        更新
+                      </button>
                     ) : null}
                   </span>
-                  {c.remote_changed ? (
-                    <button
-                      className="sm primary"
-                      style={{ padding: '0 6px', height: 18, fontSize: 11 }}
-                      title="远端有新版本，点击按冲突规则更新"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        void updateFromRemote(c)
-                      }}
-                    >
-                      更新
-                    </button>
-                  ) : null}
-                </span>
-                <span className="sub">{c.node_count} 节点</span>
-              </div>
-            ))}
+                  <span className="sub">{c.node_count} 节点</span>
+                </div>
+              ))}
+            </div>
             <div className="menu-sep" />
             <div
               className="menu-item"

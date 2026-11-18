@@ -1785,6 +1785,61 @@ input[type='range'] {
 .community-item:hover {
   border-color: #2c3f63;
 }
+.tool-pick-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 440px;
+  overflow-y: auto;
+}
+.tool-pick-search {
+  width: 100%;
+  margin-bottom: 10px;
+}
+.upload-jobs {
+  position: fixed;
+  left: 16px;
+  bottom: 16px;
+  width: 300px;
+  max-height: 300px;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  padding: 10px 12px;
+  z-index: 60;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+}
+.upload-jobs-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.upload-job {
+  padding: 6px 0;
+  border-top: 1px solid var(--border-soft);
+  font-size: 12px;
+}
+.upload-job:first-child {
+  border-top: none;
+}
+.upload-job-name {
+  font-weight: 600;
+}
+.tool-pick-item {
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: #0c121e;
+  cursor: pointer;
+}
+.tool-pick-item:hover {
+  border-color: var(--accent);
+  background: #111a2c;
+}
 .hint-box {
   border: 1px dashed var(--border);
   border-radius: 8px;
@@ -1949,4 +2004,117 @@ button.hud-btn.active {
 }
 .small {
   font-size: 11px;
+}
+
+/* ---------------- 向量模型 / 向量库 / 数据源 ---------------- */
+.tabs {
+  display: flex;
+  gap: 4px;
+  padding: 0 0 8px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--border-soft);
+  flex-wrap: wrap;
+}
+.providers-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.providers-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.providers-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+.hint-text {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.65;
+}
+.providers-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.provider-card {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+.provider-card-main {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.provider-card-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.provider-badge {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  background: var(--panel-3, rgba(255, 255, 255, 0.08));
+  color: var(--muted);
+}
+.provider-badge.ok {
+  color: var(--ok);
+}
+.provider-badge.warn {
+  color: var(--warn);
+}
+.provider-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.provider-form-actions {
+  margin-top: 6px;
+}
+.checkbox-field > span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 画布下拉：列表区自己滚动，底部操作项固定可见 */
+.menu-scroll {
+  max-height: min(52vh, 460px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+  margin: 0 -2px;
+  padding: 0 2px;
+}
+.menu-scroll::-webkit-scrollbar {
+  width: 8px;
+}
+.menu-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.menu-scroll::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+.menu-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
+}
+/* 下拉本身也兜个底，防止别处塞太多内容撑出屏幕 */
+.popover {
+  max-height: min(78vh, 720px);
+  overflow-y: auto;
 }
