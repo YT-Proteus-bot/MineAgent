@@ -47,6 +47,39 @@ function isAgentLike(kind: string): boolean {
   return isAgentKind(kind)
 }
 
+/** 记住上次打开的画布：URL 优先（可分享、可刷新恢复），其次 localStorage */
+function preferredCanvasId(): string {
+  try {
+    const fromUrl = new URLSearchParams(window.location.search).get('canvas')
+    if (fromUrl) return fromUrl
+  } catch {
+    /* ignore */
+  }
+  try {
+    return localStorage.getItem('mineagent:canvas') || ''
+  } catch {
+    return ''
+  }
+}
+
+/** 记住当前画布：写 localStorage，同时把 canvas 参数同步进 URL */
+function rememberCanvas(canvasId: string): void {
+  try {
+    localStorage.setItem('mineagent:canvas', canvasId)
+  } catch {
+    /* 隐私模式下 localStorage 会抛错，忽略 */
+  }
+  try {
+    const url = new URL(window.location.href)
+    if (url.searchParams.get('canvas') !== canvasId) {
+      url.searchParams.set('canvas', canvasId)
+      window.history.replaceState({}, '', url.toString())
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
 export type Toast = { id: number; text: string; kind: 'ok' | 'err' | 'info' }
 
 /** 撤销 / 重做用的画布快照 */
@@ -436,7 +469,10 @@ export const useStore = create<AppState>((set, get) => ({
       if (canvases.length === 0) {
         await get().createCanvas('我的第一个智能体', 'langchain')
       } else {
-        await get().loadCanvas(canvases[0].id)
+        // 刷新页面要回到上次那张画布，而不是每次跳回列表第一个
+        const wanted = preferredCanvasId()
+        const target = canvases.find((c) => c.id === wanted) || canvases[0]
+        await get().loadCanvas(target.id)
       }
     } catch (err: any) {
       get().toast(`初始化失败：${err.message || err}`, 'err')
@@ -462,6 +498,7 @@ export const useStore = create<AppState>((set, get) => ({
       })
       get().resetHistory()
       get().validateNow()
+      rememberCanvas(id)
     } catch (err: any) {
       get().toast(`打开画布失败：${err.message || err}`, 'err')
     }
@@ -486,6 +523,7 @@ export const useStore = create<AppState>((set, get) => ({
       get().toast(`已创建画布「${detail.name}」`, 'ok')
       get().resetHistory()
       get().validateNow()
+      rememberCanvas(detail.id)
     } catch (err: any) {
       get().toast(`创建失败：${err.message || err}`, 'err')
     }
