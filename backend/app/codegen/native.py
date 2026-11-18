@@ -846,6 +846,31 @@ def _block_wiki(node: Dict[str, Any]) -> str:
     )
 
 
+def _block_human_approval(node: Dict[str, Any]) -> str:
+    """人工审批：把整条 run 挂起，等外部 approve / reject 后再继续（LangGraph interrupt）。"""
+    fn = _pyid(node["name"])
+    p = _params(node)
+    question = _text(p, "question") or _text(p, "prompt") or (
+        f"是否批准继续执行「{node.get('label') or '人工审批'}」？"
+    )
+    return (
+        f"def {fn}(state: AgentState) -> dict:\n"
+        f'    """人工审批 —— 挂起等 approve / reject，由 POST /resume 放行。"""\n'
+        f"    question = {_q(question)}\n"
+        f"    payload = {{'node': {_q(node['id'])}, 'name': {_q(node['name'])},\n"
+        f"               'question': question, 'input': _brief(state.get('data', ''), 800)}}\n"
+        f"    _emit({{'event': 'approval_required', **payload}})\n"
+        f"    decision = interrupt(payload)  # ← 这里挂起；恢复时把 /resume 的值原样送回来\n"
+        f"    text = str(decision).strip().lower()\n"
+        f"    approved = text in ('approve', 'approved', 'yes', 'true', '1', '通过', '同意')\n"
+        f"    _emit({{'event': 'approval_decided', 'node': {_q(node['id'])}, 'approved': approved,\n"
+        f"           'decision': text[:120]}})\n"
+        f"    return {{'data': state.get('data', ''),\n"
+        f"             'route': 'true' if approved else 'false',\n"
+        f"             'approval': text[:200]}}\n"
+    )
+
+
 def _block_generic(node: Dict[str, Any]) -> str:
     fn = _pyid(node["name"])
     desc = node.get("description") or node.get("label") or node["kind"]
@@ -878,6 +903,8 @@ def node_block(node: Dict[str, Any], spec: Dict[str, Any] | None = None) -> str:
         body = _block_merge(node)
     elif kind == "system_prompt":
         body = _block_system_prompt(node)
+    elif kind == "human_approval":
+        body = _block_human_approval(node)
     elif kind == "intent_recognizer":
         body = _block_intent(node)
     elif kind == "doc_loader":
@@ -946,7 +973,9 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
+from langgraph.errors import GraphInterrupt
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command, interrupt
 
 HERE = Path(__file__).resolve().parent
 CFG = json.loads((HERE / "config.json").read_text(encoding="utf-8"))
@@ -1264,6 +1293,10 @@ def _track(fn, node_id: str, name: str = "", label: str = "", kind: str = "llm",
             try:
                 out = _run_with_timeout(fn, state, timeout_s) if timeout_s > 0 else fn(state)
                 break
+            except GraphInterrupt:
+                # 人工审批的挂起信号，必须原样抛给 LangGraph：
+                # 当成错误处理会把「等人审批」变成「节点失败」
+                raise
             except Exception as exc:  # noqa: BLE001
                 if attempt < max_retries and _retryable(exc):
                     attempt += 1
@@ -1315,6 +1348,8 @@ class AgentState(TypedDict, total=False):
     answer: Annotated[Any, _merge_value]
     loop_count: Annotated[int, _merge_value]
     user_input: Annotated[str, _merge_value]
+    trace_id: Annotated[str, _merge_value]
+    approval: Annotated[str, _merge_value]
 
 
 # ── agent 实例缓存：工具集和 system prompt 都是静态的，没必要每次调用重建 ──
