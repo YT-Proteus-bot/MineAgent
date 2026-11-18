@@ -7,6 +7,7 @@ import CommunityModal from './CommunityModal'
 import GitHubAccountModal from './GitHubAccountModal'
 import UploadTemplateModal from './UploadTemplateModal'
 import ServicePanel from './ServicePanel'
+import VersionHistoryModal from './VersionHistoryModal'
 
 interface Props {
   onOpenUserCenter: () => void
@@ -42,6 +43,7 @@ export default function TopBar({ onOpenUserCenter, onOpenCanvasModel }: Props) {
   const [uploadOpen, setUploadOpen] = useState(false)
   const [communityOpen, setCommunityOpen] = useState(false)
   const [serviceOpen, setServiceOpen] = useState(false)
+  const [versionsOpen, setVersionsOpen] = useState(false)
   const [githubOpen, setGithubOpen] = useState(false)
   const refreshCanvases = useStore((s) => s.refreshCanvases)
   const setSyncConflict = useStore((s) => s.setSyncConflict)
@@ -305,6 +307,14 @@ export default function TopBar({ onOpenUserCenter, onOpenCanvasModel }: Props) {
         <span>⚙</span> 服务
       </button>
 
+      <button
+        onClick={() => setVersionsOpen(true)}
+        disabled={!canvas}
+        title="历史版本：看每次保存留的档，可回滚到任意一版"
+      >
+        <span>🕘</span> 版本
+      </button>
+
       <button className="primary" onClick={handleRun} disabled={running || !canvas}>
         {running ? <span className="spin" /> : <span>▶</span>}
         {running ? '运行中' : '运行'}
@@ -494,6 +504,14 @@ export default function TopBar({ onOpenUserCenter, onOpenCanvasModel }: Props) {
       {githubOpen && <GitHubAccountModal onClose={() => setGithubOpen(false)} />}
 
       {serviceOpen && <ServicePanel onClose={() => setServiceOpen(false)} />}
+      {versionsOpen && canvas && (
+        <VersionHistoryModal
+          canvasId={canvas.id}
+          canvasName={canvas.name}
+          onClose={() => setVersionsOpen(false)}
+          onRolledBack={() => void loadCanvas(canvas.id)}
+        />
+      )}
 
       {uploadOpen && canvas && (
         <UploadTemplateModal
