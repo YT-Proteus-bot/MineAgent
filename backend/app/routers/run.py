@@ -29,6 +29,10 @@ from .canvases import _fetch, _node_key_env, resolve_runtime_model, save_canvas
 
 router = APIRouter(prefix="/api/canvases", tags=["run"])
 
+# 生成物会读的第三方模型 key：同属「不该由平台环境透传」的一类
+_FOREIGN_KEY_ENV = {"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY",
+                    "AZURE_OPENAI_API_KEY", "GOOGLE_API_KEY", "DASHSCOPE_API_KEY"}
+
 EVENT_PREFIX = "@@EVENT@@"
 # 热执行器出错一次就不再尝试（线程可能挂住，避免后续运行继续踩）
 _WARM_BROKEN = False
@@ -197,12 +201,11 @@ async def run_canvas(canvas_id: str, payload: RunRequest):
         project_dir, _files = save_canvas(row, graph_dict)
 
     run_id = uuid.uuid4().hex
-    # 只从画布配置派生模型环境：平台进程里如果残留 MINEAGENT_API_KEY / OPENAI_API_KEY 之类，
-    # 一旦透给生成物就会出现「用了一个不知道哪来的 key」的 401
-    LEAKY = ("MINEAGENT_API_KEY", "MINEAGENT_BASE_URL", "MINEAGENT_MODEL",
-             "MINEAGENT_INPUT_FILES", "MINEAGENT_PROVIDER",
-             "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY")
-    env = {k: v for k, v in os.environ.items() if k not in LEAKY}
+    # 生成物读一堆 MINEAGENT_* 环境变量（模型、会话、可观测、安全、沙箱…），
+    # 平台进程里残留任何一个都会悄悄覆盖画布配置（曾经就因为一个测试用的
+    # MINEAGENT_API_KEY 让画布报 401）。所以这里整类清空，只按画布配置重新注入。
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("MINEAGENT_") and k not in _FOREIGN_KEY_ENV}
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"
     env["PYTHONUNBUFFERED"] = "1"
@@ -215,6 +218,14 @@ async def run_canvas(canvas_id: str, payload: RunRequest):
     # 运行附件：路径清单交给子进程，节点可以用 ctx.files / ctx.read_file 读
     if payload.files:
         env["MINEAGENT_INPUT_FILES"] = json.dumps(payload.files, ensure_ascii=False)
+
+    # 这个 key 到底从哪来：画布自带、全局设置、还是没有（排查 401 时最想知道的就是它）
+    try:
+        own_cfg = json.loads(row["model_config"] or "{}")
+    except Exception:  # noqa: BLE001
+        own_cfg = {}
+    own_key = decrypt(own_cfg.get("api_key_cipher", "") or "") if own_cfg.get("api_key_cipher") else ""
+    key_source = "canvas" if own_key else ("global" if cfg.get("api_key") else "none")
 
     node_keys = 0
     for nm in node_models:
@@ -266,6 +277,7 @@ async def run_canvas(canvas_id: str, payload: RunRequest):
         yield _sse({"event": "prepared", "run_id": run_id, "canvas_id": canvas_id,
                     "project_dir": project_dir, "slug": slug,
                     "has_api_key": bool(cfg.get("api_key")),
+                    "key_source": key_source,
                     "model": cfg.get("model"), "framework": row["framework"],
                     "run_mode": run_mode,
                     "entry": os.path.basename(entry_path)})
@@ -302,7 +314,8 @@ async def run_canvas(canvas_id: str, payload: RunRequest):
             """热执行器：agent.py 只 import 一次，省掉每次 ~5s 的框架导入。"""
             nonlocal status, warm_ok
             handle = warm.WarmRun(Path(project_dir), Path(entry_path), input_text,
-                                  {k: env.get(k, "") for k in warm.ENV_KEYS}).start()
+                                  {k: v for k, v in env.items()
+                                   if k.startswith("MINEAGENT_")}).start()
             emitted = 0
             while True:
                 if time.time() - started > RUN_TIMEOUT:

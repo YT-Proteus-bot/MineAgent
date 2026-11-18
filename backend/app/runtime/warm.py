@@ -134,7 +134,7 @@ def run(project_dir: Path, entry: Path, input_text: str, env: Dict[str, str],
     if not LOCK.acquire(timeout=90):
         raise RuntimeError("热执行器忙：上一次运行尚未结束，已回退子进程")
     try:
-        previous = {k: os.environ.get(k) for k in ENV_KEYS}
+        previous = {k: v for k, v in os.environ.items() if k.startswith("MINEAGENT_")}
         cwd = os.getcwd()
         argv = list(sys.argv)
         try:
@@ -142,6 +142,10 @@ def run(project_dir: Path, entry: Path, input_text: str, env: Dict[str, str],
             # 节点代码会在函数体内 `from runtime_sdk import ...`，整个运行期间都要能找到
             if str(project_dir) not in sys.path:
                 sys.path.insert(0, str(project_dir))
+            # 进程内运行会读到平台自己的环境变量：整类清掉 MINEAGENT_*，
+            # 再按调用方给的环境重建，保证与子进程模式的可见环境一致
+            for name in [k for k in os.environ if k.startswith("MINEAGENT_")]:
+                os.environ.pop(name, None)
             os.environ.update({k: v for k, v in env.items() if v is not None})
             os.chdir(project_dir)
             sys.argv = [str(entry), "--input", input_text]
@@ -166,6 +170,8 @@ def run(project_dir: Path, entry: Path, input_text: str, env: Dict[str, str],
                 sys.path.remove(str(project_dir))
             except ValueError:
                 pass
+            for name in [k for k in os.environ if k.startswith("MINEAGENT_")]:
+                os.environ.pop(name, None)
             for k, v in previous.items():
                 if v is None:
                     os.environ.pop(k, None)
