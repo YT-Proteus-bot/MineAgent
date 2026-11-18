@@ -553,6 +553,9 @@ def generate_project(name: str, slug: str, framework: str, graph: Dict[str, Any]
         "MINEAGENT_AUTH=none\n"
         "MINEAGENT_SERVICE_KEY=\n"
         "MINEAGENT_MAX_CONCURRENCY=4\n"
+        "\n# 可观测：trace 落盘（留空则不落）/ OTel 导出（留空则不导出）\n"
+        "MINEAGENT_TRACE_FILE=outputs/traces/{date}.jsonl\n"
+        "MINEAGENT_OTEL_ENDPOINT=\n"
         "\n# 向量模型 / 向量库 / 数据源的访问密钥（在网页「用户中心」配置过则不用填）\n"
         + "".join(line + "\n" for line in provider_env_lines)
         + "\n# 外部数据中台（服务设置 → 数据连接）\n"
@@ -787,6 +790,31 @@ def _readme(name: str, slug: str, framework: str, spec: Dict[str, Any]) -> str:
         "",
         "节点勾了「工具调用幂等」后，同一次运行里相同参数只会真正执行一次，重跑直接回放结果",
         "（记录在同目录 `.store.db` 的 `tool_calls` 表）。",
+        "",
+        "## 可观测",
+        "",
+        "```bash",
+        "curl -s localhost:8000/metrics | head        # Prometheus 文本（/metrics/json 是 JSON）",
+        "curl -s localhost:8000/runs/<thread_id>      # 会话停在哪、有没有待审批",
+        "```",
+        "",
+        "- 每次请求都带 `X-Trace-Id`；日志里的 `trace_id` 可用来串整条链路",
+        "- trace 落盘：`MINEAGENT_TRACE_FILE=outputs/traces/{date}.jsonl`（按天切）",
+        "- 接 OTel：`MINEAGENT_OTEL_ENDPOINT=http://collector:4318/v1/traces`，",
+        "  需要 `pip install opentelemetry-sdk opentelemetry-exporter-otlp-proto-http`；",
+        "  没装会在启动日志里明确告警，不会静默不导出",
+        "",
+        "## 压测与验收",
+        "",
+        "```bash",
+        "python scripts/loadtest.py --url http://127.0.0.1:8000/chat \\",
+        "    --requests 200 --concurrency 8 --slo-p95-ms 30000",
+        "python scripts/loadtest.py --url http://127.0.0.1:8000/chat/stream \\",
+        "    --stream --requests 50 --slo-p95-ms 8000",
+        "```",
+        "",
+        "脚本输出 JSON 摘要，末行是「SLO 判定：达标/不达标」，退出码可直接进流水线。",
+        "完整验收清单在 `docs/acceptance.md`（服务能起、冒烟、SLO、可观测、安全、交付物）。",
         "",
         "## 人工审批（挂起 / 放行）",
         "",

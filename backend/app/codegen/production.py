@@ -180,11 +180,13 @@ def render_telemetry() -> str:
     return '''"""结构化日志 + 轻量 metrics（零依赖，够用就好）。"""
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import time
 from collections import defaultdict
+from pathlib import Path
 
 
 _LOG = logging.getLogger("mineagent")
@@ -255,6 +257,65 @@ class Metrics:
 
 
 metrics = Metrics()
+
+
+# ── 可观测：OTel 导出（可选）+ trace 落盘（可选）──────────────────────
+_OBS: dict = {"otel": False, "endpoint": "", "trace_file": "", "service": "agent"}
+_TRACER = None
+
+
+def init_observability(service_name: str = "agent") -> dict:
+    """按环境变量决定要不要导出 OTel / 落 trace 文件；没配就什么都不做。"""
+    global _TRACER
+    _OBS["service"] = service_name
+    endpoint = (os.environ.get("MINEAGENT_OTEL_ENDPOINT") or "").strip()
+    trace_file = (os.environ.get("MINEAGENT_TRACE_FILE") or "").strip()
+    _OBS["endpoint"] = endpoint
+    _OBS["trace_file"] = trace_file
+
+    if endpoint:
+        try:
+            from opentelemetry import trace
+            from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+            from opentelemetry.sdk.resources import Resource
+            from opentelemetry.sdk.trace import TracerProvider
+            from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+            provider = TracerProvider(resource=Resource.create({"service.name": service_name}))
+            provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint)))
+            trace.set_tracer_provider(provider)
+            _TRACER = trace.get_tracer(service_name)
+            _OBS["otel"] = True
+        except Exception as exc:  # noqa: BLE001
+            # 配了地址却装不上 SDK：吵一句，别让人以为已经在导出
+            _LOG.warning("OTel 未启用：%s（pip install opentelemetry-sdk "
+                         "opentelemetry-exporter-otlp-proto-http）", exc)
+
+    log_event("observability", {"service": service_name, "otel": _OBS["otel"],
+                                "otel_endpoint": endpoint, "trace_file": trace_file})
+    return dict(_OBS)
+
+
+def span(name: str, attributes: dict | None = None):
+    """拿一个 span 上下文；没配 OTel 时是空操作，调用处不用分叉。"""
+    if _TRACER is None:
+        return contextlib.nullcontext()
+    return _TRACER.start_as_current_span(name, attributes=attributes or {})
+
+
+def trace_event(event: str, fields: dict | None = None) -> None:
+    """把一条事件追加到 trace 文件（JSONL；文件名里可以写 {date} 按天切）。"""
+    path = _OBS.get("trace_file") or ""
+    if not path:
+        return
+    try:
+        target = Path(str(path).replace("{date}", time.strftime("%Y-%m-%d")))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"ts": time.time(), "event": event, **(fields or {})},
+                                ensure_ascii=False, default=str) + "\\n")
+    except Exception:  # noqa: BLE001
+        pass
 '''
 
 
@@ -626,7 +687,7 @@ from pydantic import BaseModel
 
 import agent as flow
 from settings import settings
-from telemetry import log_event, metrics
+from telemetry import init_observability, log_event, metrics, span, trace_event
 
 try:
     from checkpoint import get_checkpointer
@@ -669,7 +730,8 @@ async def _trace_middleware(request: Request, call_next):
     """每个请求一个 trace id：参数校验失败、500 也照样带回，方便对日志。"""
     trace_id = _new_trace_id(request.headers.get("X-Trace-Id"))
     request.state.trace_id = trace_id
-    response = await call_next(request)
+    with span(f"{{request.method}} {{request.url.path}}", {{"trace_id": trace_id}}):
+        response = await call_next(request)
     response.headers.setdefault("X-Trace-Id", trace_id)
     return response
 
@@ -797,6 +859,7 @@ def _check_auth(authorization: Optional[str]) -> None:
 
 @app.on_event("startup")
 def _startup_report() -> None:
+    init_observability(settings.project_name)
     log_event("service_start", {{"project": settings.project_name,
                                  "entry_mode": settings.entry_mode,
                                  "entry_path": settings.entry_path,
@@ -866,6 +929,10 @@ def chat(req: ChatRequest, request: Request,
     log_event("chat_ok", {{"trace_id": trace_id, "thread_id": thread_id,
                            "latency_ms": round((time.time() - started) * 1000, 2),
                            "usage": usage, "interrupted": bool(interrupts)}})
+    trace_event("chat_ok" if not interrupts else "chat_interrupted",
+                {{"trace_id": trace_id, "thread_id": thread_id,
+                  "latency_ms": round((time.time() - started) * 1000, 2),
+                  "usage": usage, "interrupt": interrupts[0] if interrupts else None}})
     if interrupts:
         return ChatResponse(answer="", thread_id=thread_id, usage=usage,
                             status="interrupted", interrupt=interrupts[0])
@@ -908,6 +975,9 @@ def resume(req: ResumeRequest, request: Request,
                              "decision": req.decision,
                              "latency_ms": round((time.time() - started) * 1000, 2),
                              "usage": usage}})
+    trace_event("resume_ok", {{"trace_id": trace_id, "thread_id": req.thread_id,
+                              "decision": req.decision, "usage": usage,
+                              "status": "interrupted" if interrupts else "ok"}})
     if interrupts:
         return ChatResponse(answer="", thread_id=req.thread_id, usage=usage,
                             status="interrupted", interrupt=interrupts[0])
@@ -1553,6 +1623,221 @@ python evals/run.py --limit 3   # 先跑前 3 条看看
 '''
 
 
+_LOADTEST_PY = '''"""压测：交付前跑一遍，给 SLO 验收留证据（只用标准库，不装东西）。
+
+用法：
+    python scripts/loadtest.py --url http://127.0.0.1:8000/chat --requests 200 --concurrency 8
+    python scripts/loadtest.py --url http://127.0.0.1:8000/chat/stream --stream --requests 50
+
+默认按「p95 ≤ 8000ms、错误率 ≤ 1%」判定，超了返回 1。
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import statistics
+import threading
+import time
+import urllib.error
+import urllib.request
+
+
+def one_request(url: str, payload: bytes, headers: dict, timeout: float, stream: bool):
+    started = time.time()
+    req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if stream:
+                resp.read(1)  # 只等首字节
+            else:
+                resp.read()
+            return (time.time() - started) * 1000, resp.status, ""
+    except urllib.error.HTTPError as exc:
+        return (time.time() - started) * 1000, exc.code, f"HTTP {exc.code}"
+    except Exception as exc:  # noqa: BLE001
+        return (time.time() - started) * 1000, 0, type(exc).__name__
+
+
+def worker(url, payload, headers, timeout, stream, count, results, lock):
+    local = []
+    for _ in range(count):
+        local.append(one_request(url, payload, headers, timeout, stream))
+    with lock:
+        results.extend(local)
+
+
+def percentile(values, ratio):
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    idx = min(len(ordered) - 1, int(len(ordered) * ratio))
+    return round(ordered[idx], 1)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--url", default="http://127.0.0.1:8000/chat")
+    parser.add_argument("--requests", type=int, default=100)
+    parser.add_argument("--concurrency", type=int, default=4)
+    parser.add_argument("--timeout", type=float, default=120)
+    parser.add_argument("--message", default="用一句话介绍你自己")
+    parser.add_argument("--thread-prefix", default="load")
+    parser.add_argument("--token", default="", help="服务开了鉴权时填 API Key")
+    parser.add_argument("--trace-file", default="", help="把每次请求的延迟写到 JSONL")
+    parser.add_argument("--stream", action="store_true", help="测 SSE 首字节延迟")
+    parser.add_argument("--slo-p95-ms", type=float, default=8000)
+    parser.add_argument("--slo-error-rate", type=float, default=0.01)
+    args = parser.parse_args()
+
+    headers = {"Content-Type": "application/json"}
+    if args.token:
+        headers["Authorization"] = "Bearer " + args.token
+
+    per_thread = max(1, args.requests // max(1, args.concurrency))
+    total = per_thread * args.concurrency
+    results = []
+    lock = threading.Lock()
+    threads = []
+    started = time.time()
+    for i in range(args.concurrency):
+        payload = json.dumps({"message": args.message,
+                              "thread_id": f"{args.thread_prefix}-{i}-{int(started)}"}).encode("utf-8")
+        t = threading.Thread(target=worker, daemon=True,
+                             args=(args.url, payload, headers, args.timeout, args.stream,
+                                   per_thread, results, lock))
+        threads.append(t)
+        t.start()
+    for t in threads:
+        t.join()
+    elapsed = time.time() - started
+
+    latencies = [r[0] for r in results]
+    errors = [r for r in results if r[1] != 200]
+    ok = len(results) - len(errors)
+    error_rate = len(errors) / max(1, len(results))
+    p95 = percentile(latencies, 0.95)
+    summary = {
+        "url": args.url,
+        "requests": len(results),
+        "ok": ok,
+        "error_rate": round(error_rate, 4),
+        "rps": round(len(results) / elapsed, 2) if elapsed else 0,
+        "latency_ms": {
+            "p50": percentile(latencies, 0.50),
+            "p95": p95,
+            "p99": percentile(latencies, 0.99),
+            "max": round(max(latencies), 1) if latencies else 0,
+            "avg": round(statistics.fmean(latencies), 1) if latencies else 0,
+        },
+        "elapsed_s": round(elapsed, 2),
+        "slo": {"p95_ms": args.slo_p95_ms, "error_rate": args.slo_error_rate},
+    }
+
+    if args.trace_file:
+        import pathlib
+        path = pathlib.Path(args.trace_file)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            for latency, status, error in results:
+                fh.write(json.dumps({"ts": time.time(), "latency_ms": round(latency, 1),
+                                     "status": status, "error": error}) + "\\n")
+
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    violated = summary["latency_ms"]["p95"] > args.slo_p95_ms or error_rate > args.slo_error_rate
+    if errors:
+        kinds = {}
+        for _, _, err in errors:
+            kinds[err] = kinds.get(err, 0) + 1
+        print("失败类型：", kinds)
+    print("SLO 判定：", "不达标" if violated else "达标")
+    return 1 if violated else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+
+_ACCEPTANCE_MD = '''# 验收清单（私有化交付）
+
+跑完这一页，客户侧的「能不能上线」通常就有结论了。
+
+## 1. 服务能起来
+
+```bash
+python settings.py                 # 配置能解析（密钥打码）
+uvicorn server:app --host 0.0.0.0 --port 8000
+curl -s localhost:8000/health      # {"ok": true}
+curl -s localhost:8000/ready       # ok / missing / unimplemented / sandbox
+```
+
+`/ready` 里 `missing` 必须为空；`unimplemented` 列出的开关服务端尚未实现，交付时应向客户说明。
+
+## 2. 功能冒烟
+
+```bash
+python -m pytest -q                # 不需要真实模型
+python evals/run.py --check        # 用例格式与打分逻辑
+python evals/run.py                # 真跑（需要 key），看 pass_rate
+```
+
+## 3. SLO（按实际业务改数字）
+
+| 指标 | 目标 | 口径 |
+| --- | --- | --- |
+| 可用性 | ≥ 99.5% / 月 | `/health` 探活成功率 |
+| 首字节延迟 p95 | ≤ 8s | `/chat/stream` 首事件 |
+| 整轮延迟 p95 | ≤ 30s | `/chat` 端到端 |
+| 错误率 | ≤ 1% | 非 2xx / 总请求 |
+| 单轮 token 成本 | ≤ 预算 | 响应里的 `usage` |
+
+压测取数：
+
+```bash
+python scripts/loadtest.py --url http://127.0.0.1:8000/chat \\
+    --requests 200 --concurrency 8 --slo-p95-ms 30000
+python scripts/loadtest.py --url http://127.0.0.1:8000/chat/stream \\
+    --stream --requests 50 --slo-p95-ms 8000
+```
+
+脚本输出 JSON 摘要，末行是「SLO 判定：达标/不达标」，退出码 0/1，可直接进流水线。
+
+## 4. 可观测
+
+```bash
+curl -s localhost:8000/metrics | head          # Prometheus 文本
+curl -s localhost:8000/runs/<thread_id>        # 会话停在哪、有没有待审批
+```
+
+- 打开 trace 落盘：`MINEAGENT_TRACE_FILE=outputs/traces/{date}.jsonl`
+- 接 OTel：`MINEAGENT_OTEL_ENDPOINT=http://collector:4318/v1/traces`，
+  需要装 `opentelemetry-sdk opentelemetry-exporter-otlp-proto-http`
+
+## 5. 安全与运维
+
+- 鉴权：`MINEAGENT_AUTH=apikey` + `MINEAGENT_SERVICE_KEY`（`oidc` 尚未实现，会返回 501）
+- 沙箱：`MINEAGENT_SANDBOX=restricted`（默认）；要强隔离改成 `container` 并确认机器有 docker
+- 镜像：`docker compose up --build`，容器内非 root、带 HEALTHCHECK
+- 离线：目标机执行 `./scripts/install_offline.sh`（wheels/ 由 `scripts/offline_bundle.py` 生成）
+- 会话：`MINEAGENT_SESSION_STORE=sqlite`（默认，重启可续跑）/ `postgres` / `none`（进程内）
+
+## 6. 交付物核对
+
+- [ ] `requirements.lock.txt` 与 `wheels/` 一致，目标机能离线装
+- [ ] `evals/report.json` 里的 pass_rate 达到约定值
+- [ ] `scripts/loadtest.py` 的 SLO 判定为达标
+- [ ] `docs/acceptance.md` 的检查项逐条勾完
+- [ ] 升级/回滚方式已写进交付文档（数据库文件、wheels、镜像 tag）
+'''
+
+
+def render_loadtest() -> Dict[str, str]:
+    return {
+        "scripts/loadtest.py": _LOADTEST_PY,
+        "docs/acceptance.md": _ACCEPTANCE_MD,
+    }
+
+
 def render_evals(spec: Dict[str, Any]) -> Dict[str, str]:
     """评测目录：用例模板 + 打分脚本 + 说明。"""
     inputs = [n for n in spec.get("nodes", []) if (n.get("kind") or "") == "input"]
@@ -1624,4 +1909,7 @@ def render_production_files(spec: Dict[str, Any], graph: Dict[str, Any],
         files.update(render_lock_files(requirements_text))
     # 评测用例 + 打分脚本：改完 agent 用它证明没变差
     files.update(render_evals(spec))
+    # 压测脚本 + 验收清单：只有 HTTP 服务才有意义
+    if has_graph:
+        files.update(render_loadtest())
     return files
