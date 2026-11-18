@@ -833,6 +833,519 @@ def run(ctx: NodeContext):
     return (proc.stdout + proc.stderr)[:2000]
 ''',
     },
+    "subagent": {
+        "label": "子 Agent（简化）",
+        "description": "用项目里的大模型独立跑一个子任务，返回结果。",
+        "params": [],
+        "args": "task: str",
+        "preview": '''from runtime_sdk import NodeContext
+
+
+def run(ctx: NodeContext):
+    """子 Agent：交给模型独立执行。"""
+    return ctx.agent(ctx.text)
+''',
+        "native": '''    result = llm.invoke(task)
+    return str(getattr(result, "content", result))[:4000]
+''',
+    },
+    "list_agents": {
+        "label": "列出 Agent",
+        "description": "从 agent.json 里读出画布上的 agent 节点名称。",
+        "params": [],
+        "args": 'query: str = ""',
+        "preview": '''from runtime_sdk import NodeContext
+
+
+def run(ctx: NodeContext):
+    """列出画布上的 agent。"""
+    import json
+    from pathlib import Path
+
+    graph = json.loads((Path(__file__).resolve().parent / "agent.json").read_text(encoding="utf-8"))
+    names = [n["data"]["name"] for n in graph.get("nodes", [])
+             if n["data"].get("kind") in ("agent", "supervisor", "worker", "crewai_agent", "autogen_assistant")]
+    return "\\n".join(names) or "（画布上没有 agent 节点）"
+''',
+        "native": '''    import json
+    from pathlib import Path
+
+    graph = json.loads((Path(__file__).resolve().parent / "agent.json").read_text(encoding="utf-8"))
+    names = [n["data"]["name"] for n in graph.get("nodes", [])
+             if n["data"].get("kind") in ("agent", "supervisor", "worker", "crewai_agent", "autogen_assistant")]
+    return "\\n".join(names) or "（画布上没有 agent 节点）"
+''',
+    },
+    "send_message": {
+        "label": "发送消息给 Agent",
+        "description": "把消息追加到 .agents/<name>.inbox.jsonl。",
+        "params": [],
+        "args": "to: str, message: str",
+        "preview": '''from runtime_sdk import NodeContext
+
+
+def run(ctx: NodeContext):
+    """发送消息：写入目标 agent 的收件箱。"""
+    import json
+    from pathlib import Path
+
+    base = Path(__file__).resolve().parent / ".agents"
+    base.mkdir(exist_ok=True)
+    path = base / f"{ctx.params.get('to') or 'agent'}.inbox.jsonl"
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"message": ctx.text}, ensure_ascii=False) + "\\n")
+    return path.name
+''',
+        "native": '''    import json
+    from pathlib import Path
+
+    base = Path(__file__).resolve().parent / ".agents"
+    base.mkdir(exist_ok=True)
+    path = base / f"{to}.inbox.jsonl"
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"message": message}, ensure_ascii=False) + "\\n")
+    return f"已投递到 {to}"
+''',
+    },
+    "wait_agent": {
+        "label": "等待 Agent 输出",
+        "description": "轮询 .agents/<name>.outbox.jsonl，返回最后一条输出。",
+        "params": [],
+        "args": 'name: str, timeout: int = 30',
+        "preview": '''from runtime_sdk import NodeContext
+
+
+def run(ctx: NodeContext):
+    """等待 agent 输出。"""
+    import time
+    from pathlib import Path
+
+    name = ctx.params.get("name") or "agent"
+    path = Path(__file__).resolve().parent / ".agents" / f"{name}.outbox.jsonl"
+    deadline = time.time() + int(ctx.params.get("timeout") or 30)
+    while time.time() < deadline:
+        if path.exists():
+            lines = [l for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+            if lines:
+                return lines[-1]
+        time.sleep(1)
+    return f"（{name} 没有输出）"
+''',
+        "native": '''    import time
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent / ".agents" / f"{name}.outbox.jsonl"
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if path.exists():
+            lines = [l for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+            if lines:
+                return lines[-1]
+        time.sleep(1)
+    return f"（{name} 在 {timeout}s 内没有输出）"
+''',
+    },
+    "interrupt_agent": {
+        "label": "中断 Agent",
+        "description": "写 .agents/<name>.cancel 标记，请求目标 agent 停止。",
+        "params": [],
+        "args": "name: str",
+        "preview": '''from runtime_sdk import NodeContext
+
+
+def run(ctx: NodeContext):
+    """中断 agent：写取消标记。"""
+    from pathlib import Path
+
+    base = Path(__file__).resolve().parent / ".agents"
+    base.mkdir(exist_ok=True)
+    (base / f"{ctx.params.get('name') or 'agent'}.cancel").write_text("1", encoding="utf-8")
+    return "已请求中断"
+''',
+        "native": '''    from pathlib import Path
+
+    base = Path(__file__).resolve().parent / ".agents"
+    base.mkdir(exist_ok=True)
+    (base / f"{name}.cancel").write_text("1", encoding="utf-8")
+    return f"已请求中断 {name}"
+''',
+    },
+    "team_task_create": {
+        "label": "创建团队任务",
+        "description": "在项目内 .team.db 的任务表里插入一条任务，返回 id。",
+        "params": [],
+        "args": 'title: str, detail: str = ""',
+        "preview": '''from runtime_sdk import NodeContext
+
+
+def run(ctx: NodeContext):
+    """创建团队任务。"""
+    import sqlite3
+    from pathlib import Path
+
+    conn = sqlite3.connect(str(Path(__file__).resolve().parent / ".team.db"))
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY, title TEXT, detail TEXT, status TEXT, owner TEXT)")
+        cur = conn.execute("INSERT INTO tasks (title, detail, status, owner) VALUES (?, ?, 'todo', '')", (ctx.text, ""))
+        conn.commit()
+        return str(cur.lastrowid)
+    finally:
+        conn.close()
+''',
+        "native": '''    import sqlite3
+    from pathlib import Path
+
+    conn = sqlite3.connect(str(Path(__file__).resolve().parent / ".team.db"))
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY, title TEXT, detail TEXT, status TEXT, owner TEXT)")
+        cur = conn.execute("INSERT INTO tasks (title, detail, status, owner) VALUES (?, ?, 'todo', '')", (title, detail))
+        conn.commit()
+        return str(cur.lastrowid)
+    finally:
+        conn.close()
+''',
+    },
+    "team_task_get": {
+        "label": "读取团队任务",
+        "description": "按 id 从 .team.db 读取一条任务。",
+        "params": [],
+        "args": "task_id: int",
+        "preview": '''from runtime_sdk import NodeContext
+
+
+def run(ctx: NodeContext):
+    """读取团队任务。"""
+    import json
+    import sqlite3
+    from pathlib import Path
+
+    conn = sqlite3.connect(str(Path(__file__).resolve().parent / ".team.db"))
+    try:
+        row = conn.execute("SELECT id, title, detail, status, owner FROM tasks WHERE id = ?", (int(ctx.text),)).fetchone()
+        return json.dumps(row, ensure_ascii=False) if row else "（没有这条任务）"
+    finally:
+        conn.close()
+''',
+        "native": '''    import json
+    import sqlite3
+    from pathlib import Path
+
+    conn = sqlite3.connect(str(Path(__file__).resolve().parent / ".team.db"))
+    try:
+        row = conn.execute("SELECT id, title, detail, status, owner FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        return json.dumps(row, ensure_ascii=False) if row else "（没有这条任务）"
+    finally:
+        conn.close()
+''',
+    },
+    "team_task_list": {
+        "label": "列出团队任务",
+        "description": "列出 .team.db 里的任务，可按状态过滤。",
+        "params": [],
+        "args": 'status: str = ""',
+        "preview": '''from runtime_sdk import NodeContext
+
+
+def run(ctx: NodeContext):
+    """列出团队任务。"""
+    import json
+    import sqlite3
+    from pathlib import Path
+
+    conn = sqlite3.connect(str(Path(__file__).resolve().parent / ".team.db"))
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY, title TEXT, detail TEXT, status TEXT, owner TEXT)")
+        rows = conn.execute("SELECT id, title, status, owner FROM tasks ORDER BY id").fetchall()
+        return json.dumps(rows, ensure_ascii=False)
+    finally:
+        conn.close()
+''',
+        "native": '''    import json
+    import sqlite3
+    from pathlib import Path
+
+    conn = sqlite3.connect(str(Path(__file__).resolve().parent / ".team.db"))
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY, title TEXT, detail TEXT, status TEXT, owner TEXT)")
+        if status:
+            rows = conn.execute("SELECT id, title, status, owner FROM tasks WHERE status = ? ORDER BY id", (status,)).fetchall()
+        else:
+            rows = conn.execute("SELECT id, title, status, owner FROM tasks ORDER BY id").fetchall()
+        return json.dumps(rows, ensure_ascii=False)
+    finally:
+        conn.close()
+''',
+    },
+    "team_task_update": {
+        "label": "更新团队任务",
+        "description": "更新任务的状态或负责人。",
+        "params": [],
+        "args": 'task_id: int, status: str, owner: str = ""',
+        "preview": '''from runtime_sdk import NodeContext
+
+
+def run(ctx: NodeContext):
+    """更新团队任务。"""
+    import sqlite3
+    from pathlib import Path
+
+    conn = sqlite3.connect(str(Path(__file__).resolve().parent / ".team.db"))
+    try:
+        conn.execute("UPDATE tasks SET status = ?, owner = COALESCE(NULLIF(?, ''), owner) WHERE id = ?",
+                     (ctx.params.get("status") or "done", ctx.params.get("owner") or "", int(ctx.text)))
+        conn.commit()
+        return "已更新"
+    finally:
+        conn.close()
+''',
+        "native": '''    import sqlite3
+    from pathlib import Path
+
+    conn = sqlite3.connect(str(Path(__file__).resolve().parent / ".team.db"))
+    try:
+        conn.execute("UPDATE tasks SET status = ?, owner = COALESCE(NULLIF(?, ''), owner) WHERE id = ?",
+                     (status, owner, task_id))
+        conn.commit()
+        return f"已更新任务 {task_id}"
+    finally:
+        conn.close()
+''',
+    },
+    "workflow": {
+        "label": "执行工作流",
+        "description": "执行项目内 workflows/<name>.py 的 run()。",
+        "params": [],
+        "args": "name: str",
+        "preview": '''from runtime_sdk import NodeContext
+
+
+def run(ctx: NodeContext):
+    """执行项目内工作流脚本。"""
+    import importlib.util
+    from pathlib import Path
+
+    name = ctx.text.strip()
+    path = Path(__file__).resolve().parent / "workflows" / f"{name}.py"
+    if not path.exists():
+        raise FileNotFoundError(f"没有 workflows/{name}.py")
+    spec = importlib.util.spec_from_file_location(f"workflow_{name}", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return str(module.run())[:4000]
+''',
+        "native": '''    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent / "workflows" / f"{name}.py"
+    if not path.exists():
+        raise FileNotFoundError(f"没有 workflows/{name}.py")
+    spec = importlib.util.spec_from_file_location(f"workflow_{name}", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return str(module.run())[:4000]
+''',
+    },
+    "session_search": {
+        "label": "搜索会话",
+        "description": "在项目内 .sessions.jsonl 里按关键词搜索。",
+        "params": [],
+        "args": "query: str",
+        "preview": '''from runtime_sdk import NodeContext
+
+
+def run(ctx: NodeContext):
+    """搜索会话记录。"""
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent / ".sessions.jsonl"
+    if not path.exists():
+        return "（还没有会话记录）"
+    hits = [line[:500] for line in path.read_text(encoding="utf-8").splitlines()
+            if ctx.text.lower() in line.lower()]
+    return "\\n".join(hits[:20]) or "（没有匹配）"
+''',
+        "native": '''    from pathlib import Path
+
+    path = Path(__file__).resolve().parent / ".sessions.jsonl"
+    if not path.exists():
+        return "（还没有会话记录）"
+    hits = [line[:500] for line in path.read_text(encoding="utf-8").splitlines()
+            if query.lower() in line.lower()]
+    return "\\n".join(hits[:20]) or "（没有匹配）"
+''',
+    },
+    "session_trace": {
+        "label": "会话轨迹",
+        "description": "按 session_id 取出一次会话的全部记录。",
+        "params": [],
+        "args": "session_id: str",
+        "preview": '''from runtime_sdk import NodeContext
+
+
+def run(ctx: NodeContext):
+    """按 session_id 取会话轨迹。"""
+    import json
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent / ".sessions.jsonl"
+    if not path.exists():
+        return "（还没有会话记录）"
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            item = json.loads(line)
+        except Exception:
+            continue
+        if item.get("session_id") == ctx.text.strip():
+            rows.append(json.dumps(item, ensure_ascii=False))
+    return "\\n".join(rows[:200]) or "（没有这个会话）"
+''',
+        "native": '''    import json
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent / ".sessions.jsonl"
+    if not path.exists():
+        return "（还没有会话记录）"
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            item = json.loads(line)
+        except Exception:
+            continue
+        if item.get("session_id") == session_id:
+            rows.append(json.dumps(item, ensure_ascii=False))
+    return "\\n".join(rows[:200]) or "（没有这个会话）"
+''',
+    },
+    "schedule_create": {
+        "label": "创建定时任务",
+        "description": "把定时任务写进 .schedules.json（安装 crontab 后生效）。",
+        "params": [],
+        "args": "name: str, cron: str, command: str",
+        "preview": '''from runtime_sdk import NodeContext
+
+
+def run(ctx: NodeContext):
+    """创建定时任务：落盘到 .schedules.json。"""
+    import json
+
+    return ctx.write_file(".schedules.json", json.dumps([{"name": ctx.text, "status": "active"}], ensure_ascii=False))
+''',
+        "native": '''    import json
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent / ".schedules.json"
+    items = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+    items.append({"name": name, "cron": cron, "command": command, "status": "active"})
+    path.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+    return f"已写入 .schedules.json：{name}（{cron}）"
+''',
+    },
+    "schedule_list": {
+        "label": "列出定时任务",
+        "description": "返回 .schedules.json 的内容。",
+        "params": [],
+        "args": 'query: str = ""',
+        "preview": '''from runtime_sdk import NodeContext
+
+
+def run(ctx: NodeContext):
+    """列出定时任务。"""
+    return ctx.read_file(".schedules.json")
+''',
+        "native": '''    from pathlib import Path
+
+    path = Path(__file__).resolve().parent / ".schedules.json"
+    return path.read_text(encoding="utf-8") if path.exists() else "（还没有定时任务）"
+''',
+    },
+    "schedule_edit": {
+        "label": "修改定时任务",
+        "description": "修改指定定时任务的 cron 或命令。",
+        "params": [],
+        "args": 'name: str, cron: str = "", command: str = ""',
+        "preview": '''from runtime_sdk import NodeContext
+
+
+def run(ctx: NodeContext):
+    """修改定时任务：重写 .schedules.json。"""
+    import json
+
+    return ctx.write_file(".schedules.json", json.dumps([{"name": ctx.text, "status": "active"}], ensure_ascii=False))
+''',
+        "native": '''    import json
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent / ".schedules.json"
+    if not path.exists():
+        raise FileNotFoundError("还没有定时任务")
+    items = json.loads(path.read_text(encoding="utf-8"))
+    for item in items:
+        if item.get("name") == name:
+            if cron:
+                item["cron"] = cron
+            if command:
+                item["command"] = command
+            break
+    path.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+    return f"已更新 {name}"
+''',
+    },
+    "schedule_view": {
+        "label": "查看定时任务",
+        "description": "查看单个定时任务的配置。",
+        "params": [],
+        "args": "name: str",
+        "preview": '''from runtime_sdk import NodeContext
+
+
+def run(ctx: NodeContext):
+    """查看定时任务。"""
+    import json
+
+    return ctx.read_file(".schedules.json")
+''',
+        "native": '''    import json
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent / ".schedules.json"
+    if not path.exists():
+        return "（还没有定时任务）"
+    for item in json.loads(path.read_text(encoding="utf-8")):
+        if item.get("name") == name:
+            return json.dumps(item, ensure_ascii=False)
+    return f"（没有 {name}）"
+''',
+    },
+    "ralph": {
+        "label": "Ralph 循环",
+        "description": "反复调用模型直到自评完成，返回最后一轮结果。",
+        "params": [],
+        "args": 'task: str, max_rounds: int = 5',
+        "preview": '''from runtime_sdk import NodeContext
+
+
+def run(ctx: NodeContext):
+    """Ralph：循环迭代直到自评完成。"""
+    last = ""
+    for _ in range(max(1, int(ctx.params.get("max_rounds") or 5))):
+        result = ctx.agent(ctx.text)
+        last = str(result)[:4000]
+        judge = ctx.agent("只回答 是 或 否：这个结果是否已完成任务？\\n" + last)
+        if "是" in str(judge):
+            return last
+    return last
+''',
+        "native": '''    last = ""
+    for _ in range(max(1, max_rounds)):
+        result = llm.invoke(task)
+        last = str(getattr(result, "content", result))[:4000]
+        judge = llm.invoke("只回答 是 或 否：这个结果是否已完成任务「" + task + "」？\\n" + last)
+        if "是" in str(getattr(judge, "content", judge)):
+            return last
+    return last
+''',
+    },
 }
 
 
@@ -869,6 +1382,23 @@ SUMMARY: Dict[str, str] = {
     "office_convert": "用 LibreOffice 把文档转成 PDF。",
     "office_render": "用 LibreOffice 把文档渲染成 PNG。",
     "office_recalculate": "用 LibreOffice 重算表格公式。",
+    "subagent": "用项目里的大模型独立执行一个子任务并返回结果。",
+    "list_agents": "列出画布上的 agent 节点名称。",
+    "send_message": "把消息投递到目标 agent 的收件箱。",
+    "wait_agent": "等待目标 agent 的输出（轮询 outbox）。",
+    "interrupt_agent": "给目标 agent 写一个中断标记。",
+    "team_task_create": "在项目内任务表里创建一条团队任务。",
+    "team_task_get": "按 id 读取一条团队任务。",
+    "team_task_list": "列出团队任务（可按状态过滤）。",
+    "team_task_update": "更新团队任务的状态或负责人。",
+    "workflow": "执行项目内 workflows/<name>.py 的 run()。",
+    "session_search": "在项目内 .sessions.jsonl 里按关键词搜索。",
+    "session_trace": "按 session_id 取出一次会话的全部记录。",
+    "schedule_create": "把定时任务写进 .schedules.json。",
+    "schedule_list": "列出 .schedules.json 里的定时任务。",
+    "schedule_edit": "修改 .schedules.json 里的定时任务。",
+    "schedule_view": "查看 .schedules.json 里的单个定时任务。",
+    "ralph": "反复调用模型直到自评完成，返回最后一轮结果。",
 }
 
 
@@ -888,8 +1418,23 @@ def list_presets() -> List[Dict[str, Any]]:
 
 
 def get_summary(preset: str) -> str:
-    return SUMMARY.get(preset, "")
+    if preset in SUMMARY:
+        return SUMMARY[preset]
+    ext = TOOL_PRESETS.get(preset) or {}
+    return ext.get("description", "")
 
 
 def get_preset(preset: str) -> Dict[str, Any] | None:
     return TOOL_PRESETS.get(preset)
+
+
+# --------------------------------------------------------------------------- #
+# 扩展工具（从 LangChain / CrewAI / Dify / Coze / OpenAI 的工具集里挑的常用能力）
+# 单独放在 tool_presets_ext.py，避免这个文件继续变长
+# --------------------------------------------------------------------------- #
+try:
+    from .tool_presets_ext import EXT_PRESETS
+
+    TOOL_PRESETS.update(EXT_PRESETS)
+except Exception:  # noqa: BLE001  扩展文件缺失时不影响主功能
+    pass
