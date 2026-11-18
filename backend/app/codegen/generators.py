@@ -955,6 +955,8 @@ def _readme(name: str, slug: str, framework: str, spec: Dict[str, Any]) -> str:
         "",
         "```bash",
         "python evals/run.py --candidates   # 重跑这些失败输入，看现在还报不报错",
+        "python evals/triage.py             # 按「错误类型 + 归一化输入」聚类，看哪类问题最该先修",
+        "python evals/triage.py --write     # 生成 draft-cases.jsonl，补断言后挪进 cases.jsonl",
         "```",
         "",
         "不再报错的输入，抄进 `cases.jsonl` 再补上 `expect_contains`，就成了一条正式用例——",

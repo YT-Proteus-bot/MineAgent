@@ -1980,10 +1980,21 @@ _EVAL_README = '''# 评测用例
 - `max_latency_ms` 为 0 时不校验延迟；
 - 一条用例里所有规则都满足才算 pass。
 
+## 从线上失败挑用例
+
+```bash
+python evals/triage.py            # 看聚类：同一输入、同一类错误会合并，按出现次数排序
+python evals/triage.py --write    # 生成 draft-cases.jsonl（带出现次数与 trace_id）
+```
+
+把草稿里该守的几条挪进 `cases.jsonl`，补上 `expect_contains`，就变成了回归用例。
+`/chat` 出错时会自动往 `evals/candidates.jsonl` 记录（含 trace_id），不用手工收集。
+
 ```bash
 python evals/run.py --check     # CI：只校验用例格式与打分逻辑，不调模型
 python evals/run.py             # 真跑：需要 MINEAGENT_API_KEY，结果写 evals/report.json
 python evals/run.py --limit 3   # 先跑前 3 条看看
+python evals/run.py --candidates   # 重跑线上失败的输入，看现在还报不报错
 ```
 
 改完 agent 之后跑一遍，`pass_rate` 掉了就是改坏了——这是这个目录唯一的用途。
@@ -2846,6 +2857,134 @@ def render_ops_scripts() -> Dict[str, str]:
     }
 
 
+_TRIAGE_PY = '''"""把线上失败的候选整理成待审用例草稿（人工只需补断言）。
+
+    python evals/triage.py              # 只打印聚类结果
+    python evals/triage.py --write      # 写 evals/draft-cases.jsonl
+    python evals/triage.py --limit 50   # 最多输出多少条
+
+输入：evals/candidates.jsonl（/chat 出错时自动追加）；输出：按「错误类型 + 归一化输入」去重后的草稿，
+每条带出现次数、首次/最后时间、最近一次的 trace_id，方便回日志里看现场。
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import re
+import time
+from collections import defaultdict
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+CANDS = HERE / "candidates.jsonl"
+DRAFT = HERE / "draft-cases.jsonl"
+
+
+def _norm(text: str) -> str:
+    return re.sub(r"\\s+", " ", (text or "").strip())
+
+
+def _err_key(error: str) -> str:
+    text = _norm(error)
+    if not text:
+        return "(no-error)"
+    text = re.sub(r"\\d{3,}", "<n>", text)
+    return text[:60]
+
+
+def load(path: Path) -> list:
+    if not path.exists():
+        return []
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return rows
+
+
+def cluster(rows: list) -> list:
+    groups = defaultdict(lambda: {"count": 0, "first": None, "last": None,
+                                  "trace_id": "", "error": ""})
+    for row in rows:
+        text = _norm(str(row.get("input") or ""))
+        if not text:
+            continue
+        error = str(row.get("error") or "")
+        key = (hashlib.sha256(text.encode("utf-8")).hexdigest()[:12], _err_key(error))
+        item = groups[key]
+        item["count"] += 1
+        item["input"] = text
+        item["error"] = _err_key(error)
+        ts = float(row.get("ts") or 0)
+        item["first"] = ts if item["first"] is None else min(item["first"], ts)
+        if item["last"] is None or ts >= item["last"]:
+            item["last"] = ts
+            item["trace_id"] = str(row.get("trace_id") or "")
+    out = []
+    for item in groups.values():
+        out.append({
+            "input": item["input"],
+            "error": item["error"],
+            "count": item["count"],
+            "first_seen": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(item["first"] or 0)),
+            "last_seen": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(item["last"] or 0)),
+            "trace_id": item["trace_id"],
+        })
+    out.sort(key=lambda x: (x["count"], x["last_seen"]), reverse=True)
+    return out
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--write", action="store_true")
+    parser.add_argument("--limit", type=int, default=50)
+    args = parser.parse_args()
+
+    rows = load(CANDS)
+    if not rows:
+        print(f"没有候选：{CANDS} 还不存在或为空")
+        return 0
+    items = cluster(rows)[: args.limit]
+
+    by_error = defaultdict(int)
+    for row in rows:
+        by_error[_err_key(str(row.get("error") or ""))] += 1
+    print(f"候选 {len(rows)} 条，去重后 {len(items)} 组；按错误分布：")
+    for key, count in sorted(by_error.items(), key=lambda kv: kv[1], reverse=True)[:10]:
+        print(f"  {count:>4}  {key}")
+
+    print("\\n最值得先修的前几组：")
+    for item in items[:10]:
+        print(f"  x{item['count']:<3} [{item['error']}] {item['input'][:60]}")
+
+    if args.write:
+        with DRAFT.open("w", encoding="utf-8") as fh:
+            fh.write("# 由 evals/triage.py 生成：补上 expect_contains 后，把想守的几行挪进 cases.jsonl\\n")
+            for idx, item in enumerate(items, 1):
+                fh.write(json.dumps({
+                    "id": f"draft-{idx}",
+                    "input": item["input"],
+                    "expect_contains": [],
+                    "expect_not_contains": [],
+                    "max_latency_ms": 0,
+                    "tags": ["from-candidates"],
+                    "_note": f"出现 {item['count']} 次，错误：{item['error']}，trace：{item['trace_id']}",
+                }, ensure_ascii=False) + "\\n")
+        print(f"\\n已写 {DRAFT}（{len(items)} 条草稿）")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+
 def render_evals(spec: Dict[str, Any]) -> Dict[str, str]:
     """评测目录：用例模板 + 打分脚本 + 说明。"""
     inputs = [n for n in spec.get("nodes", []) if (n.get("kind") or "") == "input"]
@@ -2866,6 +3005,7 @@ def render_evals(spec: Dict[str, Any]) -> Dict[str, str]:
     return {
         "evals/cases.jsonl": body,
         "evals/run.py": _EVAL_RUN_PY,
+        "evals/triage.py": _TRIAGE_PY,
         "evals/README.md": _EVAL_README,
     }
 
