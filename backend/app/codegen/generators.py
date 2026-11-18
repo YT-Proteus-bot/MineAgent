@@ -576,6 +576,8 @@ def generate_project(name: str, slug: str, framework: str, graph: Dict[str, Any]
         "MINEAGENT_CANARY_MODEL=\n"
         "MINEAGENT_CANARY_BASE_URL=\n"
         "MINEAGENT_CANARY_API_KEY=\n"
+        "MINEAGENT_CANARY_VERSION=\n"
+        "MINEAGENT_CANARY_LABEL=\n"
         "\n# 密钥来源：env（默认）/ file / vault；环境变量仍然优先\n"
         "MINEAGENT_SECRETS=env\n"
         "MINEAGENT_SECRETS_FILE=\n"
@@ -972,7 +974,10 @@ def _readme(name: str, slug: str, framework: str, spec: Dict[str, Any]) -> str:
         "- 分流按 `trace_id` 做稳定哈希，同一个请求不会在两条链路间摇摆；",
         "- 也可以用 header 强制：`X-Canary: 1` 走 canary、`X-Canary: 0` 走主版本（做对比验证很方便）；",
         "- 响应体有 `variant` 字段、响应头有 `X-Variant`，日志与 trace 里也带；",
-        "- `/metrics` 里 `mineagent_chat_canary_total` 与 `mineagent_chat_primary_total` 可直接对比成功率与延迟。",
+        "- `/metrics` 里 `mineagent_chat_canary_total` 与 `mineagent_chat_primary_total` 可直接对比成功率与延迟，",
+        "  延迟还按变体拆成了 `chat_latency_primary` / `chat_latency_canary`；",
+        "- `/version` 会同时给出主版本与灰度版本（`variants.canary.version/label`），",
+        "  灰度期间用 `MINEAGENT_CANARY_VERSION=1.1.0` 标一下，验收材料里能看出「当时两边各是哪版」。",
         "",
         "## 安全：护栏 / 脱敏 / 审计",
         "",

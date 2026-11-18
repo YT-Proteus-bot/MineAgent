@@ -114,6 +114,9 @@ class Settings(BaseSettings):
 
     # 灰度：0=全走主版本，100=全走 canary；中间按 trace_id 稳定分流
     canary_percent: int = Field(0, ge=0, le=100)
+    # 灰度这侧的版本标签（例如 1.1.0），只在 /version 与日志里展示，不影响运行
+    canary_label: str = ""
+    canary_version: str = ""
 
     sandbox: str = {_py(sec["sandbox"])}
     guardrail: str = {_py(sec["guardrail"])}
@@ -1112,11 +1115,22 @@ def health():
 
 @app.get("/version")
 def version():
-    """返回生成器写入的版本记录（版本号 / 内容 hash / 生成时间 / 节点数）。"""
+    """返回生成器写入的版本记录（版本号 / 内容 hash / 生成时间 / 节点数 + 灰度信息）。"""
     try:
         info = json.loads((Path(__file__).resolve().parent / "VERSION").read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
         info = {{"version": getattr(flow, "AGENT_VERSION", "0.0.0")}}
+    canary_model = getattr(flow, "llm_canary", None)
+    info["variants"] = {{
+        "primary": {{"version": info.get("version", ""), "model": getattr(flow.llm, "model_name", "")}},
+        "canary": ({{
+            "version": settings.canary_version or "",
+            "label": settings.canary_label or "",
+            "model": getattr(canary_model, "model_name", "") if canary_model else "",
+            "percent": settings.canary_percent,
+        }} if canary_model is not None else None),
+    }}
+    info["canary_percent"] = settings.canary_percent
     return info
 
 
@@ -1182,6 +1196,7 @@ def chat(req: ChatRequest, request: Request,
         _release_slot()
     metrics.inc("chat_ok")
     metrics.inc("chat_canary" if variant == "canary" else "chat_primary")
+    metrics.observe(f"chat_latency_{{variant}}", (time.time() - started) * 1000)
     # 输出侧脱敏：响应、日志、trace 都只留脱敏后的文本
     if _security is not None and bool(getattr(settings, "pii", False)) and answer:
         answer, pii_hits = _security.redact(answer)
@@ -1346,6 +1361,7 @@ def chat_stream(req: ChatRequest, request: Request,
                 _drop_thread(thread_id)
             _release_slot()
             metrics.observe("stream_latency_ms", (time.time() - started) * 1000)
+            metrics.observe(f"stream_latency_{{variant}}", (time.time() - started) * 1000)
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={{"X-Trace-Id": trace_id}})
@@ -2480,6 +2496,22 @@ def render_grafana(spec: Dict[str, Any]) -> Dict[str, str]:
             panel("会话中断/错误", ["sum(rate(mineagent_resume_errors_total[5m]))"], "reqps",
                   8, 16, 8),
             panel("请求延迟分布", ["mineagent_chat_latency_ms_count"], "short", 16, 16, 8),
+            panel("主版本 p95", ['mineagent_chat_latency_primary{quantile="0.95"}'], "ms",
+                  0, 24, 8),
+            panel("灰度 p95", ['mineagent_chat_latency_canary{quantile="0.95"}'], "ms",
+                  8, 24, 8),
+            panel("灰度流量占比", [
+                "sum(rate(mineagent_chat_canary_total[5m])) / "
+                "clamp_min(sum(rate(mineagent_chat_ok_total[5m])), 1e-9)"
+            ], "percentunit", 16, 24, 8),
+            panel("流式 p95（按变体）", [
+                'mineagent_stream_latency_primary{quantile="0.95"}',
+                'mineagent_stream_latency_canary{quantile="0.95"}',
+            ], "ms", 0, 32, 12),
+            panel("会话重置 / 断点续跑", [
+                "sum(increase(mineagent_session_reset_total[1h]))",
+                "sum(increase(mineagent_resume_ok_total[1h]))",
+            ], "short", 12, 32, 12),
         ],
     }
     return {"docs/grafana-dashboard.json": json.dumps(dashboard, ensure_ascii=False, indent=2) + "\n"}
