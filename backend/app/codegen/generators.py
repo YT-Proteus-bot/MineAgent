@@ -560,6 +560,8 @@ def generate_project(name: str, slug: str, framework: str, graph: Dict[str, Any]
         "\n# 会话治理：同一个 thread_id 的轮数上限与过期时间（0 表示不限）\n"
         "MINEAGENT_MAX_TURNS=20\n"
         "MINEAGENT_SESSION_TTL=1440\n"
+        "\n# 断点续跑：0 时 /resume 返回 501（画布上有审批节点就需要开成 1）\n"
+        "MINEAGENT_RESUME=0\n"
         "\n# trace 采样率：0 不落、1 全落、中间按比例（也作用于 OTel span）\n"
         "MINEAGENT_TRACE_SAMPLE=1\n"
         "\n# 可观测：trace 落盘（留空则不落）/ OTel 导出（留空则不导出）\n"
@@ -1005,6 +1007,8 @@ def _readme(name: str, slug: str, framework: str, spec: Dict[str, Any]) -> str:
         "## 人工审批（挂起 / 放行）",
         "",
         "画布上的 `human_approval` 节点会真的把整条 run 挂起，等外部放行后再继续：",
+        "",
+        "> 开关：`MINEAGENT_RESUME=1` 才允许 `/resume`（默认 0 返回 501）。画布上有审批节点就把这个打开。",
         "",
         "```bash",
         "# ① 发起：可能直接返回结果，也可能返回待审批",

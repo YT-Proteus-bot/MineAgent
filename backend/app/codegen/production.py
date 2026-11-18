@@ -138,9 +138,7 @@ class Settings(BaseSettings):
     eval_pass_rate: float = Field({float(ev["pass_rate"])}, ge=0.0, le=1.0)
 
     # 已从画布编译进来、但服务端还没实现对应行为的配置项（启动会打一条 warn）
-    UNIMPLEMENTED: ClassVar[tuple] = (
-        "resume",
-    )
+    UNIMPLEMENTED: ClassVar[tuple] = ()
 
     @field_validator("entry_path")
     @classmethod
@@ -1102,6 +1100,9 @@ def _startup_report() -> None:
         log_event("canary_not_configured",
                   {{"canary_percent": settings.canary_percent,
                     "hint": "配了灰度比例但没有 MINEAGENT_CANARY_MODEL / _BASE_URL，流量仍走主模型"}})
+    if not bool(getattr(settings, "resume", False)):
+        log_event("resume_disabled",
+                  {{"hint": "断点续跑关闭：/resume 会返回 501；画布上有审批节点时请开启 MINEAGENT_RESUME=1"}})
 
 
 @app.get("/health")
@@ -1211,6 +1212,10 @@ def chat(req: ChatRequest, request: Request,
 def resume(req: ResumeRequest, request: Request,
            authorization: Optional[str] = Header(default=None)):
     """把挂起的人工审批放行：decision = approve / reject（也可以传别的原因）。"""
+    if not bool(getattr(settings, "resume", False)):
+        # 开关关掉时直接拒绝，别让人以为「点了 approve 但没生效」
+        metrics.inc("resume_disabled")
+        raise HTTPException(501, "此部署未开启断点续跑（MINEAGENT_RESUME=0），/resume 不可用")
     _check_auth(authorization)
     trace_id = getattr(request.state, "trace_id", "") or _new_trace_id(None)
     _ensure_budget()
@@ -1225,6 +1230,15 @@ def resume(req: ResumeRequest, request: Request,
         _bind_trace(trace_id)
         flow.set_canary(variant == "canary")
         config = {{"configurable": {{"thread_id": req.thread_id}}}}
+        # 没有待审批就别假装恢复了：明确 409，省得调用方以为已经放行
+        try:
+            snapshot = graph().get_state(config)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(404, {{"error": str(exc), "thread_id": req.thread_id}}) from exc
+        if not _interrupt_items(getattr(snapshot, "interrupts", ())):
+            metrics.inc("resume_no_pending")
+            raise HTTPException(409, {{"error": "这条会话没有待审批的挂起状态",
+                                       "thread_id": req.thread_id, "trace_id": trace_id}})
         result = _invoke_with_deadline(
             lambda: graph().invoke(Command(resume=req.decision), config=config),
             settings.run_timeout_s)
@@ -1474,6 +1488,7 @@ import os
 os.environ.setdefault("MINEAGENT_API_KEY", "test-key")
 os.environ.setdefault("MINEAGENT_BASE_URL", "http://127.0.0.1:9/v1")
 os.environ.setdefault("MINEAGENT_SESSION_STORE", "none")
+os.environ.setdefault("MINEAGENT_RESUME", "0")
 '''
     if not has_graph:
         # AutoGen / CrewAI / SmolAgents：没有 server.py，只验证入口能导入
@@ -1559,6 +1574,17 @@ def test_resume_requires_thread_id():
 
     client = TestClient(server.app)
     assert client.post("/resume", json={}).status_code == 422
+
+
+def test_resume_disabled_returns_501():
+    from fastapi.testclient import TestClient
+
+    import server
+
+    client = TestClient(server.app)
+    # 冒烟测试里固定 MINEAGENT_RESUME=0：关掉断点续跑时应明确拒绝，而不是假装成功
+    resp = client.post("/resume", json={"thread_id": "t", "decision": "approve"})
+    assert resp.status_code == 501
 
 
 def test_run_state_endpoint_exists():
