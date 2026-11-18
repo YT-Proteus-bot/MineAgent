@@ -557,6 +557,11 @@ def generate_project(name: str, slug: str, framework: str, graph: Dict[str, Any]
         "MINEAGENT_AUTH=none\n"
         "MINEAGENT_SERVICE_KEY=\n"
         "MINEAGENT_MAX_CONCURRENCY=4\n"
+        "\n# 会话治理：同一个 thread_id 的轮数上限与过期时间（0 表示不限）\n"
+        "MINEAGENT_MAX_TURNS=20\n"
+        "MINEAGENT_SESSION_TTL=1440\n"
+        "\n# trace 采样率：0 不落、1 全落、中间按比例（也作用于 OTel span）\n"
+        "MINEAGENT_TRACE_SAMPLE=1\n"
         "\n# 可观测：trace 落盘（留空则不落）/ OTel 导出（留空则不导出）\n"
         "MINEAGENT_TRACE_FILE=outputs/traces/{date}.jsonl\n"
         "MINEAGENT_OTEL_ENDPOINT=\n"
@@ -906,6 +911,9 @@ def _readme(name: str, slug: str, framework: str, spec: Dict[str, Any]) -> str:
         "- 装了 OTel 后每个节点也会是一个子 span（带 `node.id` / `node.kind`），",
         "  在 Jaeger/Tempo 里能直接看到「请求 → 哪几个节点各花多久」",
         "- 看板：`docs/grafana-dashboard.json` 可直接 import 到 Grafana，导入时选一下 Prometheus 数据源",
+        "- 采样：`MINEAGENT_TRACE_SAMPLE` 控制 trace 落盘与 OTel span 的采样率（0 不落 / 1 全落）",
+        "- 会话治理：`MINEAGENT_MAX_TURNS` 到顶、`MINEAGENT_SESSION_TTL` 过期时会清掉该 thread 的检查点并从头开始，",
+        "  `/metrics` 的 `session_reset_total` 记了次数；一次性请求（不传 thread_id）不受影响",
         "- 成本：填 `MINEAGENT_PRICE_INPUT_PER_1K` / `_OUTPUT_PER_1K` 后，响应里的 `usage.cost_usd` 就是本次花费，",
         "  `/metrics` 会累加 `mineagent_cost_usd_total`；设 `MINEAGENT_BUDGET_USD` 后超预算直接 429",
         "",

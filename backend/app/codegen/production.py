@@ -139,8 +139,7 @@ class Settings(BaseSettings):
 
     # 已从画布编译进来、但服务端还没实现对应行为的配置项（启动会打一条 warn）
     UNIMPLEMENTED: ClassVar[tuple] = (
-        "max_turns", "session_ttl", "resume",
-        "trace_sample",
+        "resume",
     )
 
     @field_validator("entry_path")
@@ -289,10 +288,11 @@ _OBS: dict = {"otel": False, "endpoint": "", "trace_file": "", "service": "agent
 _TRACER = None
 
 
-def init_observability(service_name: str = "agent") -> dict:
+def init_observability(service_name: str = "agent", sample_rate: float = 1.0) -> dict:
     """按环境变量决定要不要导出 OTel / 落 trace 文件；没配就什么都不做。"""
     global _TRACER
     _OBS["service"] = service_name
+    _OBS["sample_rate"] = max(0.0, min(1.0, float(sample_rate or 0.0)))
     endpoint = (os.environ.get("MINEAGENT_OTEL_ENDPOINT") or "").strip()
     trace_file = (os.environ.get("MINEAGENT_TRACE_FILE") or "").strip()
     _OBS["endpoint"] = endpoint
@@ -305,8 +305,12 @@ def init_observability(service_name: str = "agent") -> dict:
             from opentelemetry.sdk.resources import Resource
             from opentelemetry.sdk.trace import TracerProvider
             from opentelemetry.sdk.trace.export import BatchSpanProcessor
+            from opentelemetry.sdk.trace.sampling import ParentBased, TraceIdRatioBased
 
-            provider = TracerProvider(resource=Resource.create({"service.name": service_name}))
+            provider = TracerProvider(
+                resource=Resource.create({"service.name": service_name}),
+                sampler=ParentBased(TraceIdRatioBased(_OBS["sample_rate"])),
+            )
             provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint)))
             trace.set_tracer_provider(provider)
             _TRACER = trace.get_tracer(service_name)
@@ -317,7 +321,8 @@ def init_observability(service_name: str = "agent") -> dict:
                          "opentelemetry-exporter-otlp-proto-http）", exc)
 
     log_event("observability", {"service": service_name, "otel": _OBS["otel"],
-                                "otel_endpoint": endpoint, "trace_file": trace_file})
+                                "otel_endpoint": endpoint, "trace_file": trace_file,
+                                "sample_rate": _OBS["sample_rate"]})
     return dict(_OBS)
 
 
@@ -328,10 +333,10 @@ def span(name: str, attributes: dict | None = None):
     return _TRACER.start_as_current_span(name, attributes=attributes or {})
 
 
-def trace_event(event: str, fields: dict | None = None) -> None:
+def trace_event(event: str, fields: dict | None = None, sampled: bool = True) -> None:
     """把一条事件追加到 trace 文件（JSONL；文件名里可以写 {date} 按天切）。"""
     path = _OBS.get("trace_file") or ""
-    if not path:
+    if not path or not sampled:
         return
     try:
         target = Path(str(path).replace("{date}", time.strftime("%Y-%m-%d")))
@@ -714,6 +719,8 @@ import contextvars
 import hashlib
 import json
 import os
+import random
+import sqlite3
 import threading
 import time
 import uuid
@@ -766,6 +773,8 @@ def _check_sandbox() -> None:
 
 
 _check_sandbox()
+# 观测在导入时就初始化：uvicorn 与测试客户端都会走到，不依赖 startup 事件
+OBSERVABILITY = init_observability(settings.project_name, settings.trace_sample)
 
 
 app = FastAPI(title=settings.project_name, version="1.0.0")
@@ -969,6 +978,59 @@ def _record_candidate(message: str, error: str, trace_id: str, thread_id: str) -
         pass
 
 
+# ── 会话治理：轮数上限 + 过期清理（只对调用方指定了 thread_id 的会话生效）──
+_META_DB = Path(__file__).resolve().parent / ".sessions-meta.db"
+
+
+def _session_begin(thread_id: str) -> Dict[str, Any]:
+    """记一轮并检查上限/过期：超了就清掉 checkpointer 里的状态，从头开始。"""
+    ttl_minutes = int(getattr(settings, "session_ttl", 0) or 0)
+    max_turns = int(getattr(settings, "max_turns", 0) or 0)
+    info: Dict[str, Any] = {{"turns": 1, "expired": False, "reset": False}}
+    if not ttl_minutes and not max_turns:
+        return info
+    now = time.time()
+    try:
+        conn = sqlite3.connect(str(_META_DB), timeout=5)
+        try:
+            conn.execute("CREATE TABLE IF NOT EXISTS sessions("
+                         "thread_id TEXT PRIMARY KEY, turns INTEGER, updated_at REAL)")
+            row = conn.execute("SELECT turns, updated_at FROM sessions WHERE thread_id=?",
+                               (thread_id,)).fetchone()
+            turns = int(row[0]) if row else 0
+            last = float(row[1]) if row else 0.0
+            expired = bool(row and ttl_minutes and (now - last) > ttl_minutes * 60)
+            too_many = bool(max_turns and turns >= max_turns)
+            if expired or too_many:
+                _drop_thread(thread_id)
+                info["expired"] = expired
+                info["reset"] = True
+                metrics.inc("session_reset")
+                log_event("session_reset", {{"thread_id": thread_id,
+                                             "expired": expired, "turns": turns}})
+                turns = 0
+            turns += 1
+            conn.execute("INSERT OR REPLACE INTO sessions VALUES(?,?,?)",
+                         (thread_id, turns, now))
+            conn.commit()
+            info["turns"] = turns
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        pass
+    return info
+
+
+def _sampled() -> bool:
+    """trace_sample 采样：0 不记、1 全记、中间按比例。"""
+    rate = float(getattr(settings, "trace_sample", 1.0) or 0.0)
+    if rate >= 1.0:
+        return True
+    if rate <= 0.0:
+        return False
+    return random.random() < rate
+
+
 def _audit(event: str, request, **fields) -> None:
     """审计：只记身份指纹与结果，不记原始 token，也不记用户正文。"""
     if _security is None:
@@ -1025,7 +1087,6 @@ def _check_auth(authorization: Optional[str]) -> None:
 
 @app.on_event("startup")
 def _startup_report() -> None:
-    init_observability(settings.project_name)
     log_event("service_start", {{"project": settings.project_name,
                                  "entry_mode": settings.entry_mode,
                                  "entry_path": settings.entry_path,
@@ -1083,6 +1144,9 @@ def chat(req: ChatRequest, request: Request,
     thread_id = req.thread_id or uuid.uuid4().hex[:16]
     _ensure_budget()
     _guard_input(req.message, trace_id, request)
+    # 调用方显式给了 thread_id 才做轮数/过期治理；一次性请求不必记账
+    session_turns = _session_begin(thread_id)["turns"] if req.thread_id else 1
+    sampled = _sampled()
     variant = _pick_variant(request, trace_id)
     request.state.variant = variant
     started = time.time()
@@ -1130,8 +1194,10 @@ def chat(req: ChatRequest, request: Request,
                            "usage": usage, "interrupted": bool(interrupts)}})
     trace_event("chat_ok" if not interrupts else "chat_interrupted",
                 {{"trace_id": trace_id, "thread_id": thread_id, "variant": variant,
+                  "turns": session_turns,
                   "latency_ms": round((time.time() - started) * 1000, 2),
-                  "usage": usage, "interrupt": interrupts[0] if interrupts else None}})
+                  "usage": usage, "interrupt": interrupts[0] if interrupts else None}},
+                sampled=sampled)
     _audit("chat_ok" if not interrupts else "chat_interrupted", request,
            trace_id=trace_id, thread_id=thread_id, variant=variant,
            tokens=usage.get("total_tokens", 0), cost_usd=usage.get("cost_usd", 0.0))
@@ -1183,7 +1249,8 @@ def resume(req: ResumeRequest, request: Request,
                              "usage": usage}})
     trace_event("resume_ok", {{"trace_id": trace_id, "thread_id": req.thread_id,
                               "variant": variant, "decision": req.decision, "usage": usage,
-                              "status": "interrupted" if interrupts else "ok"}})
+                              "status": "interrupted" if interrupts else "ok"}},
+                sampled=_sampled())
     _audit("resume_ok", request, trace_id=trace_id, thread_id=req.thread_id,
            variant=variant, decision=req.decision,
            status="interrupted" if interrupts else "ok")
