@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from .config import FRONTEND_DIST, HOST, PORT, ensure_dirs
 from .db import init_db
 from .routers import (assistant, backgrounds, canvases, community, meta, projects,
-                      run, settings)
+                      run, settings, versions)
 
 
 @asynccontextmanager
@@ -40,6 +40,7 @@ app.include_router(assistant.router)
 app.include_router(run.router)
 app.include_router(projects.router)
 app.include_router(settings.router)
+app.include_router(versions.router)
 app.include_router(meta.router)
 app.include_router(community.router)
 app.include_router(community.oauth_router)

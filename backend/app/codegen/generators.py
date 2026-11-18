@@ -653,6 +653,12 @@ def _bump_version(project_dir: Path, spec: Dict[str, Any], agent_code: str) -> D
         history.mkdir(exist_ok=True)
         try:
             shutil.copyfile(previous_agent, history / f"agent-{previous_version}.py")
+            # VERSION 也一起留档：回滚时版本号/hash 才能一并还原
+            try:
+                from ..versions import archive_version_meta
+                archive_version_meta(project_dir, previous_version)
+            except Exception:  # noqa: BLE001
+                pass
             keep = sorted(history.glob("agent-*.py"), key=lambda p: p.stat().st_mtime)[-5:]
             for stale in history.glob("agent-*.py"):
                 if stale not in keep:
