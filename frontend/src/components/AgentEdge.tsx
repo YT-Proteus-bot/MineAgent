@@ -223,12 +223,24 @@ export default function AgentEdge({
   const geometry = useMemo(() => {
     const s = { x: sourceX, y: sourceY + spread }
     const t = { x: targetX, y: targetY + spread }
+
     if (manual) {
-      // 用户手动拖过的线：保持他拖出来的形状
-      const shiftedS = { x: s.x, y: s.y + offset.y }
-      const shiftedT = { x: t.x, y: t.y + offset.y }
-      const b = bezierPath(shiftedS, shiftedT)
-      return { path: b.path, mid: { x: b.mid.x + offset.x, y: b.mid.y } }
+      // 手动调过曲度：端点永远钉在 handle 上，只让两个控制点偏移
+      const dx = Math.max(70, Math.abs(t.x - s.x) * 0.45)
+      const dir = t.x >= s.x ? 1 : -1
+      const c1 = { x: s.x + dx * dir + offset.x, y: s.y + offset.y }
+      const c2 = { x: t.x - dx * dir + offset.x, y: t.y + offset.y }
+      const path = `M ${s.x},${s.y} C ${c1.x},${c1.y} ${c2.x},${c2.y} ${t.x},${t.y}`
+      const mt = 0.5
+      const a = (1 - mt) ** 3
+      const b2 = 3 * (1 - mt) ** 2 * mt
+      const c3 = 3 * (1 - mt) * mt ** 2
+      const d = mt ** 3
+      const mid = {
+        x: a * s.x + b2 * c1.x + c3 * c2.x + d * t.x,
+        y: a * s.y + b2 * c1.y + c3 * c2.y + d * t.y,
+      }
+      return { path, mid }
     }
     const route = routeAround(s, t, obstacles)
     if (route.direct) {
@@ -253,6 +265,7 @@ export default function AgentEdge({
         controlOffset: { x: base.x + (p.x - start.x), y: base.y + (p.y - start.y) },
       })
     }
+
     const onUp = () => {
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', onUp)
@@ -311,15 +324,19 @@ export default function AgentEdge({
           ) : null}
         </EdgeLabelRenderer>
       ) : null}
-      {/* 悬停热区 */}
+      {/* 悬停 / 拖动热区：选中后按住线本身就能调曲度，端点不动 */}
       <path
         d={geometry.path}
         fill="none"
         stroke="transparent"
-        strokeWidth={22}
+        strokeWidth={26}
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
-        style={{ pointerEvents: 'stroke', cursor: 'pointer' }}
+        onPointerDown={(e) => {
+          // 未选中时把事件交给 React Flow，用于"点击选中"
+          if (selected) startDrag(e)
+        }}
+        style={{ pointerEvents: 'stroke', cursor: selected ? 'grab' : 'pointer' }}
       />
     </>
   )
