@@ -39,11 +39,25 @@ CREATE TABLE IF NOT EXISTS assistant_chats (
     title       TEXT NOT NULL DEFAULT '',
     messages    TEXT NOT NULL DEFAULT '[]',
     canvas_id   TEXT NOT NULL DEFAULT '',
+    summary     TEXT NOT NULL DEFAULT '',
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_chats_time ON assistant_chats(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_chats_canvas ON assistant_chats(canvas_id, updated_at DESC);
+
+-- AI 助手的长期记忆：按画布存，跨会话生效
+CREATE TABLE IF NOT EXISTS assistant_memories (
+    id          TEXT PRIMARY KEY,
+    canvas_id   TEXT NOT NULL,
+    kind        TEXT NOT NULL DEFAULT 'note',   -- note / preference / pitfall / decision
+    content     TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_mem_canvas ON assistant_memories(canvas_id, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS runs (
     id           TEXT PRIMARY KEY,
@@ -123,6 +137,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE canvases ADD COLUMN rules TEXT NOT NULL DEFAULT '[]'")
     if "mode" not in cols:
         conn.execute("ALTER TABLE canvases ADD COLUMN mode TEXT NOT NULL DEFAULT ''")
+
+    chat_cols = {row["name"] for row in conn.execute("PRAGMA table_info(assistant_chats)")}
+    if "summary" not in chat_cols:
+        conn.execute(
+            "ALTER TABLE assistant_chats ADD COLUMN summary TEXT NOT NULL DEFAULT ''")
     # ---- 远端同步：记住这张画布绑定的模板、上次同步的版本和图哈希 ----
     if "remote_slug" not in cols:
         conn.execute("ALTER TABLE canvases ADD COLUMN remote_slug TEXT NOT NULL DEFAULT ''")

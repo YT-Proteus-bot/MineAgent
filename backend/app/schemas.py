@@ -276,3 +276,37 @@ class ApplyDraftRequest(BaseModel):
     draft: CanvasDraft
     # 是否把助手写的节点代码当作「手改」保留（默认保留）
     keep_code: bool = True
+
+
+class CanvasOp(BaseModel):
+    """一条画布修改操作（增量）。
+
+    op 取值：
+      add_node / remove_node / update_node / set_code /
+      connect / disconnect / move_node / relayout
+    """
+
+    op: str
+    # 目标节点：现有节点用 id，新增节点用 key（同一次操作里互相引用）
+    id: str = ""
+    key: str = ""
+    # add_node / update_node 用
+    kind: str = ""
+    label: str = ""
+    name: str = ""
+    params: Dict[str, Any] = Field(default_factory=dict)
+    # set_code 用
+    code: str = ""
+    # connect / disconnect 用（可以是 id，也可以是本次 add_node 的 key）
+    source: str = ""
+    target: str = ""
+    branch: str = ""
+    # move_node 用
+    x: Optional[float] = None
+    y: Optional[float] = None
+
+
+class ApplyOpsRequest(BaseModel):
+    operations: List[CanvasOp] = Field(default_factory=list)
+    # 应用完是否整体重排一次（位置类需求用）
+    relayout: bool = False
