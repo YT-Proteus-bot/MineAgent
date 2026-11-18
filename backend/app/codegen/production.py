@@ -108,6 +108,9 @@ class Settings(BaseSettings):
     metrics_on: bool = Field({_py(o["metrics"])}, validation_alias="MINEAGENT_METRICS")
     trace_sample: float = Field({float(o["trace_sample"])}, ge=0.0, le=1.0)
     budget_usd: float = Field({float(o["budget_usd"])}, ge=0.0)
+    # 成本核算：每 1K token 的单价（0 表示不折算；填上就会算 cost_usd 并按预算拦截）
+    price_input_per_1k: float = Field(0.0, ge=0.0)
+    price_output_per_1k: float = Field(0.0, ge=0.0)
 
     sandbox: str = {_py(sec["sandbox"])}
     guardrail: str = {_py(sec["guardrail"])}
@@ -132,7 +135,7 @@ class Settings(BaseSettings):
     # 已从画布编译进来、但服务端还没实现对应行为的配置项（启动会打一条 warn）
     UNIMPLEMENTED: ClassVar[tuple] = (
         "max_turns", "session_ttl", "resume",
-        "trace_sample", "budget_usd",
+        "trace_sample",
         "sandbox", "guardrail", "pii", "audit",
     )
 
@@ -218,9 +221,14 @@ class Metrics:
     def __init__(self) -> None:
         self.counters: dict = defaultdict(int)
         self.histograms: dict = defaultdict(list)
+        self.floats: dict = defaultdict(float)
 
     def inc(self, name: str, value: int = 1) -> None:
         self.counters[name] += value
+
+    def add(self, name: str, value: float) -> None:
+        """浮点累加（成本这类不能取整的指标用这个）。"""
+        self.floats[name] += float(value)
 
     def observe(self, name: str, value: float) -> None:
         bucket = self.histograms[name]
@@ -229,7 +237,7 @@ class Metrics:
             del bucket[: len(bucket) - 1000]
 
     def snapshot(self) -> dict:
-        out = {"counters": dict(self.counters), "histograms": {}}
+        out = {"counters": dict(self.counters), "floats": dict(self.floats), "histograms": {}}
         for name, values in self.histograms.items():
             if not values:
                 out["histograms"][name] = {"count": 0, "avg": 0, "p95": 0}
@@ -249,6 +257,10 @@ class Metrics:
             metric = "mineagent_" + name.replace(".", "_")
             lines.append(f"# TYPE {metric}_total counter")
             lines.append(f"{metric}_total {value}")
+        for name, value in sorted(self.floats.items()):
+            metric = "mineagent_" + name.replace(".", "_")
+            lines.append(f"# TYPE {metric}_total counter")
+            lines.append(f"{metric}_total {round(value, 6)}")
         for name, values in sorted(self.histograms.items()):
             metric = "mineagent_" + name.replace(".", "_")
             ordered = sorted(values)
@@ -863,6 +875,48 @@ class ResumeRequest(BaseModel):
     comment: str = ""
 
 
+# ── 成本核算与预算 ──────────────────────────────────────────────
+_SPENT = {{"usd": 0.0}}
+
+
+def _cost_usd(usage: dict) -> float:
+    """按每 1K token 单价折算本次成本；没配单价就是 0。"""
+    price_in = float(getattr(settings, "price_input_per_1k", 0.0) or 0.0)
+    price_out = float(getattr(settings, "price_output_per_1k", 0.0) or 0.0)
+    if not price_in and not price_out:
+        return 0.0
+    prompt = float(usage.get("prompt_tokens") or 0)
+    completion = float(usage.get("completion_tokens") or 0)
+    return round(prompt / 1000 * price_in + completion / 1000 * price_out, 6)
+
+
+def _account(usage: dict) -> dict:
+    """把成本写进 usage，并累加到进程内计数（/metrics 会吐 mineagent_cost_usd_total）。"""
+    cost = _cost_usd(usage)
+    usage = dict(usage or {{}})
+    usage["cost_usd"] = cost
+    if cost:
+        _SPENT["usd"] += cost
+        metrics.add("cost_usd", cost)
+    usage["spent_usd"] = round(_SPENT["usd"], 6)
+    return usage
+
+
+def _budget_left() -> float | None:
+    """还剩多少预算；没设预算返回 None。"""
+    budget = float(getattr(settings, "budget_usd", 0.0) or 0.0)
+    if budget <= 0:
+        return None
+    return round(budget - _SPENT["usd"], 6)
+
+
+def _ensure_budget() -> None:
+    left = _budget_left()
+    if left is not None and left <= 0:
+        metrics.inc("budget_exhausted")
+        raise HTTPException(429, "预算已用尽（MINEAGENT_BUDGET_USD），请调高预算或重置进程")
+
+
 def _interrupt_items(result) -> list:
     """把 LangGraph 的 __interrupt__ 归一成普通 dict 列表。"""
     if isinstance(result, dict):
@@ -928,6 +982,7 @@ def chat(req: ChatRequest, request: Request,
     trace_id = getattr(request.state, "trace_id", "") or _new_trace_id(None)
     # 有 checkpointer 就必须给 thread_id：没传就现造一个，跑完再删掉
     thread_id = req.thread_id or uuid.uuid4().hex[:16]
+    _ensure_budget()
     started = time.time()
     _acquire_slot(settings.run_timeout_s)
     usage: Dict[str, Any] = {{}}
@@ -952,7 +1007,7 @@ def chat(req: ChatRequest, request: Request,
         raise HTTPException(500, {{"error": str(exc), "thread_id": req.thread_id,
                                    "trace_id": trace_id}}) from exc
     finally:
-        usage = flow.take_usage()
+        usage = _account(flow.take_usage())
         if not req.thread_id and not interrupts:
             _drop_thread(thread_id)
         _release_slot()
@@ -977,6 +1032,7 @@ def resume(req: ResumeRequest, request: Request,
     """把挂起的人工审批放行：decision = approve / reject（也可以传别的原因）。"""
     _check_auth(authorization)
     trace_id = getattr(request.state, "trace_id", "") or _new_trace_id(None)
+    _ensure_budget()
     started = time.time()
     _acquire_slot(settings.run_timeout_s)
     usage: Dict[str, Any] = {{}}
@@ -1000,7 +1056,7 @@ def resume(req: ResumeRequest, request: Request,
         raise HTTPException(500, {{"error": str(exc), "thread_id": req.thread_id,
                                    "trace_id": trace_id}}) from exc
     finally:
-        usage = flow.take_usage()
+        usage = _account(flow.take_usage())
         _release_slot()
     metrics.inc("resume_ok")
     log_event("resume_ok", {{"trace_id": trace_id, "thread_id": req.thread_id,
@@ -1038,6 +1094,7 @@ def chat_stream(req: ChatRequest, request: Request,
     _check_auth(authorization)
     trace_id = getattr(request.state, "trace_id", "") or _new_trace_id(None)
     thread_id = req.thread_id or uuid.uuid4().hex[:16]
+    _ensure_budget()
 
     def gen():
         started = time.time()
@@ -1067,7 +1124,7 @@ def chat_stream(req: ChatRequest, request: Request,
                 body = json.dumps({{"node": node, "update": chunk}},
                                   ensure_ascii=False, default=str)
                 yield f"event: update\\ndata: {{body}}\\n\\n"
-            usage = flow.take_usage()
+            usage = _account(flow.take_usage())
             yield "event: usage\\ndata: " + json.dumps(usage, ensure_ascii=False) + "\\n\\n"
             yield "event: done\\ndata: {{}}\\n\\n"
             metrics.inc("stream_ok")
@@ -2022,6 +2079,58 @@ def render_secret_store() -> str:
     return _SECRET_STORE_PY
 
 
+def render_grafana(spec: Dict[str, Any]) -> Dict[str, str]:
+    """可直接 import 的 Grafana 看板：数据源用 ${DS_PROMETHEUS} 变量，导入时选一下即可。"""
+    name = spec.get("name") or "agent"
+    slug = spec.get("slug") or "agent"
+    ds = {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}
+
+    def panel(title: str, exprs: list, unit: str, x: int, y: int, w: int = 12, h: int = 8,
+              panel_type: str = "timeseries") -> dict:
+        return {
+            "type": panel_type,
+            "title": title,
+            "datasource": ds,
+            "gridPos": {"x": x, "y": y, "w": w, "h": h},
+            "fieldConfig": {"defaults": {"unit": unit}, "overrides": []},
+            "targets": [
+                {"datasource": ds, "expr": expr, "legendFormat": expr.split("}")[-1][:40],
+                 "refId": chr(ord("A") + i)}
+                for i, expr in enumerate(exprs)
+            ],
+        }
+
+    dashboard = {
+        "title": f"{name} · Agent 运行看板",
+        "uid": f"mineagent-{slug}"[:40],
+        "tags": ["mineagent", "agent"],
+        "schemaVersion": 39,
+        "version": 1,
+        "refresh": "30s",
+        "time": {"from": "now-6h", "to": "now"},
+        "templating": {"list": [{
+            "name": "DS_PROMETHEUS", "label": "Prometheus", "type": "datasource",
+            "query": "prometheus", "current": {}, "hide": 0,
+        }]},
+        "panels": [
+            panel("请求量（/chat）", ["sum(rate(mineagent_chat_ok_total[5m]))"], "reqps", 0, 0, 8),
+            panel("错误数", ["sum(rate(mineagent_chat_errors_total[5m]))"], "reqps", 8, 0, 8),
+            panel("延迟 p95", ['mineagent_chat_latency_ms{quantile="0.95"}'], "ms", 16, 0, 8),
+            panel("流式请求", ["sum(rate(mineagent_stream_ok_total[5m]))"], "reqps", 0, 8, 8),
+            panel("成本（USD/小时）", ["sum(rate(mineagent_cost_usd_total[1h]))"], "currencyUSD",
+                  8, 8, 8),
+            panel("人工审批", ["sum(rate(mineagent_chat_interrupted_total[5m]))"], "reqps",
+                  16, 8, 8),
+            panel("预算耗尽次数", ["increase(mineagent_budget_exhausted_total[1h])"], "short",
+                  0, 16, 8),
+            panel("会话中断/错误", ["sum(rate(mineagent_resume_errors_total[5m]))"], "reqps",
+                  8, 16, 8),
+            panel("请求延迟分布", ["mineagent_chat_latency_ms_count"], "short", 16, 16, 8),
+        ],
+    }
+    return {"docs/grafana-dashboard.json": json.dumps(dashboard, ensure_ascii=False, indent=2) + "\n"}
+
+
 def render_evals(spec: Dict[str, Any]) -> Dict[str, str]:
     """评测目录：用例模板 + 打分脚本 + 说明。"""
     inputs = [n for n in spec.get("nodes", []) if (n.get("kind") or "") == "input"]
@@ -2094,7 +2203,8 @@ def render_production_files(spec: Dict[str, Any], graph: Dict[str, Any],
         files.update(render_lock_files(requirements_text))
     # 评测用例 + 打分脚本：改完 agent 用它证明没变差
     files.update(render_evals(spec))
-    # 压测脚本 + 验收清单：只有 HTTP 服务才有意义
+    # 压测脚本 + 验收清单 + Grafana 看板：只有 HTTP 服务才有意义
     if has_graph:
         files.update(render_loadtest())
+        files.update(render_grafana(spec))
     return files

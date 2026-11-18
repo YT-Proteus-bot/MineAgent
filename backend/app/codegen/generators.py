@@ -556,6 +556,10 @@ def generate_project(name: str, slug: str, framework: str, graph: Dict[str, Any]
         "\n# 可观测：trace 落盘（留空则不落）/ OTel 导出（留空则不导出）\n"
         "MINEAGENT_TRACE_FILE=outputs/traces/{date}.jsonl\n"
         "MINEAGENT_OTEL_ENDPOINT=\n"
+        "\n# 成本：每 1K token 单价（填了才会算 cost_usd）；预算耗尽会返回 429\n"
+        "MINEAGENT_PRICE_INPUT_PER_1K=0\n"
+        "MINEAGENT_PRICE_OUTPUT_PER_1K=0\n"
+        "MINEAGENT_BUDGET_USD=0\n"
         "\n# 密钥来源：env（默认）/ file / vault；环境变量仍然优先\n"
         "MINEAGENT_SECRETS=env\n"
         "MINEAGENT_SECRETS_FILE=\n"
@@ -810,6 +814,9 @@ def _readme(name: str, slug: str, framework: str, spec: Dict[str, Any]) -> str:
         "- 接 OTel：`MINEAGENT_OTEL_ENDPOINT=http://collector:4318/v1/traces`，",
         "  需要 `pip install opentelemetry-sdk opentelemetry-exporter-otlp-proto-http`；",
         "  没装会在启动日志里明确告警，不会静默不导出",
+        "- 看板：`docs/grafana-dashboard.json` 可直接 import 到 Grafana，导入时选一下 Prometheus 数据源",
+        "- 成本：填 `MINEAGENT_PRICE_INPUT_PER_1K` / `_OUTPUT_PER_1K` 后，响应里的 `usage.cost_usd` 就是本次花费，",
+        "  `/metrics` 会累加 `mineagent_cost_usd_total`；设 `MINEAGENT_BUDGET_USD` 后超预算直接 429",
         "",
         "## 密钥放哪",
         "",
