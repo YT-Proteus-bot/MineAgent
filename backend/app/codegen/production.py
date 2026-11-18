@@ -119,6 +119,8 @@ class Settings(BaseSettings):
     guardrail: str = {_py(sec["guardrail"])}
     pii: bool = {_py(sec["pii"])}
     audit: bool = {_py(sec["audit"])}
+    # 输入护栏的长度上限（字符）；0 表示不限
+    max_input_chars: int = Field(8000, ge=0, le=1000000)
 
     # 外部数据中台
     data_enabled: bool = {_py(d["enabled"])}
@@ -139,7 +141,6 @@ class Settings(BaseSettings):
     UNIMPLEMENTED: ClassVar[tuple] = (
         "max_turns", "session_ttl", "resume",
         "trace_sample",
-        "sandbox", "guardrail", "pii", "audit",
     )
 
     @field_validator("entry_path")
@@ -737,6 +738,11 @@ except Exception:  # noqa: BLE001
     _secrets = None
 
 try:
+    import security as _security
+except Exception:  # noqa: BLE001
+    _security = None
+
+try:
     from checkpoint import get_checkpointer
 except Exception:  # noqa: BLE001
     def get_checkpointer():
@@ -949,15 +955,48 @@ def _ensure_budget() -> None:
 def _record_candidate(message: str, error: str, trace_id: str, thread_id: str) -> None:
     """出错的请求收进 evals/candidates.jsonl，攒够了人工改成正式用例（评测飞轮）。"""
     try:
+        text = message or ""
+        if _security is not None and getattr(settings, "pii", False):
+            text = _security.redact(text)[0]
         path = Path(__file__).resolve().parent / "evals" / "candidates.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps({{"input": message, "error": str(error)[:500],
+            fh.write(json.dumps({{"input": text, "error": str(error)[:500],
                                  "trace_id": trace_id, "thread_id": thread_id,
                                  "ts": time.time()}}, ensure_ascii=False) + "\\n")
         metrics.inc("eval_candidates")
     except Exception:  # noqa: BLE001
         pass
+
+
+def _audit(event: str, request, **fields) -> None:
+    """审计：只记身份指纹与结果，不记原始 token，也不记用户正文。"""
+    if _security is None:
+        return
+    client = getattr(request, "client", None)
+    payload = {{"ip": getattr(client, "host", ""),
+                "ua": (request.headers.get("User-Agent") or "")[:120],
+                "auth": _security.fingerprint(request.headers.get("Authorization") or "")}}
+    payload.update(fields)
+    _security.audit(event, payload, enabled=bool(settings.audit))
+
+
+def _guard_input(text: str, trace_id: str, request=None) -> None:
+    """输入护栏：block 直接 400，log 只记一笔；被拦下的请求同样进审计。"""
+    if _security is None:
+        return
+    issues = _security.check_input(text, int(getattr(settings, "max_input_chars", 8000) or 0))
+    if not issues:
+        return
+    metrics.inc("guardrail_hits")
+    mode = (getattr(settings, "guardrail", "log") or "log").lower()
+    log_event("guardrail_warn", {{"trace_id": trace_id, "mode": mode, "issues": issues}})
+    if request is not None:
+        _audit("chat_blocked" if mode == "block" else "chat_guarded", request,
+               trace_id=trace_id, issues=issues)
+    if mode == "block":
+        raise HTTPException(400, {{"error": "输入未通过安全检查", "issues": issues,
+                                   "trace_id": trace_id}})
 
 
 def _interrupt_items(result) -> list:
@@ -1030,6 +1069,9 @@ def ready():
         payload["sandbox"] = _sandbox.describe()
     if _secrets is not None:
         payload["secrets"] = _secrets.status()
+    payload["security"] = {{"guardrail": settings.guardrail, "pii": bool(settings.pii),
+                            "audit": bool(settings.audit),
+                            "max_input_chars": int(settings.max_input_chars)}}
     return JSONResponse(payload, status_code=200 if not missing else 503)
 
 
@@ -1040,6 +1082,7 @@ def chat(req: ChatRequest, request: Request,
     # 有 checkpointer 就必须给 thread_id：没传就现造一个，跑完再删掉
     thread_id = req.thread_id or uuid.uuid4().hex[:16]
     _ensure_budget()
+    _guard_input(req.message, trace_id, request)
     variant = _pick_variant(request, trace_id)
     request.state.variant = variant
     started = time.time()
@@ -1074,6 +1117,12 @@ def chat(req: ChatRequest, request: Request,
         _release_slot()
     metrics.inc("chat_ok")
     metrics.inc("chat_canary" if variant == "canary" else "chat_primary")
+    # 输出侧脱敏：响应、日志、trace 都只留脱敏后的文本
+    if _security is not None and bool(getattr(settings, "pii", False)) and answer:
+        answer, pii_hits = _security.redact(answer)
+        if pii_hits:
+            metrics.inc("pii_redacted")
+            log_event("pii_redacted", {{"trace_id": trace_id, "hits": pii_hits}})
     metrics.observe("chat_latency_ms", (time.time() - started) * 1000)
     log_event("chat_ok", {{"trace_id": trace_id, "thread_id": thread_id,
                            "variant": variant,
@@ -1083,6 +1132,9 @@ def chat(req: ChatRequest, request: Request,
                 {{"trace_id": trace_id, "thread_id": thread_id, "variant": variant,
                   "latency_ms": round((time.time() - started) * 1000, 2),
                   "usage": usage, "interrupt": interrupts[0] if interrupts else None}})
+    _audit("chat_ok" if not interrupts else "chat_interrupted", request,
+           trace_id=trace_id, thread_id=thread_id, variant=variant,
+           tokens=usage.get("total_tokens", 0), cost_usd=usage.get("cost_usd", 0.0))
     if interrupts:
         return ChatResponse(answer="", thread_id=thread_id, usage=usage,
                             status="interrupted", interrupt=interrupts[0], variant=variant)
@@ -1132,6 +1184,9 @@ def resume(req: ResumeRequest, request: Request,
     trace_event("resume_ok", {{"trace_id": trace_id, "thread_id": req.thread_id,
                               "variant": variant, "decision": req.decision, "usage": usage,
                               "status": "interrupted" if interrupts else "ok"}})
+    _audit("resume_ok", request, trace_id=trace_id, thread_id=req.thread_id,
+           variant=variant, decision=req.decision,
+           status="interrupted" if interrupts else "ok")
     if interrupts:
         return ChatResponse(answer="", thread_id=req.thread_id, usage=usage,
                             status="interrupted", interrupt=interrupts[0], variant=variant)
@@ -1161,6 +1216,7 @@ def chat_stream(req: ChatRequest, request: Request,
     trace_id = getattr(request.state, "trace_id", "") or _new_trace_id(None)
     thread_id = req.thread_id or uuid.uuid4().hex[:16]
     _ensure_budget()
+    _guard_input(req.message, trace_id, request)
     variant = _pick_variant(request, trace_id)
     request.state.variant = variant
 
@@ -2188,6 +2244,98 @@ def _reset_cache() -> None:
 '''
 
 
+_SECURITY_PY = '''"""安全三件套：输入护栏、PII 脱敏、审计。开关都来自服务设置。
+
+- guardrail: off / log / block —— 输入过长或像提示词注入时，记一笔或直接拒绝
+- pii:       True 时把手机号、身份证、邮箱、银行卡号替换成占位符（响应、日志、候选集都过一遍）
+- audit:     True 时把「谁在什么时候做了什么」写进 outputs/audit/<日期>.jsonl
+
+只做规则级检查：它挡不住精心构造的攻击，但能挡住「误把内部提示词贴进聊天框」这类常见事故。
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
+
+HERE = Path(__file__).resolve().parent
+AUDIT_DIR = HERE / "outputs" / "audit"
+
+_PII_PATTERNS = [
+    ("phone", re.compile(r"(?<!\\d)1[3-9]\\d{9}(?!\\d)")),
+    ("idcard", re.compile(r"(?<!\\d)\\d{17}[\\dXx](?!\\d)")),
+    ("email", re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}")),
+    ("bankcard", re.compile(r"(?<!\\d)\\d{16,19}(?!\\d)")),
+]
+
+_INJECTION_HINTS = (
+    "忽略以上", "忽略之前", "忽略前面的", "ignore previous", "ignore all previous",
+    "disregard the above", "system prompt", "你现在的系统提示", "开发者模式",
+    "jailbreak", "越狱", "打印你的提示词", "repeat your instructions",
+)
+
+
+def redact(text: str) -> Tuple[str, List[str]]:
+    """把文本里的 PII 换成占位符，返回 (脱敏后文本, 命中类型列表)。"""
+    out = text or ""
+    hits: List[str] = []
+    for name, pattern in _PII_PATTERNS:
+        def _mark(match, name=name):
+            return f"[{name}]"
+        out, count = pattern.subn(_mark, out)
+        if count:
+            hits.append(f"{name}x{count}")
+    return out, hits
+
+
+def check_input(text: str, max_chars: int = 8000) -> List[str]:
+    """返回问题列表；空列表表示通过。"""
+    issues: List[str] = []
+    value = text or ""
+    if max_chars and len(value) > max_chars:
+        issues.append(f"输入过长（{len(value)} > {max_chars} 字符）")
+    lowered = value.lower()
+    for hint in _INJECTION_HINTS:
+        if hint in lowered:
+            issues.append(f"疑似提示词注入特征：{hint}")
+            break
+    return issues
+
+
+def fingerprint(value: str) -> str:
+    """审计里记「谁」，只留不可逆指纹，不留原始 token。"""
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def audit(event: str, fields: Dict[str, Any] | None = None, enabled: bool = True) -> None:
+    """写一条审计记录；失败绝不打断业务。"""
+    if not enabled:
+        return
+    try:
+        AUDIT_DIR.mkdir(parents=True, exist_ok=True)
+        path = AUDIT_DIR / f"{time.strftime('%Y-%m-%d')}.jsonl"
+        payload = {"ts": time.time(), "event": event, **(fields or {})}
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False, default=str) + "\\n")
+    except OSError:
+        pass
+
+
+def status() -> Dict[str, Any]:
+    return {"audit_dir": str(AUDIT_DIR), "pii_rules": [name for name, _ in _PII_PATTERNS]}
+'''
+
+
+def render_security() -> str:
+    return _SECURITY_PY
+
+
 def render_secret_store() -> str:
     return _SECRET_STORE_PY
 
@@ -2291,6 +2439,7 @@ def render_production_files(spec: Dict[str, Any], graph: Dict[str, Any],
     svc = merge_service(graph.get("service"))
     files: Dict[str, str] = {
         "secret_store.py": render_secret_store(),
+        "security.py": render_security(),
         "settings.py": render_settings(spec, svc),
         "telemetry.py": render_telemetry(),
         "checkpoint.py": render_checkpoint(),
