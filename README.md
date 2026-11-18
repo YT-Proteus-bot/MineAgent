@@ -502,6 +502,42 @@ python agent.py --input "..."
 文档与多模态节点（`pdf_parser` / `ocr_extract` / `speech_to_text` / `image_analyzer`）依赖可选库，
 没装时节点会返回一条可直接照做的安装提示，而不是把整个流程跑崩。
 
+### 意图识别可以接 Jev（System One）
+
+意图路由这类「模糊 if」交给生成式模型写 JSON 再解析，既贵又容易跑偏。可以换成
+[Jev](https://docs.typesafe.ai/)（TypeSafe 的 System One 模型）——它不生成文本，
+只回答选择题 / 判断题 / 打分题，直接返回带概率和 confidence 的结构化答案。
+
+`intent_recognizer` 节点已经内置：
+
+```python
+resp = ctx.judge(
+    {"message": ctx.text},
+    {
+        "intent": {"type": "choice", "instructions": "属于哪个意图？",
+                   "criteria": {"咨询": None, "任务执行": None, "投诉": None}},
+        "needs_tool": {"type": "noul", "instructions": "需要调外部工具吗？"},
+        "effort": {"type": "score", "instructions": "处理量级",
+                   "criteria": ["一句话", "几步", "要检索", "要拆多轮"]},
+    },
+)
+# → {"answers": {"intent": {"choice": "投诉", "confidence": 0.93, "probabilities": {...}},
+#                "needs_tool": {"noul": 0.88},
+#                "effort": {"score": 2.1}}, "model": "jev-1.13.0", ...}
+```
+
+**启用方式**：
+
+| 需要 | 设置 |
+|---|---|
+| API Key | 环境变量 `TYPESAFE_API_KEY`，或项目 `.env` 里写 `TYPESAFE_API_KEY=sk-...` |
+| 自定义网关 | `JEV_ENDPOINT`（官方端点 `https://api.typesafe.ai/v1/systemone` 在部分地区返回 451，可指向兼容网关） |
+| 模型版本 | `JEV_MODEL`（默认 `jev-latest`，建议线上钉 `jev-1.13.0`） |
+
+**没配也能用**：`ctx.judge()` 在缺 key、401、429、451、连不上时抛 `JudgeUnavailable`，
+节点会自动回退到普通模型判断（结果里 `engine` 字段标明是 `jev` 还是 `llm`）。
+只有 422 这类「请求本身写错了」才会真的报错。
+
 | 分类 | 节点 |
 | --- | --- |
 | 输入输出 | `input` 输入、`output` 输出 |

@@ -14,18 +14,63 @@ E = {}
 # --------------------------------------------------------------------------- #
 # 意图与查询理解
 # --------------------------------------------------------------------------- #
-E["intent_recognizer"] = '''from runtime_sdk import NodeContext
+E["intent_recognizer"] = '''from runtime_sdk import JudgeUnavailable, NodeContext
 
 
 def run(ctx: NodeContext):
-    """意图识别：把用户输入归到预定义意图，并给出置信度。"""
+    """意图识别：优先用 Jev 做结构化判断，没配 Jev 时回退到普通模型。
+
+    Jev（TypeSafe System One）不生成文本，只回答选择题 / 判断题 / 打分题，
+    返回带概率和 confidence 的结构化答案，比让模型写 JSON 再解析更稳、更便宜。
+
+    要启用：设置环境变量 TYPESAFE_API_KEY；如果所在地区访问不了官方端点，
+    用 JEV_ENDPOINT 指向可用的兼容网关（例如国内中转服务）。
+    """
     intents = ctx.params.get("intents") or ["咨询", "任务执行", "闲聊", "投诉", "其他"]
-    data = ctx.json_prompt(
-        "判断用户这句话属于哪个意图，并给出置信度。",
-        schema={"intent": "", "confidence": 0.0, "reason": ""},
-        context=f"可选意图：{intents}\\n用户输入：{ctx.text}",
-    )
-    ctx.state["intent"] = data.get("intent") if isinstance(data, dict) else ""
+    data = None
+
+    try:
+        resp = ctx.judge(
+            {"message": ctx.text},
+            {
+                "intent": {
+                    "type": "choice",
+                    "instructions": "用户这句话属于哪个意图？",
+                    "criteria": {i: None for i in intents},
+                },
+                "needs_tool": {
+                    "type": "noul",
+                    "instructions": "完成这个请求是否需要调用外部工具或检索资料？",
+                },
+                "effort": {
+                    "type": "score",
+                    "instructions": "处理这个请求大约需要多少工作量？",
+                    "criteria": ["一句话就能答", "需要几步处理", "要检索或调工具", "要拆成多轮任务"],
+                },
+            },
+        )
+        ans = resp.get("answers") or {}
+        intent_ans = ans.get("intent") or {}
+        data = {
+            "intent": intent_ans.get("choice") or "",
+            "confidence": intent_ans.get("confidence", 0.0),
+            "probabilities": intent_ans.get("probabilities") or {},
+            "needs_tool": (ans.get("needs_tool") or {}).get("noul", 0.0),
+            "effort": (ans.get("effort") or {}).get("score", 0.0),
+            "engine": "jev",
+            "model": resp.get("model", ""),
+        }
+    except JudgeUnavailable:
+        # 没配 Jev：用普通模型做同样的判断，保证节点照样能跑
+        fallback = ctx.json_prompt(
+            "判断用户这句话属于哪个意图，并给出置信度。",
+            schema={"intent": "", "confidence": 0.0, "reason": ""},
+            context=f"可选意图：{intents}\\n用户输入：{ctx.text}",
+        )
+        data = dict(fallback) if isinstance(fallback, dict) else {"intent": "", "confidence": 0.0}
+        data["engine"] = "llm"
+
+    ctx.state["intent"] = data.get("intent") or ""
     ctx.emit("intent", data)
     return data
 '''
@@ -225,6 +270,46 @@ def run(ctx: NodeContext):
 # --------------------------------------------------------------------------- #
 # 数据与存储
 # --------------------------------------------------------------------------- #
+E["dataset_reader"] = '''from runtime_sdk import NodeContext
+
+
+def run(ctx: NodeContext):
+    """数据集读取：按逻辑名从外部数据中台取数（预览模式直接走 HTTP）。"""
+    import json
+    import os
+    import urllib.parse
+    import urllib.request
+    from pathlib import Path
+
+    name = ctx.params.get("dataset") or ctx.text.strip()
+    if not name:
+        raise ValueError("dataset_reader 需要指定数据集逻辑名")
+    conf = {}
+    try:
+        root = Path(__file__).resolve().parents[1]
+        conf = json.loads((root / "integrations.json").read_text(encoding="utf-8")).get("data", {})
+    except Exception:
+        conf = {}
+    if not conf.get("enabled"):
+        ctx.log("数据中台未启用（服务设置 → 数据中台），返回空结果", "warn")
+        return {"dataset": name, "rows": [], "enabled": False}
+    spec = next((d for d in conf.get("datasets") or [] if d.get("logical") == name), {})
+    token = os.environ.get(conf.get("secret_ref") or "MINEAGENT_DATA_TOKEN", "")
+    url = (conf.get("base_url") or "").rstrip("/")
+    url += "/datasets/" + urllib.parse.quote(str(spec.get("physical") or name), safe="") + "/rows"
+    filters = ctx.params.get("filters") or {}
+    if filters:
+        url += "?" + urllib.parse.urlencode({"filters": json.dumps(filters, ensure_ascii=False)})
+    headers = {"Accept": "application/json"}
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=int(conf.get("timeout_s") or 30)) as resp:
+        payload = json.loads(resp.read().decode("utf-8") or "{}")
+    rows = payload.get("rows") if isinstance(payload, dict) else payload
+    return {"dataset": name, "rows": rows or []}
+'''
+
 E["db_write"] = '''from runtime_sdk import NodeContext
 
 

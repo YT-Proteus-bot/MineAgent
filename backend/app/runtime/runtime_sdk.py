@@ -59,6 +59,24 @@ def emit_event(event: Dict[str, Any]) -> None:
     _out.flush()
 
 
+def dotenv() -> Dict[str, str]:
+    """读项目根目录的 .env。每次调用都重新读，改完不用重启进程。"""
+    out: Dict[str, str] = {}
+    env_file = PROJECT_DIR / ".env"
+    if not env_file.exists():
+        return out
+    try:
+        for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            out[k.strip()] = v.strip().strip('"').strip("'")
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # 配置
 # --------------------------------------------------------------------------- #
@@ -109,6 +127,10 @@ def _normalize_url(base_url: str) -> str:
     if not base.endswith("/v1") and "/v1" not in base:
         base += "/v1"
     return base + "/chat/completions"
+
+
+class JudgeUnavailable(RuntimeError):
+    """没有配置 Jev，或者认证不通过；节点可以据此回退到普通模型判断。"""
 
 
 def _open(req: urllib.request.Request, timeout: float):
@@ -650,6 +672,78 @@ class NodeContext:
         if isinstance(val, list):
             return val
         return [val] if val else []
+
+    # ---- 结构化判断（Jev / TypeSafe System One）----
+    def judge(self, state: Any, questions: Dict[str, Any],
+              model: Optional[str] = None, timeout: float = 20.0) -> Dict[str, Any]:
+        """把「state + 类型化问题」交给 Jev，拿回带概率的答案。
+
+        不生成文本、不做解释，只回答选择题 / 判断题 / 打分题，
+        适合意图路由、安全检查、优先级判定这类"模糊 if"。
+
+        questions 写法：
+            {"intent": {"type": "choice", "instructions": "这句话属于哪个意图？",
+                        "criteria": {"咨询": None, "执行": None, "闲聊": None}},
+             "urgent": {"type": "noul", "instructions": "是否要求立刻处理？"},
+             "effort": {"type": "score", "instructions": "处理复杂度",
+                        "criteria": ["一句话", "几分钟", "要查资料"]}}
+
+        返回：{"answers": {"intent": {"choice": "咨询", "confidence": 0.93,
+                                      "probabilities": {...}}, ...},
+               "model": "jev-1.13.0", "usage": {...}}
+        """
+        endpoint = (
+            os.environ.get("JEV_ENDPOINT")
+            or dotenv().get("JEV_ENDPOINT")
+            or "https://api.typesafe.ai/v1/systemone"
+        )
+        key = (
+            os.environ.get("TYPESAFE_API_KEY")
+            or os.environ.get("JEV_API_KEY")
+            or dotenv().get("TYPESAFE_API_KEY")
+            or dotenv().get("JEV_API_KEY")
+        )
+        if not key:
+            raise JudgeUnavailable(
+                "没有配置 Jev 的 API Key。设置环境变量 TYPESAFE_API_KEY，"
+                "或在项目 .env 里写 TYPESAFE_API_KEY=sk-... 后再试"
+            )
+        if not questions:
+            raise ValueError("judge() 至少需要一个 question")
+
+        body: Dict[str, Any] = {"state": state, "questions": questions}
+        if model:
+            body["model"] = model
+        elif os.environ.get("JEV_MODEL") or dotenv().get("JEV_MODEL"):
+            body["model"] = os.environ.get("JEV_MODEL") or dotenv().get("JEV_MODEL")
+
+        try:
+            resp = http_json(
+                "POST", endpoint,
+                headers={"Authorization": f"Bearer {key}"},
+                payload=body, timeout=timeout,
+            )
+        except urllib.error.HTTPError as exc:
+            detail = ""
+            try:
+                detail = exc.read().decode("utf-8", "replace")[:300]
+            except Exception:  # noqa: BLE001
+                pass
+            # 这几类属于"Jev 这次用不了"，节点可以安静地回退到普通模型
+            if exc.code in (401, 403, 404, 451):
+                raise JudgeUnavailable(
+                    f"Jev 不可用（{exc.code}）：{detail or '认证失败或所在地区不可用'}"
+                ) from exc
+            if exc.code == 429:
+                raise JudgeUnavailable("Jev 限流（429），这次先回退") from exc
+            # 422 这类是请求本身写错了，不该悄悄回退，要暴露出来
+            raise RuntimeError(f"Jev 返回 {exc.code}：{detail}") from exc
+        except urllib.error.URLError as exc:
+            raise JudgeUnavailable(f"连不上 Jev（{endpoint}）：{exc.reason}") from exc
+
+        if not isinstance(resp, dict) or "answers" not in resp:
+            raise RuntimeError(f"Jev 返回格式异常：{str(resp)[:200]}")
+        return resp
 
     # ---- 向量 ----
     def embed(self, text: str) -> List[float]:
