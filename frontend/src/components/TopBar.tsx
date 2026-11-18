@@ -257,6 +257,26 @@ export default function TopBar({ onOpenUserCenter, onOpenCanvasModel }: Props) {
         )}
       </Popover>
 
+      {/* 当前画布对应的远端模板：一直可见，有更新时高亮 */}
+      {canvas?.remote_slug ? (
+        <button
+          className={`sync-pill${canvas.remote_changed ? ' has-update' : ''}`}
+          title={
+            canvas.remote_changed
+              ? `远端有更新：本地第 ${canvas.remote_rev ?? 1} 版，远端更新了。点击查看`
+              : `对应远端模板：${canvas.remote_name || canvas.remote_slug}`
+          }
+          onClick={() => {
+            if (canvas.remote_changed) void updateFromRemote(canvas as any)
+          }}
+        >
+          <span className="dot" />
+          {canvas.remote_lib_label || '公共模板库'}
+          {canvas.remote_rev ? ` · v${canvas.remote_rev}` : ''}
+          {canvas.remote_changed ? <span className="pill-update">有更新</span> : null}
+        </button>
+      ) : null}
+
       <button
         onClick={undo}
         disabled={historyPast.length === 0}
