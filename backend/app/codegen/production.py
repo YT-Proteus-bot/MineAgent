@@ -57,6 +57,10 @@ def render_settings(spec: Dict[str, Any], svc: Dict[str, Dict[str, Any]]) -> str
     e, s, r, o, sec = (svc["entry"], svc["session"], svc["runtime"],
                        svc["observability"], svc["security"])
     d, ev = svc["data"], svc["eval"]
+    # 画布上有审批节点时默认开启断点续跑，否则审批会挂住却无法放行
+    has_approval = any((n.get("kind") or "") == "human_approval"
+                       for n in (spec.get("nodes") or []))
+    resume_default = True if has_approval else bool(r["resume"])
     return f'''"""服务配置：环境变量驱动，启动即校验，配错直接起不来。
 
 改配置两种方式（优先级从高到低）：
@@ -101,7 +105,7 @@ class Settings(BaseSettings):
     queue_limit: int = Field({int(r["queue_limit"])}, ge=0, le=100000)
     run_timeout_s: int = Field({int(r["run_timeout_s"])}, ge=5, le=86400,
                                validation_alias="MINEAGENT_RUN_TIMEOUT")
-    resume: bool = {_py(r["resume"])}
+    resume: bool = {_py(resume_default)}  # 画布有审批节点时默认开启
 
     log_level: str = {_py(o["log_level"])}
     json_logs: bool = {_py(o["json_logs"])}
@@ -799,6 +803,9 @@ async def _trace_middleware(request: Request, call_next):
     variant = getattr(request.state, "variant", "")
     if variant:
         response.headers.setdefault("X-Variant", variant)
+    if getattr(request.state, "session_reset", False):
+        # 轮数到顶或过期被重置时告诉调用方，别让它以为上下文还在
+        response.headers.setdefault("X-Session-Reset", "1")
     return response
 
 # ── 并发闸门：同时执行的数量受 max_concurrency 限制，排队的受 queue_limit 限制 ──
@@ -970,6 +977,9 @@ def _record_candidate(message: str, error: str, trace_id: str, thread_id: str) -
             text = _security.redact(text)[0]
         path = Path(__file__).resolve().parent / "evals" / "candidates.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() and path.stat().st_size > 2 * 1024 * 1024:
+            # 单文件过了 2MB 就转存一份，避免候选集无限长
+            path.replace(path.with_name(path.name + ".1"))
         with path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps({{"input": text, "error": str(error)[:500],
                                  "trace_id": trace_id, "thread_id": thread_id,
@@ -1013,6 +1023,9 @@ def _session_begin(thread_id: str) -> Dict[str, Any]:
             turns += 1
             conn.execute("INSERT OR REPLACE INTO sessions VALUES(?,?,?)",
                          (thread_id, turns, now))
+            # 顺手清掉很久没动的会话记录，避免这张表无限长
+            retention = max(86400.0, ttl_minutes * 120.0)
+            conn.execute("DELETE FROM sessions WHERE updated_at < ?", (now - retention,))
             conn.commit()
             info["turns"] = turns
         finally:
@@ -1060,6 +1073,19 @@ def _guard_input(text: str, trace_id: str, request=None) -> None:
     if mode == "block":
         raise HTTPException(400, {{"error": "输入未通过安全检查", "issues": issues,
                                    "trace_id": trace_id}})
+
+
+def _redact_obj(value, enabled: bool = False):
+    """按需递归脱敏（用于中断载荷这类「原样回给调用方」的结构）。"""
+    if not enabled or _security is None:
+        return value
+    if isinstance(value, str):
+        return _security.redact(value)[0]
+    if isinstance(value, dict):
+        return {{key: _redact_obj(item, True) for key, item in value.items()}}
+    if isinstance(value, list):
+        return [_redact_obj(item, True) for item in value]
+    return value
 
 
 def _interrupt_items(result) -> list:
@@ -1160,7 +1186,9 @@ def chat(req: ChatRequest, request: Request,
     _ensure_budget()
     _guard_input(req.message, trace_id, request)
     # 调用方显式给了 thread_id 才做轮数/过期治理；一次性请求不必记账
-    session_turns = _session_begin(thread_id)["turns"] if req.thread_id else 1
+    session_info = _session_begin(thread_id) if req.thread_id else {{"turns": 1, "reset": False}}
+    request.state.session_reset = bool(session_info["reset"])
+    session_turns = session_info["turns"]
     sampled = _sampled()
     variant = _pick_variant(request, trace_id)
     request.state.variant = variant
@@ -1218,6 +1246,7 @@ def chat(req: ChatRequest, request: Request,
            trace_id=trace_id, thread_id=thread_id, variant=variant,
            tokens=usage.get("total_tokens", 0), cost_usd=usage.get("cost_usd", 0.0))
     if interrupts:
+        interrupts = _redact_obj(interrupts, bool(getattr(settings, "pii", False)))
         return ChatResponse(answer="", thread_id=thread_id, usage=usage,
                             status="interrupted", interrupt=interrupts[0], variant=variant)
     return ChatResponse(answer=answer, thread_id=thread_id, usage=usage, variant=variant)
@@ -1227,11 +1256,11 @@ def chat(req: ChatRequest, request: Request,
 def resume(req: ResumeRequest, request: Request,
            authorization: Optional[str] = Header(default=None)):
     """把挂起的人工审批放行：decision = approve / reject（也可以传别的原因）。"""
+    _check_auth(authorization)
     if not bool(getattr(settings, "resume", False)):
         # 开关关掉时直接拒绝，别让人以为「点了 approve 但没生效」
         metrics.inc("resume_disabled")
         raise HTTPException(501, "此部署未开启断点续跑（MINEAGENT_RESUME=0），/resume 不可用")
-    _check_auth(authorization)
     trace_id = getattr(request.state, "trace_id", "") or _new_trace_id(None)
     _ensure_budget()
     variant = _pick_variant(request, trace_id)
@@ -1284,6 +1313,7 @@ def resume(req: ResumeRequest, request: Request,
            variant=variant, decision=req.decision,
            status="interrupted" if interrupts else "ok")
     if interrupts:
+        interrupts = _redact_obj(interrupts, bool(getattr(settings, "pii", False)))
         return ChatResponse(answer="", thread_id=req.thread_id, usage=usage,
                             status="interrupted", interrupt=interrupts[0], variant=variant)
     return ChatResponse(answer=answer, thread_id=req.thread_id, usage=usage, variant=variant)
@@ -1299,11 +1329,12 @@ def run_state(thread_id: str, authorization: Optional[str] = Header(default=None
         raise HTTPException(404, {{"error": str(exc), "thread_id": thread_id}}) from exc
     values = getattr(snapshot, "values", {{}}) or {{}}
     pending = _interrupt_items(getattr(snapshot, "interrupts", ()))
+    pii_on = bool(getattr(settings, "pii", False))
     return {{"thread_id": thread_id,
             "next": list(getattr(snapshot, "next", ()) or ()),
-            "answer": values.get("data", ""),
+            "answer": _redact_obj(values.get("data", ""), pii_on),
             "status": "interrupted" if pending else "ok",
-            "interrupt": pending[0] if pending else None}}
+            "interrupt": (_redact_obj(pending, pii_on)[0] if pending else None)}}
 
 
 def chat_stream(req: ChatRequest, request: Request,
@@ -1313,6 +1344,8 @@ def chat_stream(req: ChatRequest, request: Request,
     thread_id = req.thread_id or uuid.uuid4().hex[:16]
     _ensure_budget()
     _guard_input(req.message, trace_id, request)
+    session_info = _session_begin(thread_id) if req.thread_id else {{"turns": 1, "reset": False}}
+    request.state.session_reset = bool(session_info["reset"])
     variant = _pick_variant(request, trace_id)
     request.state.variant = variant
 
@@ -1326,11 +1359,22 @@ def chat_stream(req: ChatRequest, request: Request,
             _bind_trace(trace_id)
             flow.set_canary(variant == "canary")
             yield "event: open\\ndata: " + json.dumps(
-                {{"trace_id": trace_id, "thread_id": thread_id, "variant": variant}},
+                {{"trace_id": trace_id, "thread_id": thread_id, "variant": variant,
+                  "session_reset": bool(session_info["reset"]), "turns": session_info["turns"]}},
                 ensure_ascii=False) + "\\n\\n"
             config = {{"configurable": {{"thread_id": thread_id}}}}
             payload = {{"data": req.message, "user_input": req.message, "route": "",
                        "trace_id": trace_id}}
+            _stream_redact = _security is not None and bool(getattr(settings, "pii", False))
+
+            def _redact_chunk(text: str) -> str:
+                if not _stream_redact:
+                    return text
+                cleaned, hits = _security.redact(text)
+                if hits:
+                    metrics.inc("pii_redacted")
+                return cleaned
+
             for chunk in graph().stream(payload, config=config, stream_mode="updates"):
                 if time.time() > deadline:
                     metrics.inc("stream_timeouts")
@@ -1340,11 +1384,11 @@ def chat_stream(req: ChatRequest, request: Request,
                 node = list(chunk.keys())[0] if isinstance(chunk, dict) and chunk else ""
                 if isinstance(chunk, dict) and "__interrupt__" in chunk:
                     interrupted = True
-                    body = json.dumps({{"interrupt": _interrupt_items(chunk)[:1]}},
-                                      ensure_ascii=False, default=str)
+                    body = _redact_chunk(json.dumps({{"interrupt": _interrupt_items(chunk)[:1]}},
+                                                   ensure_ascii=False, default=str))
                     yield f"event: interrupt\\ndata: {{body}}\\n\\n"
-                body = json.dumps({{"node": node, "update": chunk}},
-                                  ensure_ascii=False, default=str)
+                body = _redact_chunk(json.dumps({{"node": node, "update": chunk}},
+                                                ensure_ascii=False, default=str))
                 yield f"event: update\\ndata: {{body}}\\n\\n"
             usage = _account(flow.take_usage())
             yield "event: usage\\ndata: " + json.dumps(usage, ensure_ascii=False) + "\\n\\n"
