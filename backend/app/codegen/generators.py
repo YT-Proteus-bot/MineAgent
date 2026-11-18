@@ -1,18 +1,19 @@
 """画布 → 独立 Agent 项目的代码生成器。"""
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from ..config import PROJECTS_DIR
 from ..framework_templates import FRAMEWORK_INDEX
 from ..node_registry import detect_llm_usage, get_node_type
-from ..providers.bindings import (ENV_NAMES, named_bindings,
-                                  strip_secrets)
+from ..providers.bindings import strip_secrets
 from .graphcheck import check_code
 from .dify import render_workflow_dsl
 from .native import AGENT_KINDS, TOOL_KINDS, _kind_of, render_agent_full
@@ -455,7 +456,10 @@ def generate_project(name: str, slug: str, framework: str, graph: Dict[str, Any]
 
     # 框架入口：一整个 agent.py，就是这份画布的框架原生代码
     agent_code, node_blocks = render_agent_full(spec, framework)
+    # 先按内容算版本：hash 变了才 bump，并把上一版存进 .history/ 供回滚
+    version_info = _bump_version(project_dir, spec, agent_code)
     write("agent.py", agent_code)
+    write("VERSION", json.dumps(version_info, ensure_ascii=False, indent=2) + "\n")
 
     # 生成即自检：图结构有硬伤（孤岛 / 无入边 / 工具越权）当场打出来，
     # 不要等用户把项目跑起来才发现。只有真生成了 StateGraph 的代码才有「边」可查。
@@ -577,7 +581,8 @@ def generate_project(name: str, slug: str, framework: str, graph: Dict[str, Any]
     write(".env.example", env_example)
     write(".gitignore",
           ".env\n.venv/\n.store.db\n*.db\n.sessions.db\n__pycache__/\n*.pyc\n"
-          "outputs/*\n!outputs/.gitkeep\nwheels/*\n!wheels/.gitkeep\n")
+          "outputs/*\n!outputs/.gitkeep\nwheels/*\n!wheels/.gitkeep\n"
+          ".history/\nevals/candidates.jsonl\n")
 
     # 空目录留占位文件，保证复制 / 打包 / git 之后目录结构不丢
     write("skills/.gitkeep", "# 技能文件（skill 节点的 skill.md）放这里\n")
@@ -599,6 +604,76 @@ def generate_project(name: str, slug: str, framework: str, graph: Dict[str, Any]
     _clean_caches(project_dir)
 
     return project_dir, written
+
+
+def _spec_hash(spec: Dict[str, Any]) -> str:
+    """按「内容」算版本：节点/连线/代码/参数任何一个变了，hash 就变。"""
+    payload = json.dumps(spec, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+
+
+def _bump_version(project_dir: Path, spec: Dict[str, Any], agent_code: str) -> Dict[str, Any]:
+    """维护 VERSION：内容没变就不动；变了就 patch +1，并把上一版 agent.py 存进 .history/。
+
+    回滚方式：把 `.history/agent-<旧版本>.py` 拷回 `agent.py` 即可（VERSION 里也记了 hash）。
+    """
+    version_file = project_dir / "VERSION"
+    previous: Dict[str, Any] = {}
+    if version_file.exists():
+        try:
+            previous = json.loads(version_file.read_text(encoding="utf-8")) or {}
+        except Exception:  # noqa: BLE001
+            previous = {}
+    if not isinstance(previous, dict):
+        previous = {}
+
+    new_hash = _spec_hash(spec)
+    if previous.get("hash") == new_hash and previous.get("version"):
+        return previous
+
+    version = str(previous.get("version") or "1.0.0")
+    if previous:
+        parts = version.split(".")
+        try:
+            parts[-1] = str(int(parts[-1]) + 1)
+        except (ValueError, IndexError):
+            parts = ["1", "0", "1"]
+        version = ".".join(parts[:3]) if len(parts) >= 3 else ".".join(parts + ["0"])
+
+    # 上一版代码留档，出问题能立刻换回去
+    previous_agent = project_dir / "agent.py"
+    previous_version = str(previous.get("version") or "")
+    if previous_agent.exists() and previous_version and previous_version != version:
+        history = project_dir / ".history"
+        history.mkdir(exist_ok=True)
+        try:
+            shutil.copyfile(previous_agent, history / f"agent-{previous_version}.py")
+            keep = sorted(history.glob("agent-*.py"), key=lambda p: p.stat().st_mtime)[-5:]
+            for stale in history.glob("agent-*.py"):
+                if stale not in keep:
+                    stale.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    info = {
+        "version": version,
+        "hash": new_hash,
+        "generated_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+        "nodes": len(spec.get("nodes") or []),
+        "edges": len(spec.get("edges") or []),
+        "bytes": len(agent_code.encode("utf-8")),
+    }
+    if previous.get("version") != version:
+        try:
+            changelog = project_dir / "CHANGELOG.md"
+            head = "" if changelog.exists() else "# 变更记录\n\n"
+            line = (f"- `{info['generated_at']}` **v{version}** · "
+                    f"{info['nodes']} 节点 / {info['edges']} 连线 · `{new_hash}`\n")
+            with changelog.open("a", encoding="utf-8") as fh:
+                fh.write(head + line)
+        except OSError:
+            pass
+    return info
 
 
 def _clean_caches(project_dir: Path) -> None:
@@ -722,6 +797,9 @@ def _readme(name: str, slug: str, framework: str, spec: Dict[str, Any]) -> str:
         "```",
         "agent.json         # 画布图定义（保存时自动覆盖）",
         "agent.py           # 框架原生入口：一张画布 = 一个文件，节点按 ═══ 分块",
+        "VERSION            # 版本号 / 内容 hash / 生成时间（/version 直接返回它）",
+        "CHANGELOG.md       # 每次内容变化追加一行",
+        ".history/          # 最近 5 版 agent.py，回滚就拷这一个文件",
         "runner.py          # 内置图执行器（零依赖，任何画布都能跑）",
         "runtime_sdk.py     # 节点可用的全部能力（ctx.*）",
         "sandbox.py         # shell / exec_python 的隔离实现（MINEAGENT_SANDBOX 控制）",
@@ -832,6 +910,32 @@ def _readme(name: str, slug: str, framework: str, spec: Dict[str, Any]) -> str:
         "",
         "查找顺序默认「环境变量 → provider」，设 `MINEAGENT_SECRETS_PRIORITY=provider` 可反过来。",
         "provider 连不上只告警一次并退回环境变量，服务照常起；`/ready.secrets` 会显示当前来源与是否配齐。",
+        "",
+        "## 改完之后的版本与回滚",
+        "",
+        "每次保存画布，生成器都会按内容算一个 hash：",
+        "",
+        "- 内容没变 → `VERSION` 不动",
+        "- 内容变了 → patch +1，`CHANGELOG.md` 追加一行，上一版 `agent.py` 存进 `.history/`（保留最近 5 版）",
+        "",
+        "```bash",
+        "curl -s localhost:8000/version     # {\"version\":\"1.0.3\",\"hash\":\"…\",\"generated_at\":\"…\"}",
+        "curl -s localhost:8000/health      # {\"ok\":true,\"version\":\"1.0.3\"}",
+        "",
+        "# 回滚到上一版：把留档文件拷回去，重启即可",
+        "cp .history/agent-1.0.2.py agent.py",
+        "```",
+        "",
+        "## 评测飞轮：把线上失败变成用例",
+        "",
+        "`/chat` 出错时会自动把这条请求写进 `evals/candidates.jsonl`（含 input / error / trace_id）。",
+        "",
+        "```bash",
+        "python evals/run.py --candidates   # 重跑这些失败输入，看现在还报不报错",
+        "```",
+        "",
+        "不再报错的输入，抄进 `cases.jsonl` 再补上 `expect_contains`，就成了一条正式用例——",
+        "修过的 bug 从此有了回归测试。",
         "",
         "## 压测与验收",
         "",

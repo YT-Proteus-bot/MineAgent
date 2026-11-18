@@ -987,6 +987,12 @@ except Exception:  # noqa: BLE001
     def _secret(name: str, default: str = "") -> str:
         return os.environ.get(name, default)
 
+try:  # 版本号由生成器写进 VERSION，服务端 /version 与日志都会带上
+    _VERSION_INFO = json.loads((HERE / "VERSION").read_text(encoding="utf-8"))
+except Exception:  # noqa: BLE001
+    _VERSION_INFO = {}
+AGENT_VERSION = str(_VERSION_INFO.get("version") or "0.0.0")
+
 
 # ── token 用量：按运行上下文累计，一次 run 结束由 take_usage() 取走 ──
 # 用 ContextVar 而不是线程局部变量：节点是在线程池里执行的，只有复制上下文

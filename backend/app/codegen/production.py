@@ -714,6 +714,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -917,6 +918,20 @@ def _ensure_budget() -> None:
         raise HTTPException(429, "预算已用尽（MINEAGENT_BUDGET_USD），请调高预算或重置进程")
 
 
+def _record_candidate(message: str, error: str, trace_id: str, thread_id: str) -> None:
+    """出错的请求收进 evals/candidates.jsonl，攒够了人工改成正式用例（评测飞轮）。"""
+    try:
+        path = Path(__file__).resolve().parent / "evals" / "candidates.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({{"input": message, "error": str(error)[:500],
+                                 "trace_id": trace_id, "thread_id": thread_id,
+                                 "ts": time.time()}}, ensure_ascii=False) + "\\n")
+        metrics.inc("eval_candidates")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _interrupt_items(result) -> list:
     """把 LangGraph 的 __interrupt__ 归一成普通 dict 列表。"""
     if isinstance(result, dict):
@@ -959,7 +974,17 @@ def _startup_report() -> None:
 
 @app.get("/health")
 def health():
-    return {{"ok": True}}
+    return {{"ok": True, "version": getattr(flow, "AGENT_VERSION", "0.0.0")}}
+
+
+@app.get("/version")
+def version():
+    """返回生成器写入的版本记录（版本号 / 内容 hash / 生成时间 / 节点数）。"""
+    try:
+        info = json.loads((Path(__file__).resolve().parent / "VERSION").read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        info = {{"version": getattr(flow, "AGENT_VERSION", "0.0.0")}}
+    return info
 
 
 @app.get("/ready")
@@ -1004,6 +1029,7 @@ def chat(req: ChatRequest, request: Request,
         metrics.inc("chat_errors")
         log_event("chat_error", {{"trace_id": trace_id, "thread_id": req.thread_id,
                                   "error": str(exc)}})
+        _record_candidate(req.message, str(exc), trace_id, thread_id)
         raise HTTPException(500, {{"error": str(exc), "thread_id": req.thread_id,
                                    "trace_id": trace_id}}) from exc
     finally:
@@ -1566,8 +1592,46 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 DEFAULT_SET = HERE / "cases.jsonl"
+CANDIDATES = HERE / "candidates.jsonl"
 REPORT = HERE / "report.json"
 PASS_RATE = 0.8
+
+
+def load_candidates(path: Path, limit: int = 0) -> list:
+    """线上出错的请求攒在这里；跑一遍看现在还会不会报错，再决定要不要转成正式用例。"""
+    if not path.exists():
+        return []
+    out = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        text = str(item.get("input") or "").strip()
+        if not text:
+            continue
+        out.append({"id": f"cand-{len(out) + 1}", "input": text,
+                    "expect_contains": [], "expect_not_contains": [],
+                    "max_latency_ms": 0, "from_error": item.get("error", "")})
+    return out[:limit] if limit else out
+
+
+def run_candidates(limit: int) -> int:
+    items = load_candidates(CANDIDATES, limit)
+    if not items:
+        print(f"没有待办候选（{CANDIDATES} 还不存在或为空）")
+        return 0
+    rows = run_real(items)
+    still_failing = [r for r in rows if not r["passed"]]
+    for row in rows:
+        flag = "OK  " if row["passed"] else "FAIL"
+        print(f"[{flag}] {row['id']}  {row.get('error') or '不再报错'}")
+    print(f"候选 {len(rows)} 条，仍失败 {len(still_failing)} 条")
+    print("把不再报错的 input 抄进 cases.jsonl，并补上 expect_contains，就成了正式用例。")
+    return 0 if not still_failing else 1
 
 
 def load_cases(path: Path, limit: int = 0) -> list:
@@ -1653,8 +1717,13 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--check", action="store_true",
                         help="只校验用例与打分逻辑，不调用模型")
+    parser.add_argument("--candidates", action="store_true",
+                        help="跑 evals/candidates.jsonl 里线上出错的请求，看现在还报不报错")
     parser.add_argument("--threshold", type=float, default=PASS_RATE)
     args = parser.parse_args()
+
+    if args.candidates:
+        return run_candidates(args.limit)
 
     cases = load_cases(Path(args.case_set), args.limit)
 
