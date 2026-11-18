@@ -1,9 +1,11 @@
-"""内置 AI 助手：用「用户中心」里配置的 key，回答使用中遇到的框架 / 编排问题。
+"""内置 AI 助手（Agent 形态）：带工具调用、短期/长期记忆、上下文压缩。
 
-和画布运行用的是同一套模型配置（orchestrator_*），但只做问答，不执行任何画布操作。
+和画布运行用的是同一套模型配置（orchestrator_*）。
+读工具自动执行；改画布这类写操作只生成「待确认」动作，等用户点确认。
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from typing import Any, Dict, List, Optional
@@ -13,10 +15,16 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from .. import assistant_memory
+from ..assistant_agent import run_agent
 from ..db import get_conn, get_setting, now_iso
 from ..security import decrypt
 
 router = APIRouter(prefix="/api/assistant", tags=["assistant"])
+
+
+def _sse(obj: Dict[str, Any]) -> str:
+    return "data: " + json.dumps(obj, ensure_ascii=False, default=str) + "\n\n"
 
 
 class ChatMessage(BaseModel):
@@ -27,6 +35,32 @@ class ChatMessage(BaseModel):
 class AssistantRequest(BaseModel):
     messages: List[ChatMessage] = Field(default_factory=list)
     context: Optional[Dict[str, Any]] = None
+    canvas_id: str = ""
+    # 更早对话的压缩摘要（前端在消息变长后生成并带回来）
+    summary: str = ""
+
+
+class CompressRequest(BaseModel):
+    messages: List[ChatMessage] = Field(default_factory=list)
+    canvas_id: str = ""
+
+
+RUNTIME_PROMPT = """
+
+## 你的运行方式（Agent）
+
+你现在是一个能调用工具的 Agent，不只是聊天。
+
+工具使用原则：
+1. 回答前先确认事实：涉及画布结构就调 `get_canvas`，涉及节点能力就调 `get_node_doc` /
+   `list_node_types`，涉及「为什么跑不起来」就调 `get_run_log`。不要凭印象猜节点 id。
+2. 改画布用 `apply_ops`（局部改动）或 `apply_canvas`（整张重做）。这两个工具**不会立刻生效**，
+   会生成一张待用户确认的卡片。你可以在同一轮里继续做别的检查，但不要假设它已经生效、
+   也不要对用户说「已经改好了」。
+3. 用户明确表达了偏好/约定，或你们确认了一个非显然的结论时，用 `remember` 记下来。
+4. `run_canvas` 会真的消耗模型额度，只在用户明确要求运行或验证时调。
+5. 最多 6 步工具调用。信息够了就直接回答，不要为了用工具而用工具。
+"""
 
 
 SYSTEM_PROMPT = """你是 MineAgent 的内置助手，一个熟悉 LLM Agent 工程化的工程师。
@@ -50,6 +84,107 @@ SYSTEM_PROMPT = """你是 MineAgent 的内置助手，一个熟悉 LLM Agent 工
 3. 用户没说清楚时，先问一个最关键的问题再动手，不要一次问一堆。
 4. 不要编造这个产品没有的功能；不确定就说“这个功能目前没有”。
 5. 用中文回答。"""
+
+
+CANVAS_GUIDE = """
+
+## 你还能直接生成画布
+
+当用户说「搭一个 / 生成 / 帮我设计 / 改成」某类 Agent 流程时，除了用文字讲清思路，
+在回答的最后给出一个 ```canvas 代码块，内容是一张完整画布的 JSON：
+
+```canvas
+{
+  "nodes": [
+    {"key": "n1", "kind": "input", "label": "输入"},
+    {"key": "n2", "kind": "agent", "label": "助理", "params": {"mode": "react", "max_steps": 6}},
+    {"key": "n3", "kind": "output", "label": "输出"}
+  ],
+  "edges": [
+    {"source": "n1", "target": "n2"},
+    {"source": "n2", "target": "n3"}
+  ]
+}
+```
+
+硬性规则（不满足会被约束检查拦下）：
+1. `kind` 必须来自下面的节点清单，不要编造类型。
+2. 有且只有一个 `input`，至少一个 `output`。
+3. 每个节点都要能从 input 到达，也都要能走到 output；不允许孤立节点。
+4. 分支节点（`router` / `condition`）的两条出边都要写，用 `"branch": "true"` / `"false"` 区分。
+5. 有环时必须有一个能收敛的出口，否则会死循环。
+6. `tool` 节点的入边必须从某个 agent 连出来（工具是 agent 调用的，不是独立步骤）。
+7. 节点代码默认按类型自动补齐；只有确实需要特殊逻辑时才在节点里加 `"code"` 字段，
+   它的内容是一个完整的 `def run(ctx): ...` 函数。
+8. 先用文字说明这张图怎么跑、每个节点做什么，再给 canvas 块。
+9. 用户是在**替换**当前画布，所以给出的是完整的一张图，不是增量补丁。
+
+### 可用节点类型
+"""
+
+_CANVAS_GUIDE_CACHE: str = ""
+
+
+OPS_GUIDE = """
+
+## 修改现有画布（增量操作）
+
+如果用户是在**当前画布上做局部改动**（加/删节点、改参数、改某个节点的代码、
+改连线、挪位置），不要重画整张图，改给一个 ```ops 代码块，内容是操作数组：
+
+```ops
+[
+  {"op": "add_node", "key": "k1", "kind": "rag_retriever", "label": "检索",
+   "params": {"top_k": 6}},
+  {"op": "connect", "source": "n2", "target": "k1"},
+  {"op": "connect", "source": "k1", "target": "n4"},
+  {"op": "update_node", "id": "n4", "params": {"max_steps": 8}},
+  {"op": "set_code", "id": "n4", "code": "def run(ctx):\\n    return ctx.llm(ctx.text)"},
+  {"op": "move_node", "id": "n3", "x": 700, "y": 260},
+  {"op": "relayout"}
+]
+```
+
+操作清单：
+
+| op | 必填 | 说明 |
+| --- | --- | --- |
+| `add_node` | `kind` | `key` 供本次其它操作引用；可选 `label` `name` `params` `code` `x` `y` |
+| `remove_node` | `id` | 相关连线会一起删掉 |
+| `update_node` | `id` | 可改 `label` `name` `params`（**合并**，不是覆盖） |
+| `set_code` | `id` `code` | `code` 必须是完整的 `def run(ctx):` 函数 |
+| `connect` | `source` `target` | 端点可以是节点 id 或本次 `add_node` 的 key；`branch` 填 `true`/`false` |
+| `disconnect` | `source` `target` | 删掉指定连线 |
+| `move_node` | `id` `x` `y` | 画布坐标 |
+| `relayout` | — | 让整张图按流程自动重排，位置乱的时候用 |
+
+规则：
+1. 节点 id 必须用上面上下文里给出的真实 id（形如 `n1`、`n2`），不要自己编。
+2. 一次只改用户要求的部分，不要顺手动别的节点。
+3. 改完用文字说明改了哪几处，再给 ops 块。
+
+**走哪条路：**
+- 「搭一个 / 重新设计 / 换成某某架构」→ 用 ```canvas 给完整画布（整张替换）
+- 「加一个 / 删掉 / 把 A 接到 B / 改一下某节点 / 挪一下 / 重新排一下」→ 用 ```ops 做增量
+"""
+
+
+def _canvas_guide() -> str:
+    """节点清单按 registry 动态生成，避免提示词和实际类型对不上。"""
+    global _CANVAS_GUIDE_CACHE
+    if _CANVAS_GUIDE_CACHE:
+        return _CANVAS_GUIDE_CACHE
+    from ..node_registry import NODE_TYPES
+    lines = []
+    current = ""
+    for node in NODE_TYPES:
+        cat = node.get("category") or ""
+        if cat != current:
+            current = cat
+            lines.append(f"\n【{cat}】")
+        lines.append(f"- {node['kind']}：{node.get('label') or ''}")
+    _CANVAS_GUIDE_CACHE = CANVAS_GUIDE + OPS_GUIDE + "\n".join(lines) + "\n"
+    return _CANVAS_GUIDE_CACHE
 
 
 def _runtime_cfg() -> Dict[str, Any]:
@@ -80,8 +215,15 @@ def _context_text(ctx: Optional[Dict[str, Any]]) -> str:
                      f"{c.get('node_count')} 个节点 / {c.get('edge_count')} 条连线）")
     nodes = ctx.get("nodes") or []
     if nodes:
-        brief = "、".join(f"{n.get('label')}({n.get('kind')})" for n in nodes[:24])
-        lines.append(f"- 节点：{brief}")
+        lines.append("- 节点（id / 名称 / 类型）：")
+        for n in nodes[:40]:
+            lines.append(f"  · {n.get('id')} / {n.get('label')} / {n.get('kind')}")
+    edges = ctx.get("edges") or []
+    if edges:
+        pairs = "、".join(
+            f"{e.get('source')}→{e.get('target')}" + (f"[{e.get('branch')}]" if e.get("branch") else "")
+            for e in edges[:50])
+        lines.append(f"- 连线：{pairs}")
     violations = ctx.get("violations") or []
     if violations:
         lines.append("- 约束未通过：")
@@ -89,10 +231,26 @@ def _context_text(ctx: Optional[Dict[str, Any]]) -> str:
             lines.append(f"  · [{v.get('level')}] {v.get('title')}：{v.get('message')}")
     last_run = ctx.get("last_run")
     if last_run:
-        lines.append(f"- 最近一次运行：{last_run}")
+        lines.append(f"- 最近一次运行结果：{last_run}")
+    run_log = ctx.get("run_log") or []
+    if run_log:
+        lines.append("- 最近一次运行的执行过程（按时间顺序）：")
+        for item in run_log[-60:]:
+            stamp = str(item.get("at") or "")[-8:]
+            name = item.get("node") or ""
+            kind = item.get("event") or ""
+            extra = ""
+            if item.get("duration_ms") is not None:
+                extra = f" {item['duration_ms']}ms"
+            if item.get("message"):
+                extra += f" {item['message']}"
+            elif item.get("output"):
+                extra += f" 输出={item['output']}"
+            lines.append(f"  · [{stamp}] {kind} {name}{extra}".rstrip())
     if ctx.get("selected"):
         s = ctx["selected"]
-        lines.append(f"- 当前选中节点：{s.get('label')}（{s.get('kind')} / {s.get('name')}）")
+        lines.append(f"- 当前选中节点：{s.get('id')} / {s.get('label')}"
+                     f"（{s.get('kind')} / {s.get('name')}）")
     return "\n".join(lines)
 
 
@@ -125,11 +283,21 @@ def _chat_brief(row) -> Dict[str, Any]:
 
 
 @router.get("/chats")
-def list_chats(limit: int = 50):
+def list_chats(limit: int = 50, canvas_id: str = ""):
+    """对话列表。传 canvas_id 就只返回这张画布的对话。
+
+    每张画布有自己的对话，避免把别的画布的上下文带进来。
+    """
     with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT * FROM assistant_chats ORDER BY updated_at DESC LIMIT ?", (limit,)
-        ).fetchall()
+        if canvas_id:
+            rows = conn.execute(
+                "SELECT * FROM assistant_chats WHERE canvas_id = ? "
+                "ORDER BY updated_at DESC LIMIT ?",
+                (canvas_id, limit)).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM assistant_chats ORDER BY updated_at DESC LIMIT ?",
+                (limit,)).fetchall()
     return [_chat_brief(r) for r in rows]
 
 
@@ -144,7 +312,7 @@ def get_chat(chat_id: str):
     except Exception:  # noqa: BLE001
         msgs = []
     return {"id": row["id"], "title": row["title"], "messages": msgs,
-            "updated_at": row["updated_at"]}
+            "summary": row["summary"] or "", "updated_at": row["updated_at"]}
 
 
 class SaveChatRequest(BaseModel):
@@ -152,6 +320,8 @@ class SaveChatRequest(BaseModel):
     chat_id: Optional[str] = None
     title: str = ""
     canvas_id: str = ""
+    # 早前对话的压缩摘要，跟着对话一起存，刷新后还能用
+    summary: str = ""
 
 
 @router.post("/chats")
@@ -169,20 +339,27 @@ def save_chat(payload: SaveChatRequest):
         existing = None
         if payload.chat_id:
             existing = conn.execute(
-                "SELECT id FROM assistant_chats WHERE id = ?", (payload.chat_id,)
-            ).fetchone()
+                "SELECT id, canvas_id FROM assistant_chats WHERE id = ?",
+                (payload.chat_id,)).fetchone()
+        # 对话属于某张画布；chat_id 和画布对不上时不能续写，
+        # 否则会把 A 画布的对话内容写到 B 画布上
+        if existing and payload.canvas_id and (
+                existing["canvas_id"] or "") != payload.canvas_id:
+            existing = None
         if existing:
             conn.execute(
-                "UPDATE assistant_chats SET messages = ?, title = ?, updated_at = ? WHERE id = ?",
-                (json.dumps(msgs, ensure_ascii=False), title, ts, payload.chat_id),
+                "UPDATE assistant_chats SET messages = ?, title = ?, summary = ?, "
+                "updated_at = ? WHERE id = ?",
+                (json.dumps(msgs, ensure_ascii=False), title,
+                 payload.summary or "", ts, payload.chat_id),
             )
             return {"ok": True, "id": payload.chat_id, "title": title}
         chat_id = uuid.uuid4().hex[:16]
         conn.execute(
-            "INSERT INTO assistant_chats(id,title,messages,canvas_id,created_at,updated_at)"
-            " VALUES(?,?,?,?,?,?)",
+            "INSERT INTO assistant_chats(id,title,messages,canvas_id,summary,"
+            "created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
             (chat_id, title, json.dumps(msgs, ensure_ascii=False),
-             payload.canvas_id or "", ts, ts),
+             payload.canvas_id or "", payload.summary or "", ts, ts),
         )
     return {"ok": True, "id": chat_id, "title": title}
 
@@ -205,59 +382,152 @@ async def assistant_chat(payload: AssistantRequest):
     if not payload.messages:
         raise HTTPException(400, "消息不能为空")
 
-    messages: List[Dict[str, str]] = [
-        {"role": "system", "content": SYSTEM_PROMPT + _context_text(payload.context)}
-    ]
-    for m in payload.messages[-20:]:
-        role = m.role if m.role in ("user", "assistant") else "user"
-        messages.append({"role": role, "content": m.content})
+    canvas_id = (payload.canvas_id or "").strip()
 
-    body = {
-        "model": cfg["model"],
-        "messages": messages,
-        "temperature": 0.4,
-        "max_tokens": 2048,
-        "stream": True,
-    }
-    headers = {
-        "Authorization": f"Bearer {cfg['api_key']}",
-        "Content-Type": "application/json",
-        "Accept": "text/event-stream",
-    }
-    url = _endpoint(cfg["base_url"])
+    # 长期记忆：按这一轮的用户问题检索这张画布存过的记忆
+    last_user = ""
+    for m in reversed(payload.messages):
+        if m.role == "user":
+            last_user = m.content or ""
+            break
+    memories = assistant_memory.search(canvas_id, last_user, limit=6) if canvas_id else []
+
+    system_prompt = (
+        SYSTEM_PROMPT
+        + RUNTIME_PROMPT
+        + _canvas_guide()
+        + assistant_memory.render_for_prompt(memories)
+        + _context_text(payload.context)
+    )
+    if payload.summary:
+        system_prompt += f"\n\n## 早前对话的摘要\n{payload.summary}"
+
+    history = [
+        {"role": (m.role if m.role in ("user", "assistant") else "user"),
+         "content": m.content}
+        for m in payload.messages[-20:]
+    ]
 
     async def stream():
-        yield "data: " + json.dumps({"event": "start", "model": cfg["model"]},
-                                    ensure_ascii=False) + "\n\n"
+        yield _sse({"event": "start", "model": cfg["model"]})
+        queue: "asyncio.Queue[Dict[str, Any]]" = asyncio.Queue()
+
+        async def emit(evt: Dict[str, Any]) -> None:
+            await queue.put(evt)
+
+        async def runner() -> None:
+            try:
+                await run_agent(
+                    system_prompt=system_prompt,
+                    messages=history,
+                    canvas_id=canvas_id,
+                    context=payload.context,
+                    cfg=cfg,
+                    on_event=emit,
+                )
+            except Exception as exc:  # noqa: BLE001
+                await emit({"event": "error", "message": f"Agent 执行失败：{exc}"})
+            finally:
+                await queue.put({"event": "__end__"})
+
+        task = asyncio.create_task(runner())
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(180.0, connect=20.0)) as client:
-                async with client.stream("POST", url, json=body, headers=headers) as resp:
-                    if resp.status_code >= 400:
-                        detail = (await resp.aread()).decode("utf-8", "replace")[:400]
-                        yield "data: " + json.dumps(
-                            {"event": "error", "message": f"模型返回 {resp.status_code}：{detail}"},
-                            ensure_ascii=False) + "\n\n"
-                        return
-                    async for raw in resp.aiter_lines():
-                        line = (raw or "").strip()
-                        if not line.startswith("data:"):
-                            continue
-                        data = line[5:].strip()
-                        if data == "[DONE]":
-                            break
-                        try:
-                            obj = json.loads(data)
-                            delta = obj["choices"][0]["delta"].get("content") or ""
-                        except Exception:  # noqa: BLE001
-                            continue
-                        if delta:
-                            yield "data: " + json.dumps(
-                                {"event": "token", "text": delta}, ensure_ascii=False) + "\n\n"
-        except httpx.HTTPError as exc:
-            yield "data: " + json.dumps(
-                {"event": "error", "message": f"请求模型失败：{exc}"}, ensure_ascii=False) + "\n\n"
-            return
-        yield "data: " + json.dumps({"event": "done"}, ensure_ascii=False) + "\n\n"
+            while True:
+                evt = await queue.get()
+                if evt.get("event") == "__end__":
+                    break
+                yield _sse(evt)
+        finally:
+            await task
 
     return StreamingResponse(stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# --------------------------------------------------------------------------- #
+# 上下文压缩：对话变长后把早期内容折成一段摘要
+# --------------------------------------------------------------------------- #
+@router.post("/compress")
+async def compress_chat(payload: CompressRequest):
+    """把较早的对话压成摘要，只保留最近 10 条。
+
+    摘要会随下次请求的 `summary` 字段带回，替代被折掉的原文。
+    """
+    msgs = payload.messages or []
+    keep = 10
+    if len(msgs) <= keep + 4:
+        return {"ok": True, "summary": "", "kept": len(msgs), "dropped": 0}
+
+    older = msgs[:-keep]
+    cfg = _runtime_cfg()
+    if not cfg["api_key"]:
+        raise HTTPException(400, "还没有配置模型 key")
+
+    transcript = "\n".join(
+        f"{'用户' if m.role == 'user' else '助手'}：{m.content[:400]}" for m in older)
+    body = {
+        "model": cfg["model"],
+        "messages": [
+            {"role": "system",
+             "content": "把下面这段对话压缩成一份要点摘要，供后续对话继续使用。"
+                        "保留：用户的目标与约束、已确认的结论、待办事项、画布当前状态的关键变化。"
+                        "不要保留客套话和重复内容。用中文，分条，300 字以内。"},
+            {"role": "user", "content": transcript[:12000]},
+        ],
+        "temperature": 0.2,
+        "max_tokens": 800,
+    }
+    headers = {"Authorization": f"Bearer {cfg['api_key']}",
+               "Content-Type": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=15.0)) as client:
+            resp = await client.post(_endpoint(cfg["base_url"]), json=body, headers=headers)
+            if resp.status_code >= 400:
+                raise HTTPException(502, f"摘要生成失败：{resp.status_code} {resp.text[:200]}")
+            data = resp.json()
+            summary = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"摘要生成失败：{exc}") from exc
+
+    return {"ok": True, "summary": summary.strip(), "kept": keep,
+            "dropped": len(older)}
+
+
+# --------------------------------------------------------------------------- #
+# 长期记忆（按画布）
+# --------------------------------------------------------------------------- #
+@router.get("/memories")
+def list_memories(canvas_id: str):
+    if not canvas_id:
+        raise HTTPException(400, "缺少 canvas_id")
+    return {"ok": True, "memories": assistant_memory.list_all(canvas_id)}
+
+
+@router.post("/memories")
+def add_memory(payload: Dict[str, Any]):
+    canvas_id = str(payload.get("canvas_id") or "")
+    content = str(payload.get("content") or "")
+    if not canvas_id or not content.strip():
+        raise HTTPException(400, "缺少 canvas_id 或 content")
+    try:
+        result = assistant_memory.add(canvas_id, content,
+                                      str(payload.get("kind") or "note"))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, **result}
+
+
+@router.delete("/memories/{memory_id}")
+def delete_memory(memory_id: str):
+    if not assistant_memory.remove(memory_id):
+        raise HTTPException(404, "记忆不存在")
+    return {"ok": True}
+
+
+@router.delete("/memories")
+def clear_memories(canvas_id: str):
+    if not canvas_id:
+        raise HTTPException(400, "缺少 canvas_id")
+    return {"ok": True, "removed": assistant_memory.clear(canvas_id)}

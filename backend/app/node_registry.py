@@ -34,8 +34,12 @@ _CAT_COLOR = {c["id"]: c["color"] for c in CATEGORIES}
 
 
 def P(key: str, label: str, default=None, placeholder: str = "",
-      options=None, help_text: str = "") -> Dict[str, Any]:
-    """参数定义。带 options 的会渲染成下拉框。"""
+      options=None, help_text: str = "", source: str = "") -> Dict[str, Any]:
+    """参数定义。带 options 的会渲染成下拉框。
+
+    source: 该参数要选的是画布里的哪类实例（embedding / vector / data）。
+    前端会据此从「画布配置」里拉实例列表，渲染成「跟随默认 / 具体实例」下拉。
+    """
     item: Dict[str, Any] = {
         "key": key, "label": label, "default": default, "placeholder": placeholder,
     }
@@ -43,6 +47,8 @@ def P(key: str, label: str, default=None, placeholder: str = "",
         item["options"] = options
     if help_text:
         item["help"] = help_text
+    if source:
+        item["source"] = source
     return item
 
 
@@ -115,13 +121,16 @@ _DEFS: List[tuple] = [
     ("file_io", "文件读写", "tool", "▤", "读写项目工作目录下的文件。", ["out"],
      [P("mode", "模式(read/write)", "read"), P("path", "路径", "outputs/note.md")], "python"),
     ("sql_query", "SQL 查询", "tool", "▦", "对配置的数据源执行只读查询；未配置数据源时查项目内置 SQLite。",
-     ["out"], [P("sql", "SQL", ""), P("limit", "返回条数", 100)], "python"),
+     ["out"], [P("data", "数据源", "", "跟随画布默认", source="data"),
+               P("sql", "SQL", ""), P("limit", "返回条数", 100)], "python"),
     ("rag_retriever", "知识库检索", "tool", "◎", "从 skills/ 与 docs/ 做混合召回。", ["out"], [P("top_k", "召回条数", 4)], "python"),
     ("embedding", "向量化", "tool", "⋯", "把文本转成向量（走画布配置的向量模型；未配置则用内置哈希兜底）。",
-     ["out"], [P("model", "模型覆盖（可选）", "")], "python"),
-    ("vector_store", "向量库", "tool", "◫", "向量库的写入与检索：读写画布配置的外部库，未配置则用内置 SQLite。",
+     ["out"], [P("embedding", "向量模型", "", "跟随画布默认", source="embedding"),
+               P("model", "模型覆盖（可选）", "")], "python"),
+    ("vector_store", "向量库", "tool", "◫", "向量库的写入与检索：读写画布配置的向量库，未配置则用内置 SQLite。",
      ["out"],
-     [P("action", "动作(search/upsert)", "search"), P("top_k", "条数", 4),
+     [P("vector_store", "向量库", "", "跟随画布默认", source="vector"),
+      P("action", "动作(search/upsert)", "search"), P("top_k", "条数", 4),
       P("collection", "集合名", "", "留空用画布默认"), P("where", "过滤条件(JSON)", "")], "python"),
     ("mcp_tool", "MCP 工具", "tool", "◌", "调用 MCP 服务器暴露的工具。", ["out"],
      [P("server", "服务地址", ""), P("tool", "工具名", "")], "python"),
@@ -207,9 +216,11 @@ _DEFS: List[tuple] = [
      ["out"], [P("top_k", "返回页数", 3)], "python"),
     ("vector_indexer", "向量入库", "rag", "⤓",
      "把文本块写进画布配置的向量库（未配置则写内置 SQLite）。",
-     ["out"], [P("collection", "集合名", "", "留空用画布默认")], "python"),
+     ["out"], [P("vector_store", "向量库", "", "跟随画布默认", source="vector"),
+               P("collection", "集合名", "", "留空用画布默认")], "python"),
     ("hybrid_retriever", "混合检索", "rag", "⊚", "向量召回 + 关键词召回各取一份。", ["out"],
-     [P("top_k", "每路条数", 4), P("where", "向量过滤(JSON)", "")], "python"),
+     [P("vector_store", "向量库", "", "跟随画布默认", source="vector"),
+      P("top_k", "每路条数", 4), P("where", "向量过滤(JSON)", "")], "python"),
     ("bm25_search", "关键词检索", "rag", "⌕", "基于词频与 IDF 的传统检索。", ["out"],
      [P("top_k", "条数", 6)], "python"),
     ("reranker", "重排 Rerank", "rag", "⇅", "让模型给候选片段打相关性分，取前 K。", ["out"],
@@ -227,14 +238,16 @@ _DEFS: List[tuple] = [
       P("filters", "过滤条件（JSON）", {}, help_text="例如 {\"status\": \"paid\"}，会原样传给数据中台。"),
       P("limit", "条数上限", 100)], "python"),
     ("db_write", "数据写入", "data", "⤒", "执行 INSERT / UPDATE / DELETE，默认禁用需显式放行。", ["out"],
-     [P("sql", "写语句", ""), P("allow", "允许写入", False)], "python"),
+     [P("data", "数据源", "", "跟随画布默认", source="data"),
+      P("sql", "写语句", ""), P("allow", "允许写入", False)], "python"),
     ("kv_store", "键值存储", "data", "▣", "KV 读写，适合存中间结果。", ["out"],
      [P("action", "动作(get/set)", "get"), P("key", "键", "default")], "python"),
     ("cache_lookup", "缓存查询", "data", "⌛", "按输入做键查缓存，命中可跳过重算。", ["out"], [], "python"),
     ("cache_write", "缓存写入", "data", "⧖", "把当前结果写进带 TTL 的缓存。", ["out"],
      [P("key", "缓存键（默认用节点名）", ""), P("ttl", "有效期（秒）", 3600)], "python"),
-    ("graph_query", "图关系查询", "data", "◍", "在项目内三元组表里按关键词查关系。", ["out"],
-     [P("limit", "条数", 20)], "python"),
+    ("graph_query", "图关系查询", "data", "◍", "在配置的图数据库里查关系；未配置时查项目内三元组表。", ["out"],
+     [P("data", "数据源", "", "跟随画布默认", source="data"),
+      P("limit", "条数", 20)], "python"),
 
     # ---------------- 文档与多模态 ----------------
     ("pdf_parser", "PDF 解析", "doc", "▤", "抽取 PDF 正文（需要 pypdf）。", ["out"],

@@ -32,13 +32,15 @@ REQUIREMENTS = {
     "crewai": "crewai>=0.60.0\n",
     # 节点仍用 langchain 的 @tool / create_agent，编排层换成 smolagents
     "smolagents": ("smolagents>=1.0\nlangchain>=1.0\nlangchain-openai>=1.0\n"
-                   "langchain-core>=1.0\n"),
+                   "langchain-core>=1.0\nlanggraph>=1.0\n"),
     "agno": ("agno\nlangchain>=1.0\nlangchain-openai>=1.0\n"
-             "langchain-core>=1.0\n"),
+             "langchain-core>=1.0\nlanggraph>=1.0\n"),
     "openai_agents": ("openai-agents\nopenai\nlangchain>=1.0\n"
-                      "langchain-openai>=1.0\nlangchain-core>=1.0\n"),
+                      "langchain-openai>=1.0\nlangchain-core>=1.0\n"
+                      "langgraph>=1.0\n"),
     "semantic_kernel": ("semantic-kernel\nopenai\nlangchain>=1.0\n"
-                        "langchain-openai>=1.0\nlangchain-core>=1.0\n"),
+                        "langchain-openai>=1.0\nlangchain-core>=1.0\n"
+                        "langgraph>=1.0\n"),
 }
 
 
@@ -498,26 +500,17 @@ def generate_project(name: str, slug: str, framework: str, graph: Dict[str, Any]
         "api_key_env": "MINEAGENT_API_KEY",
     }
 
-    # 向量模型 / 向量库 / 数据源：只写配置，密钥靠环境变量注入
+    # 向量模型 / 向量库 / 数据源：画布级，可有多套；只写配置，密钥靠环境变量注入
     runtime_providers = providers or {}
     provider_env_lines: List[str] = []
-    for kind in ("embedding", "vector", "data"):
-        block = runtime_providers.get(kind)
-        if not block:
-            continue
-        cfg[kind] = strip_secrets(block)
-        env_name = ENV_NAMES.get(kind, f"MINEAGENT_{kind.upper()}_KEY")
-        if block.get("api_key") or block.get("password") or block.get("token"):
-            provider_env_lines.append(f"{env_name}=")
-        cfg[kind + "_env"] = env_name
     if runtime_providers:
-        # 节点参数里可以只写个名字，到这里按名字取整份配置
-        cfg["embedding_named"] = named_bindings({"embedding": runtime_providers["embedding"]}) \
-            if runtime_providers.get("embedding") else {}
-        cfg["vector_named"] = named_bindings({"vector": runtime_providers["vector"]}) \
-            if runtime_providers.get("vector") else {}
-        cfg["data_named"] = named_bindings({"data": runtime_providers["data"]}) \
-            if runtime_providers.get("data") else {}
+        clean = strip_secrets(runtime_providers)
+        for kind, block in clean.items():
+            cfg[kind] = block
+            for _name, item in (block.get("items") or {}).items():
+                env_name = item.get("api_key_env") or ""
+                if env_name and env_name not in provider_env_lines:
+                    provider_env_lines.append(env_name)
 
     write("config.json", json.dumps(cfg, ensure_ascii=False, indent=2))
 
@@ -532,6 +525,14 @@ def generate_project(name: str, slug: str, framework: str, graph: Dict[str, Any]
         REQUIREMENTS.get(framework, "# 无额外依赖（使用内置 runner）\n").rstrip()
         + "\n\n# 服务化依赖（server.py）\n" + render_requirements_extra(session_store)
     )
+    # 画布里用了联网搜索才需要 ddgs；不用就不加，避免无谓依赖
+    if any(n.get("kind") == "web_search" for n in spec["nodes"]):
+        requirements_text += "\n# 联网搜索（web_search 节点）\nddgs>=9.0\n"
+    # 文档加载默认能读 txt/md；要读 PDF / DOCX 才需要这两个（节点里会提示安装）
+    if any(n.get("kind") == "doc_loader" for n in spec["nodes"]):
+        requirements_text += (
+            "\n# 文档加载读 PDF / DOCX 时需要（只读文本文件可以不装）\n"
+            "pypdf>=4.0\npython-docx>=1.1\n")
     write("requirements.txt", requirements_text)
 
     # 生产化文件：把画布的「服务设置」编译成 server / settings / telemetry / checkpoint

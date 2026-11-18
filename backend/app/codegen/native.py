@@ -230,10 +230,31 @@ def _block_tool(node: Dict[str, Any]) -> str:
         )
 
     if kind == "web_search":
-        body = (
-            '    from langchain_community.tools import DuckDuckGoSearchRun\n'
-            '    return DuckDuckGoSearchRun().run(query)\n'
-        )
+        # 用 ddgs：DuckDuckGo 对脚本抓 HTML 会返回 202 反爬页，直接抓拿不到结果。
+        # 没装 ddgs 时给出可照做的安装提示，而不是抛 ModuleNotFoundError。
+        body = '''    try:
+        from ddgs import DDGS
+    except ImportError:
+        return "（联网搜索需要 ddgs：pip install ddgs）"
+
+    try:
+        _rows = DDGS().text(query or "", max_results=5) or []
+    except Exception as _e:  # noqa: BLE001
+        _msg = str(_e)
+        if "No results" in _msg:
+            return "（没有搜到结果，换个关键词试试）"
+        return f"（搜索失败：{_msg}）"
+
+    _out = []
+    for _i, _r in enumerate(_rows[:5], 1):
+        _line = f"{_i}. {_r.get('title') or ''}"
+        if _r.get("body"):
+            _line += "\\n   " + str(_r["body"])
+        if _r.get("href"):
+            _line += "\\n   " + str(_r["href"])
+        _out.append(_line)
+    return "\\n".join(_out) if _out else "（没有搜到结果）"
+'''
         arg = "query: str"
     elif kind == "http_request":
         url = _text(p, "url", "")

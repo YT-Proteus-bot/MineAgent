@@ -178,26 +178,49 @@ E["vector_indexer"] = '''from runtime_sdk import NodeContext
 
 
 def run(ctx: NodeContext):
-    """向量入库：把文本块写进项目内的向量库。"""
-    chunks = ctx.input if isinstance(ctx.input, list) else [ctx.text]
+    """向量入库：把文本块写进画布配置的向量库（未配置则写内置 SQLite）。"""
+    collection = str(ctx.params.get("collection") or "")
+    if collection:
+        ctx.use_collection(collection)
+    # 上游给的是文本列表才按块入库；如果上游直接是向量（embedding 节点的输出），
+    # 说明接线错了——入库要接在文本后面，这里直接跳过并提示
+    raw = ctx.input
+    if isinstance(raw, list) and raw and all(isinstance(x, (int, float)) for x in raw):
+        ctx.log("上游是向量而不是文本：vector_indexer 应接在文本节点后面", "warn")
+        return {"indexed": 0, "skipped": "vector_input"}
+    if isinstance(raw, list) and raw and all(isinstance(x, str) for x in raw):
+        chunks = raw
+    else:
+        chunks = [ctx.text]
     count = 0
     for chunk in chunks:
         text = chunk if isinstance(chunk, str) else str(chunk)
         if text.strip():
             ctx.vector_upsert(text)
             count += 1
-    ctx.emit("indexed", {"count": count})
-    return {"indexed": count}
+    ctx.emit("indexed", {"count": count,
+                         "backend": ctx.vector_config.get("protocol", "sqlite"),
+                         "collection": ctx.vector_collection})
+    # 带上原文：下游的 ctx.text 才能继续拿到文本，而不是一串计数
+    return {"indexed": count, "text": ctx.text}
 '''
 
 E["hybrid_retriever"] = '''from runtime_sdk import NodeContext
+
+import json as _json
 
 
 def run(ctx: NodeContext):
     """混合检索：向量库召回 + 文件关键词召回各取一份。"""
     top_k = int(ctx.params.get("top_k", 4))
     query = ctx.state.get("query") or ctx.text
-    vec = ctx.vector_search(query, top_k=top_k)
+    where = ctx.params.get("where") or ""
+    if isinstance(where, str) and where.strip():
+        try:
+            where = _json.loads(where)
+        except Exception:
+            where = None
+    vec = ctx.vector_search(query, top_k=top_k, where=where)
     kw = ctx.retrieve(query, top_k=top_k, mode="keyword")
     ctx.emit("hybrid", {"vector": len(vec), "keyword": len(kw)})
     return {"query": query, "vector": vec, "keyword": kw}
@@ -315,11 +338,16 @@ E["db_write"] = '''from runtime_sdk import NodeContext
 
 def run(ctx: NodeContext):
     """数据写入：执行 INSERT / UPDATE / DELETE（只允许显式开启）。"""
-    sql = ctx.params.get("sql") or ""
+    sql = (ctx.params.get("sql") or "").strip()
     if not sql:
         raise ValueError("db_write 需要在参数 sql 里填写写语句")
     if not ctx.params.get("allow", False):
         raise PermissionError("写操作默认禁用，请把参数 allow 设为 true")
+    if ctx.data_config:
+        affected = ctx.write_data(sql)
+        ctx.emit("db_write", {"affected": affected,
+                              "source": ctx.data_config.get("protocol", "")})
+        return {"affected": affected}
     return ctx.exec_sql(sql, readonly=False)
 '''
 
@@ -360,8 +388,15 @@ E["graph_query"] = '''from runtime_sdk import NodeContext
 
 
 def run(ctx: NodeContext):
-    """图查询：在项目内的三元组表里按关键词找关系。"""
-    return ctx.graph_query(ctx.text, limit=int(ctx.params.get("limit", 20)))
+    """图查询：配了图数据库就走它（Cypher 等），否则查项目内的三元组表。"""
+    limit = int(ctx.params.get("limit", 20))
+    if ctx.data_config:
+        statement = ctx.params.get("query") or ctx.text
+        rows = ctx.query_data(statement, limit=limit)
+        ctx.emit("graph", {"rows": len(rows),
+                           "source": ctx.data_config.get("protocol", "")})
+        return rows
+    return ctx.graph_query(ctx.text, limit=limit)
 '''
 
 # --------------------------------------------------------------------------- #

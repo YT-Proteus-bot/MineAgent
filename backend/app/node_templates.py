@@ -286,9 +286,15 @@ T["sql_query"] = '''from runtime_sdk import NodeContext
 
 
 def run(ctx: NodeContext):
-    """对 SQLite 数据库执行只读查询。"""
-    sql = ctx.params.get("sql") or ctx.text
-    rows = ctx.query_sql(sql)
+    """SQL 查询：优先走「数据源」里配置的库，没配则查项目内置 SQLite。"""
+    sql = (ctx.params.get("sql") or ctx.text or "").strip()
+    if not sql:
+        raise ValueError("sql_query 需要在参数 sql 里填写查询语句")
+    if ctx.data_config:
+        rows = ctx.query_data(sql, limit=int(ctx.params.get("limit", 100)))
+    else:
+        rows = ctx.query_sql(sql)
+    ctx.emit("sql", {"rows": len(rows), "source": ctx.data_config.get("protocol", "sqlite")})
     return rows
 '''
 
@@ -306,19 +312,34 @@ T["embedding"] = '''from runtime_sdk import NodeContext
 
 
 def run(ctx: NodeContext):
-    """文本向量化。"""
-    return ctx.embed(ctx.text)
+    """文本向量化：走画布配置的向量模型；没配就用内置哈希兜底。"""
+    if ctx.params.get("model"):
+        ctx.embedding_config = {**ctx.embedding_config, "model": str(ctx.params["model"])}
+    vec = ctx.embed(ctx.text)
+    ctx.emit("embedding", {"dim": len(vec), "backend": ctx.embedding_config.get("provider", "local")})
+    return vec
 '''
 
 T["vector_store"] = '''from runtime_sdk import NodeContext
 
+import json as _json
+
 
 def run(ctx: NodeContext):
-    """本地向量库读写（SQLite 存储，余弦相似度检索）。"""
-    action = ctx.params.get("action", "search")
+    """向量库读写：读写画布配置的外部库；没配就用内置 SQLite。"""
+    collection = str(ctx.params.get("collection") or "")
+    if collection:
+        ctx.use_collection(collection)
+    action = str(ctx.params.get("action") or "search").lower()
     if action == "upsert":
-        return ctx.vector_upsert(ctx.text)
-    return ctx.vector_search(ctx.text, top_k=ctx.params.get("top_k", 4))
+        return ctx.vector_upsert(ctx.text, {"node": ctx.node_name})
+    where = ctx.params.get("where") or ""
+    if isinstance(where, str) and where.strip():
+        try:
+            where = _json.loads(where)
+        except Exception:
+            where = None
+    return ctx.vector_search(ctx.text, top_k=int(ctx.params.get("top_k", 4)), where=where)
 '''
 
 T["mcp_tool"] = '''from runtime_sdk import NodeContext

@@ -72,7 +72,7 @@ def run(ctx: NodeContext):
     },
     "web_search": {
         "label": "联网搜索",
-        "description": "用 DuckDuckGo 搜索并返回摘要（需要 langchain-community）。",
+        "description": "用 DuckDuckGo 搜索并返回前几条结果摘要（纯标准库，无额外依赖）。",
         "params": [],
         "args": "query: str",
         "preview": '''from runtime_sdk import NodeContext
@@ -82,9 +82,28 @@ def run(ctx: NodeContext):
     """联网搜索：返回前几条摘要。"""
     return ctx.search(ctx.text, limit=5)
 ''',
-        "native": '''    from langchain_community.tools import DuckDuckGoSearchRun
+        "native": '''    try:
+        from ddgs import DDGS
+    except ImportError:
+        return "（联网搜索需要 ddgs：pip install ddgs）"
 
-    return DuckDuckGoSearchRun().run(query)
+    try:
+        _rows = DDGS().text(query or "", max_results=5) or []
+    except Exception as _e:  # noqa: BLE001
+        _msg = str(_e)
+        if "No results" in _msg:
+            return "（没有搜到结果，换个关键词试试）"
+        return f"（搜索失败：{_msg}）"
+
+    _out = []
+    for _i, _r in enumerate(_rows[:5], 1):
+        _line = f"{_i}. {_r.get('title') or ''}"
+        if _r.get("body"):
+            _line += "\\n   " + str(_r["body"])
+        if _r.get("href"):
+            _line += "\\n   " + str(_r["href"])
+        _out.append(_line)
+    return "\\n".join(_out) if _out else "（没有搜到结果）"
 ''',
     },
     "calculator": {

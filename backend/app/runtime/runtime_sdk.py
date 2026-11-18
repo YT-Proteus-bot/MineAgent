@@ -382,24 +382,46 @@ class NodeContext:
 
     def _provider_cfg(self, section: str, explicit: Optional[Dict[str, Any]],
                       from_params: Optional[Any]) -> Dict[str, Any]:
-        """按 节点参数 → 显式传入 → config.json 的优先级合并一份 provider 配置。"""
-        merged: Dict[str, Any] = {}
-        base = self.config.get(section)
-        if isinstance(base, dict):
-            merged.update(base)
+        """选出一个实例的配置。
+
+        config.json 里的结构是 {"default": 名字, "items": {名字: 配置}}；
+        老项目是单个 dict，这里兼容掉。优先级：
+            节点参数里写的实例名 > 显式传入 > 画布默认 > 第一条。
+        """
+        block = self.config.get(section)
+        items: Dict[str, Any] = {}
+        default_name = ""
+        if isinstance(block, dict) and isinstance(block.get("items"), dict):
+            items = block["items"]
+            default_name = str(block.get("default") or "")
+        elif isinstance(block, dict) and block:
+            items = {"default": block}
+            default_name = "default"
+
+        wanted = ""
+        if isinstance(from_params, str) and from_params.strip():
+            wanted = from_params.strip()
+        elif isinstance(from_params, dict):
+            wanted = str(from_params.get("_name") or "")
+
+        chosen: Dict[str, Any] = {}
+        if wanted and isinstance(items.get(wanted), dict):
+            chosen = dict(items[wanted])
+        elif default_name and isinstance(items.get(default_name), dict):
+            chosen = dict(items[default_name])
+        elif items:
+            first = next(iter(items.values()))
+            if isinstance(first, dict):
+                chosen = dict(first)
+
         if isinstance(explicit, dict):
-            merged.update(explicit)
+            chosen.update({k: v for k, v in explicit.items() if k != "_name"})
         if isinstance(from_params, dict):
-            merged.update(from_params)
-        elif isinstance(from_params, str) and from_params.strip():
-            # 节点里只填了个名字：去 config.json 的同名清单里找
-            named = (self.config.get(section + "_named") or {}).get(from_params.strip())
-            if isinstance(named, dict):
-                merged.update(named)
-        if not merged:
+            chosen.update({k: v for k, v in from_params.items() if k != "_name"})
+        if not chosen:
             return {}
-        env_name = merged.get("api_key_env") or ""
-        return _apply_secret_env(merged, str(env_name))
+        env_name = chosen.get("api_key_env") or ""
+        return _apply_secret_env(chosen, str(env_name))
 
     def _effective_config(self) -> Dict[str, Any]:
         """节点级模型配置优先于项目 config.json。"""
@@ -743,9 +765,41 @@ class NodeContext:
         return text[:limit]
 
     def search(self, query: str, limit: int = 5) -> str:
+        """联网搜索。
+
+        优先用 ddgs（它处理了 DuckDuckGo 对脚本请求的反爬，返回结构化结果）；
+        没装 ddgs 时退回直接抓 HTML —— 后者经常被反爬拦成空页，所以会带上提示。
+        """
         try:
-            url = "https://duckduckgo.com/html/?q=" + urllib.parse.quote(query)
+            from ddgs import DDGS  # type: ignore
+
+            rows = DDGS().text(query, max_results=max(1, int(limit))) or []
+            lines: List[str] = []
+            for idx, row in enumerate(rows[:max(1, int(limit))], 1):
+                title = str(row.get("title") or "").strip()
+                body = str(row.get("body") or "").strip()
+                href = str(row.get("href") or "").strip()
+                line = f"{idx}. {title}"
+                if body:
+                    line += "\n   " + body
+                if href:
+                    line += "\n   " + href
+                lines.append(line)
+            if lines:
+                return "\n".join(lines)
+            return "（ddgs 没有返回结果，换个关键词试试）"
+        except ImportError:
+            pass
+        except Exception as exc:  # noqa: BLE001
+            if "No results" in str(exc):
+                return "（没有搜到结果，换个关键词试试）"
+            self.log(f"ddgs 搜索失败，改用直接抓取：{exc}", "warn")
+
+        try:
+            url = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(query)
             page = self.fetch_text(url, limit=20000)
+            if "result__a" not in page:
+                return "（直接抓取被反爬拦了。装 ddgs 可稳定联网搜索：pip install ddgs）"
             return page[:4000]
         except Exception as exc:  # noqa: BLE001
             self.log(f"联网搜索失败：{exc}", "warn")
