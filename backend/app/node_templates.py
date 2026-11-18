@@ -589,22 +589,38 @@ T["supervisor"] = '''from runtime_sdk import NodeContext
 
 
 def run(ctx: NodeContext):
-    """主管：按画布上配置的组织关系，把任务分派给下级 agent，再汇总结果。
+    """主管（Super-agent 的 Router 层）：把任务拆给多个下级并行执行，再汇总。
 
     下级来自节点属性里的「下级 agent」；没配就回退到 params.workers。
+    多个 worker 是并行跑的，互不阻塞；某个失败不会拖垮整体，
+    失败项会写进最终提示里，方便主管决定重试还是降级。
     """
     names = ctx.subordinates or ctx.params.get("workers", [])
     if not names:
         return ctx.agent(task=ctx.text, tools=ctx.tools,
                          mode=ctx.params.get("mode", "react"),
                          max_steps=ctx.params.get("max_steps", 6))
-    results = {}
-    for name in names:
-        ctx.log(f"分派给下级：{name}")
-        results[name] = ctx.delegate(name, ctx.text)
-    summary = "\\n\\n".join(f"### {k}\\n{v}" for k, v in results.items())
+
+    tasks = [(name, ctx.text) for name in names]
+    ctx.log(f"并行分派给 {len(tasks)} 个下级：{', '.join(names)}")
+    results = ctx.delegate_many(
+        tasks,
+        max_workers=int(ctx.params.get("max_workers", 4)),
+        timeout=float(ctx.params.get("timeout", 180)),
+    )
+
+    done = [r for r in results if r.get("ok")]
+    failed = [r for r in results if not r.get("ok")]
+    summary = "\\n\\n".join(f"### {r['worker']}\\n{r.get('output')}" for r in done)
+    if failed:
+        summary += "\\n\\n### 失败的子任务\\n" + "\\n".join(
+            f"- {r['worker']}：{r.get('error', '')}" for r in failed
+        )
+    ctx.state["worker_results"] = results
+
     return ctx.llm(
-        f"原始任务：{ctx.text}\\n\\n各下级的结果：\\n{summary}\\n\\n请汇总输出最终答案。",
+        f"原始任务：{ctx.text}\\n\\n各下级的结果：\\n{summary}\\n\\n"
+        f"请汇总输出最终答案；有失败项时说明哪部分没完成。",
         system="你是主管，只输出整合后的结论。",
     )
 '''

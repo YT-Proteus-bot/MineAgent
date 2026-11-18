@@ -565,6 +565,43 @@ wiki/
 `agent.py` 里这两个节点也用纯 Python 实现（不 import runtime_sdk），
 所以导出的项目即使删掉 SDK 也能跑。
 
+### Super-agent：Router + Worker 双层
+
+参考 [DeepSeek Super-agent](https://github.com/deepseek-ai/dsh-superagent-prototype) 的双层结构，
+画布上新增了 `super_agent` 模式模板：
+
+```
+input → Router（主管）→ Worker A ┐
+                      → Worker B ┴→ 汇总 → output
+```
+
+**Router 层**（`supervisor` 节点）会把任务并行派给多个 Worker：
+
+```python
+results = ctx.delegate_many(
+    [(name, ctx.text) for name in ctx.subordinates],
+    max_workers=4, timeout=180,
+)
+```
+
+- 多个 worker 用线程池并行跑，互不阻塞
+- **单个 worker 失败不会拖垮整体**——失败项会整理进最终提示，由 Router 决定重试还是降级
+- 派发 / 完成都有事件（`delegate_start` / `delegate_done`），画布上能看到谁在跑
+
+**能力边界（重要）**：
+
+| 运行模式 | 并行派发 | 说明 |
+|---|---|---|
+| 零依赖预览（runner） | ✅ 完整支持 | `delegate_many` 真并行 |
+| 原生运行（agent.py） | ⚠ 结构上并行 | LangGraph 会把 Router 的多个后继**并行执行**，但 Router 内部不做「拆任务 + 定向派发」，两个 Worker 拿到的是同一份输入 |
+
+也就是说：**预览模式能验证完整的 Router/Worker 语义，原生模式目前表达的是
+"并行分支 + 汇总"**。要做到原生模式也定向派发，需要 LangGraph 的 `Send` API
+或 map-reduce 模式，属于后续工作。
+
+常驻调度（Router 7×24 监听 IM / GitHub 事件、Watchdog 自恢复）属于**服务层**，
+目前只在服务设置里预留了并发、超时、断点续跑等配置项，事件源接入还没做。
+
 | 分类 | 节点 |
 | --- | --- |
 | 输入输出 | `input` 输入、`output` 输出 |

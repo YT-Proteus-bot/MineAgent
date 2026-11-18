@@ -25,7 +25,8 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 EVENT_PREFIX = "@@EVENT@@"
 EVENT_STREAM = sys.stdout
@@ -360,6 +361,42 @@ class NodeContext:
         emit_event({"event": "delegate", "node": self.node_id, "from": self.node_name,
                     "to": name, "task": str(task)[:600]})
         return self._delegate_fn(name, task)
+
+    def delegate_many(self, tasks: List[Tuple[str, Any]], max_workers: int = 4,
+                      timeout: float = 180.0) -> List[Dict[str, Any]]:
+        """并行派给多个 agent（Super-agent 的 Worker 层）。
+
+        多个 worker 各自独立跑，互不阻塞；任何一个失败不会拖垮其它，
+        结果里会标明成功还是失败。
+        """
+        if self._delegate_fn is None:
+            raise RuntimeError("当前运行环境不支持委派（runner 未注入 delegate）")
+        if not tasks:
+            return []
+
+        def run_one(idx: int, name: str, task: Any) -> Dict[str, Any]:
+            started = time.time()
+            emit_event({"event": "delegate_start", "node": self.node_id, "worker": name,
+                        "index": idx, "task": str(task)[:300]})
+            try:
+                out = self._delegate_fn(name, task)
+                return {"worker": name, "ok": True, "output": out,
+                        "duration_ms": int((time.time() - started) * 1000)}
+            except Exception as exc:  # noqa: BLE001
+                return {"worker": name, "ok": False, "error": str(exc)[:500],
+                        "duration_ms": int((time.time() - started) * 1000)}
+
+        results: List[Dict[str, Any]] = []
+        with ThreadPoolExecutor(max_workers=max(1, max_workers)) as pool:
+            futures = [pool.submit(run_one, i, n, t) for i, (n, t) in enumerate(tasks)]
+            for fut in as_completed(futures, timeout=timeout):
+                try:
+                    results.append(fut.result())
+                except Exception as exc:  # noqa: BLE001
+                    results.append({"worker": "?", "ok": False, "error": str(exc)[:500]})
+        emit_event({"event": "delegate_done", "node": self.node_id,
+                    "total": len(results), "failed": sum(1 for r in results if not r["ok"])})
+        return results
 
     # ---- 输入 ----
     @property

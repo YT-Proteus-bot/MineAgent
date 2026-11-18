@@ -309,6 +309,20 @@ TPL: Dict[str, Dict[str, Any]] = {
         ],
         "links": [[0, 1], [1, 2], [2, 1], [1, 3], [3, 4]],
     },
+    "super_agent": {
+        "name": "Super-agent",
+        "summary": "Router 统一接单并拆活，多个 Worker 并行推进、互不干扰，最后汇总；单个 worker 失败不拖垮整体。",
+        "nodes": [
+            ("input", "输入", {}, "input"),
+            # 下标 2、3 是下面两个 worker，用组织关系挂到 Router 名下
+            ("supervisor", "Router（主管）", {"_org_subs": [2, 3], "max_workers": 4}, "main"),
+            ("worker", "Worker A", {"role": "问题复现与定位", "mode": "react"}, "aux"),
+            ("worker", "Worker B", {"role": "修复与自测", "mode": "react"}, "aux"),
+            ("merge", "汇总", {}, "aux"),
+            ("output", "输出", {}, "output"),
+        ],
+        "links": [[0, 1], [1, 2], [1, 3], [2, 4], [3, 4], [4, 5]],
+    },
 
     # ------------------------------------------------------------------ 框架专有
     "code_agent": {
@@ -438,10 +452,26 @@ def build_mode_graph(mode: str, framework: str = "langchain") -> Dict[str, Any]:
     t = template_for(mode)
     specs = t["nodes"]
     nodes: List[Dict[str, Any]] = []
+    # 先把节点名定下来，才好给组织关系互相引用
+    names = [f"{_spec[0]}_{i}" for i, _spec in enumerate(specs, 1)]
+
     for i, (kind, label, params, role) in enumerate(specs, 1):
-        meta = get_node_type(kind)
+        from .node_registry import get_node_type as _gnt
+
+        meta = _gnt(kind)
         defaults = {p["key"]: p.get("default") for p in meta.get("params", [])}
         merged = {**defaults, **(params or {})}
+        # _org_subs / _org_peer 放的是下标，转成节点 id 和名字
+        subs_idx = merged.pop("_org_subs", None)
+        peer_idx = merged.pop("_org_peer", None)
+        org: Dict[str, Any] = {}
+        if subs_idx:
+            org["subordinates"] = [f"n{int(x) + 1}" for x in subs_idx]
+            org["subordinate_names"] = [names[int(x)] for x in subs_idx]
+        if peer_idx:
+            org["peers"] = [f"n{int(x) + 1}" for x in peer_idx]
+            org["peer_names"] = [names[int(x)] for x in peer_idx]
+
         nodes.append({
             "id": f"n{i}",
             "type": "agent",
@@ -449,11 +479,12 @@ def build_mode_graph(mode: str, framework: str = "langchain") -> Dict[str, Any]:
             "data": {
                 "kind": kind,
                 "label": label or meta["label"],
-                "name": f"{kind}_{i}",
+                "name": names[i - 1],
                 "description": meta.get("description", ""),
                 "code": "",
                 "language": "python",
                 "params": merged,
+                "org": org,
                 "role": role,
             },
         })
