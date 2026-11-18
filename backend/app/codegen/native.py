@@ -106,7 +106,7 @@ def _llm_decl(node: Dict[str, Any]) -> str:
         f"{var} = ChatOpenAI(\n"
         f"    model={model_expr},\n"
         f"    base_url={base_expr},\n"
-        f'    api_key=os.environ.get("{env}") or os.environ.get("MINEAGENT_API_KEY") or "EMPTY",\n'
+        f'    api_key=_secret("{env}") or _secret("MINEAGENT_API_KEY") or "EMPTY",\n'
         f"    temperature={temp_expr},\n"
         f"    timeout=float(os.environ.get(\"MINEAGENT_LLM_TIMEOUT\") or 120),\n"
         f"    callbacks=[_USAGE_HANDLER],\n"
@@ -980,6 +980,12 @@ from langgraph.types import Command, interrupt
 HERE = Path(__file__).resolve().parent
 CFG = json.loads((HERE / "config.json").read_text(encoding="utf-8"))
 
+try:  # 密钥优先走 secret_store（可接 Vault / 受控文件），没有就退回环境变量
+    from secret_store import get_secret as _secret
+except Exception:  # noqa: BLE001
+    def _secret(name: str, default: str = "") -> str:
+        return os.environ.get(name, default)
+
 
 # ── token 用量：按运行上下文累计，一次 run 结束由 take_usage() 取走 ──
 # 用 ContextVar 而不是线程局部变量：节点是在线程池里执行的，只有复制上下文
@@ -1114,7 +1120,7 @@ def idempotent(node_id: str):
 llm = ChatOpenAI(
     model=os.environ.get("MINEAGENT_MODEL") or CFG.get("model", "deepseek-chat"),
     base_url=os.environ.get("MINEAGENT_BASE_URL") or CFG.get("base_url"),
-    api_key=os.environ.get("MINEAGENT_API_KEY") or "EMPTY",
+    api_key=_secret("MINEAGENT_API_KEY") or "EMPTY",
     temperature=CFG.get("temperature", 0.3),
     max_tokens=CFG.get("max_tokens", 2048),
     # 超时必须在 HTTP 层生效：节点级 _track 的超时只是兜底，
@@ -1405,7 +1411,7 @@ llm_config = {{
 
 client = OpenAI(
     base_url=os.environ.get("MINEAGENT_BASE_URL") or CFG.get("base_url"),
-    api_key=os.environ.get("MINEAGENT_API_KEY") or "EMPTY",
+    api_key=_secret("MINEAGENT_API_KEY") or "EMPTY",
 )
 
 
@@ -1446,7 +1452,7 @@ CFG = json.loads((HERE / "config.json").read_text(encoding="utf-8"))
 llm = ChatOpenAI(
     model=os.environ.get("MINEAGENT_MODEL") or CFG.get("model", "deepseek-chat"),
     base_url=os.environ.get("MINEAGENT_BASE_URL") or CFG.get("base_url"),
-    api_key=os.environ.get("MINEAGENT_API_KEY") or "EMPTY",
+    api_key=_secret("MINEAGENT_API_KEY") or "EMPTY",
     temperature=CFG.get("temperature", 0.3),
 )
 
@@ -1475,7 +1481,7 @@ from smolagents import OpenAIServerModel, Tool, ToolCallingAgent
 smol_model = OpenAIServerModel(
     model_id=os.environ.get("MINEAGENT_MODEL") or CFG.get("model", "gpt-4o-mini"),
     api_base=os.environ.get("MINEAGENT_BASE_URL") or CFG.get("base_url"),
-    api_key=os.environ.get("MINEAGENT_API_KEY") or "EMPTY",
+    api_key=_secret("MINEAGENT_API_KEY") or "EMPTY",
 )
 
 
@@ -1500,7 +1506,7 @@ from agno.models.openai import OpenAIChat
 agno_model = OpenAIChat(
     id=os.environ.get("MINEAGENT_MODEL") or CFG.get("model", "gpt-4o-mini"),
     base_url=os.environ.get("MINEAGENT_BASE_URL") or CFG.get("base_url"),
-    api_key=os.environ.get("MINEAGENT_API_KEY") or "EMPTY",
+    api_key=_secret("MINEAGENT_API_KEY") or "EMPTY",
 )
 
 
@@ -1524,7 +1530,7 @@ from openai import AsyncOpenAI
 
 agent_client = AsyncOpenAI(
     base_url=os.environ.get("MINEAGENT_BASE_URL") or CFG.get("base_url"),
-    api_key=os.environ.get("MINEAGENT_API_KEY") or "EMPTY",
+    api_key=_secret("MINEAGENT_API_KEY") or "EMPTY",
 )
 
 agent_model = OpenAIChatCompletionsModel(
@@ -1556,7 +1562,7 @@ sk_kernel.add_service(OpenAIChatCompletion(
     ai_model_id=os.environ.get("MINEAGENT_MODEL") or CFG.get("model", "gpt-4o-mini"),
     async_client=AsyncOpenAI(
         base_url=os.environ.get("MINEAGENT_BASE_URL") or CFG.get("base_url"),
-        api_key=os.environ.get("MINEAGENT_API_KEY") or "EMPTY",
+        api_key=_secret("MINEAGENT_API_KEY") or "EMPTY",
     ),
 ))
 ''',

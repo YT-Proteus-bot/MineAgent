@@ -556,6 +556,13 @@ def generate_project(name: str, slug: str, framework: str, graph: Dict[str, Any]
         "\n# 可观测：trace 落盘（留空则不落）/ OTel 导出（留空则不导出）\n"
         "MINEAGENT_TRACE_FILE=outputs/traces/{date}.jsonl\n"
         "MINEAGENT_OTEL_ENDPOINT=\n"
+        "\n# 密钥来源：env（默认）/ file / vault；环境变量仍然优先\n"
+        "MINEAGENT_SECRETS=env\n"
+        "MINEAGENT_SECRETS_FILE=\n"
+        "MINEAGENT_VAULT_ADDR=\n"
+        "MINEAGENT_VAULT_TOKEN=\n"
+        "MINEAGENT_VAULT_MOUNT=secret\n"
+        "MINEAGENT_VAULT_PATH=mineagent\n"
         "\n# 向量模型 / 向量库 / 数据源的访问密钥（在网页「用户中心」配置过则不用填）\n"
         + "".join(line + "\n" for line in provider_env_lines)
         + "\n# 外部数据中台（服务设置 → 数据连接）\n"
@@ -803,6 +810,19 @@ def _readme(name: str, slug: str, framework: str, spec: Dict[str, Any]) -> str:
         "- 接 OTel：`MINEAGENT_OTEL_ENDPOINT=http://collector:4318/v1/traces`，",
         "  需要 `pip install opentelemetry-sdk opentelemetry-exporter-otlp-proto-http`；",
         "  没装会在启动日志里明确告警，不会静默不导出",
+        "",
+        "## 密钥放哪",
+        "",
+        "默认还是环境变量（跟以前一样）；现场想用受控文件或 Vault 时改 `MINEAGENT_SECRETS`，代码不用动：",
+        "",
+        "| 取值 | 需要配 | 说明 |",
+        "| --- | --- | --- |",
+        "| `env`（默认） | — | 只读环境变量 |",
+        "| `file` | `MINEAGENT_SECRETS_FILE=/etc/mineagent/secrets.json` | JSON 键值，建议 `chmod 600` |",
+        "| `vault` | `MINEAGENT_VAULT_ADDR` / `_TOKEN` / `_MOUNT` / `_PATH` | Vault KV v2 |",
+        "",
+        "查找顺序默认「环境变量 → provider」，设 `MINEAGENT_SECRETS_PRIORITY=provider` 可反过来。",
+        "provider 连不上只告警一次并退回环境变量，服务照常起；`/ready.secrets` 会显示当前来源与是否配齐。",
         "",
         "## 压测与验收",
         "",

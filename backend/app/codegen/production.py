@@ -167,6 +167,15 @@ def load_settings() -> Settings:
 
 settings = load_settings()
 
+# 服务鉴权 key 允许放在 Vault / 受控文件里（环境变量仍然是最高优先级）
+try:
+    from secret_store import get_secret as _get_secret
+
+    if not settings.api_key:
+        settings.api_key = _get_secret("MINEAGENT_SERVICE_KEY", "")
+except Exception:  # noqa: BLE001
+    pass
+
 
 if __name__ == "__main__":
     data = settings.model_dump()
@@ -333,6 +342,12 @@ import os
 import sqlite3
 from pathlib import Path
 
+try:
+    from secret_store import get_secret as _secret
+except Exception:  # noqa: BLE001
+    def _secret(name: str, default: str = "") -> str:
+        return os.environ.get(name, default)
+
 
 def get_checkpointer():
     store = (os.environ.get("MINEAGENT_SESSION_STORE") or "sqlite").lower()
@@ -364,7 +379,7 @@ def get_checkpointer():
             from langgraph.checkpoint.postgres import PostgresSaver
             import psycopg
 
-            conn = psycopg.connect(os.environ["DATABASE_URL"], autocommit=True)
+            conn = psycopg.connect(_secret("DATABASE_URL"), autocommit=True)
             saver = PostgresSaver(conn)
             saver.setup()
             return saver
@@ -405,7 +420,12 @@ except Exception:  # noqa: BLE001
 
 
 def _token() -> str:
-    return os.environ.get(CONF.get("secret_ref") or "MINEAGENT_DATA_TOKEN", "")
+    name = CONF.get("secret_ref") or "MINEAGENT_DATA_TOKEN"
+    try:
+        from secret_store import get_secret
+        return get_secret(name, "")
+    except Exception:  # noqa: BLE001
+        return os.environ.get(name, "")
 
 
 def _headers() -> dict:
@@ -511,7 +531,12 @@ except Exception:  # noqa: BLE001
 
 
 def _token() -> str:
-    return os.environ.get(CONF.get("secret_ref") or "MINEAGENT_EVAL_TOKEN", "")
+    name = CONF.get("secret_ref") or "MINEAGENT_EVAL_TOKEN"
+    try:
+        from secret_store import get_secret
+        return get_secret(name, "")
+    except Exception:  # noqa: BLE001
+        return os.environ.get(name, "")
 
 
 def _headers() -> dict:
@@ -688,6 +713,11 @@ from pydantic import BaseModel
 import agent as flow
 from settings import settings
 from telemetry import init_observability, log_event, metrics, span, trace_event
+
+try:
+    import secret_store as _secrets
+except Exception:  # noqa: BLE001
+    _secrets = None
 
 try:
     from checkpoint import get_checkpointer
@@ -887,6 +917,8 @@ def ready():
                 "unimplemented": list(settings.UNIMPLEMENTED)}}
     if _sandbox is not None:
         payload["sandbox"] = _sandbox.describe()
+    if _secrets is not None:
+        payload["secrets"] = _secrets.status()
     return JSONResponse(payload, status_code=200 if not missing else 503)
 
 
@@ -1838,6 +1870,158 @@ def render_loadtest() -> Dict[str, str]:
     }
 
 
+_SECRET_STORE_PY = '''"""密钥读取：环境变量优先，没有就去 Vault / 本地文件里找。
+
+默认行为跟以前完全一样（只读环境变量）；私有化现场想用 Vault 或受控文件时，
+改 MINEAGENT_SECRETS 即可，业务代码不用动：
+
+    env      （默认）只读环境变量
+    file     读 MINEAGENT_SECRETS_FILE 指向的 JSON（建议 0600）
+    vault    读 Vault KV v2：MINEAGENT_VAULT_ADDR / _TOKEN / _MOUNT / _PATH
+
+查找顺序默认是「环境变量 → provider」，设 MINEAGENT_SECRETS_PRIORITY=provider 可反过来。
+provider 出错只告警一次并退回环境变量，不会让服务起不来。
+"""
+from __future__ import annotations
+
+import json
+import os
+import threading
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+_LOCK = threading.Lock()
+_CACHE: dict = {}
+_WARNED: set = set()
+_FILE_STATE: dict = {"mtime": 0.0, "data": {}}
+
+
+def provider_name() -> str:
+    return (os.environ.get("MINEAGENT_SECRETS") or "env").strip().lower()
+
+
+def _priority() -> str:
+    return (os.environ.get("MINEAGENT_SECRETS_PRIORITY") or "env").strip().lower()
+
+
+def _warn_once(key: str, message: str) -> None:
+    if key in _WARNED:
+        return
+    _WARNED.add(key)
+    print(f"[secrets] {message}", flush=True)
+
+
+def _from_file(name: str) -> str:
+    path = (os.environ.get("MINEAGENT_SECRETS_FILE") or "").strip()
+    if not path:
+        return ""
+    target = Path(path)
+    if not target.exists():
+        _warn_once("file-missing", f"密钥文件不存在：{path}")
+        return ""
+    with _LOCK:
+        try:
+            mtime = target.stat().st_mtime
+            if mtime != _FILE_STATE["mtime"]:
+                _FILE_STATE["data"] = json.loads(target.read_text(encoding="utf-8")) or {}
+                _FILE_STATE["mtime"] = mtime
+            return str(_FILE_STATE["data"].get(name) or "")
+        except Exception as exc:  # noqa: BLE001
+            _warn_once("file-error", f"读取密钥文件失败：{exc}")
+            return ""
+
+
+def _from_vault(name: str) -> str:
+    addr = (os.environ.get("MINEAGENT_VAULT_ADDR") or "").strip().rstrip("/")
+    token = (os.environ.get("MINEAGENT_VAULT_TOKEN") or "").strip()
+    if not addr or not token:
+        _warn_once("vault-config", "Vault 未配置完整（需要 MINEAGENT_VAULT_ADDR 与 MINEAGENT_VAULT_TOKEN）")
+        return ""
+    mount = (os.environ.get("MINEAGENT_VAULT_MOUNT") or "secret").strip("/")
+    path = (os.environ.get("MINEAGENT_VAULT_PATH") or "mineagent").strip("/")
+    url = f"{addr}/v1/{mount}/data/{path}"
+    req = urllib.request.Request(url, headers={"X-Vault-Token": token})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            payload = json.loads(resp.read().decode("utf-8", "replace"))
+        return str(((payload.get("data") or {}).get("data") or {}).get(name) or "")
+    except urllib.error.HTTPError as exc:
+        _warn_once(f"vault-http-{exc.code}", f"Vault 返回 {exc.code}（{url}）")
+    except Exception as exc:  # noqa: BLE001
+        _warn_once("vault-error", f"Vault 不可达：{exc}")
+    return ""
+
+
+def _from_provider(name: str) -> str:
+    mode = provider_name()
+    if mode in ("file", "json"):
+        return _from_file(name)
+    if mode in ("vault", "vault-kv", "vault_kv"):
+        return _from_vault(name)
+    return ""
+
+
+def get_secret(name: str, default: str = "") -> str:
+    """按名字取密钥：环境变量与 provider 按优先级各试一次，都没有就用默认值。"""
+    if name in _CACHE:
+        return _CACHE[name]
+    value = ""
+    if _priority() == "provider":
+        value = _from_provider(name) or os.environ.get(name, "")
+    else:
+        value = os.environ.get(name, "") or _from_provider(name)
+    if not value:
+        value = default
+    if value:
+        _CACHE[name] = value
+    return value
+
+
+def redact(value: str, keep: int = 4) -> str:
+    """日志里只露后几位，别把密钥整条打出去。"""
+    value = str(value or "")
+    if len(value) <= keep:
+        return "****" if value else ""
+    return "****" + value[-keep:]
+
+
+def status() -> dict:
+    """给 /ready 看：用的哪种来源、配没配齐（不返回任何密钥值）。"""
+    mode = provider_name()
+    info = {"provider": mode, "priority": _priority()}
+    if mode in ("file", "json"):
+        path = (os.environ.get("MINEAGENT_SECRETS_FILE") or "").strip()
+        info["path"] = path
+        info["usable"] = bool(path) and Path(path).exists()
+    elif mode in ("vault", "vault-kv", "vault_kv"):
+        info["addr"] = (os.environ.get("MINEAGENT_VAULT_ADDR") or "").strip()
+        info["usable"] = bool(info["addr"]) and bool((os.environ.get("MINEAGENT_VAULT_TOKEN") or "").strip())
+    else:
+        info["usable"] = True
+    return info
+
+
+def trace_only_names() -> list:
+    """哪些密钥被真正读出来过（只报名字，方便现场核对配置）。"""
+    return sorted(_CACHE)
+
+
+def _reset_cache() -> None:
+    """测试用：清掉缓存，让下一次读取重新走 provider。"""
+    with _LOCK:
+        _CACHE.clear()
+        _WARNED.clear()
+        _FILE_STATE["mtime"] = 0.0
+        _FILE_STATE["data"] = {}
+'''
+
+
+def render_secret_store() -> str:
+    return _SECRET_STORE_PY
+
+
 def render_evals(spec: Dict[str, Any]) -> Dict[str, str]:
     """评测目录：用例模板 + 打分脚本 + 说明。"""
     inputs = [n for n in spec.get("nodes", []) if (n.get("kind") or "") == "input"]
@@ -1884,6 +2068,7 @@ def render_production_files(spec: Dict[str, Any], graph: Dict[str, Any],
     has_graph = bool(has_graph)
     svc = merge_service(graph.get("service"))
     files: Dict[str, str] = {
+        "secret_store.py": render_secret_store(),
         "settings.py": render_settings(spec, svc),
         "telemetry.py": render_telemetry(),
         "checkpoint.py": render_checkpoint(),
