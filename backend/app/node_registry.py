@@ -155,7 +155,7 @@ _DEFS: List[tuple] = [
     ("join", "分支汇聚", "flow", "⊕", "合并多个分支的产出。", ["out"], [P("strategy", "策略(merge/concat)", "merge")], "python"),
     ("delay", "延时", "flow", "◔", "限流与退避。", ["out"], [P("seconds", "秒", 1)], "python"),
     ("subgraph", "子图调用", "flow", "⊞", "把任务委派给另一个画布项目。", ["out"], [P("project", "目标项目目录", "")], "python"),
-    ("human_approval", "人工审批", "flow", "☺", "关键动作前的人工确认（无交互时按默认值）。", ["out"],
+    ("human_approval", "人工审批", "flow", "☺", "关键动作前挂起整个 run，等 /resume 放行；approve 走 true 分支、reject 走 false 分支。", ["true", "false"],
      [P("default", "默认决策(approve/reject)", "approve")], "python"),
     ("guardrail", "护栏 Guardrail", "flow", "⛨", "拦截敏感内容与越权动作。", ["out"], [P("banned", "禁用词", ["rm -rf", "DROP TABLE"])], "python"),
 
