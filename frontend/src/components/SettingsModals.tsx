@@ -13,7 +13,6 @@ const TABS: { id: TabId; label: string; hint: string }[] = [
   { id: 'chat', label: '对话模型', hint: '编排与运行时兜底用的大模型' },
   { id: 'embedding', label: '向量模型', hint: '把文本转成向量的模型（建库与查询必须一致）' },
   { id: 'vector', label: '向量库', hint: '存向量和原文，按相似度检索' },
-  { id: 'data', label: '数据源', hint: '业务库 / 文档库 / 图库 / 缓存 / 时序库' },
 ]
 
 /** 默认服务商是 DeepSeek，其余按需切换 */
@@ -206,7 +205,7 @@ export function CanvasModelModal({ onClose }: { onClose: () => void }) {
   return (
     <Modal
       title={`画布配置 · ${canvas.name}`}
-      subtitle="这张画布自己的对话模型、向量模型、向量库和数据源。不同画布互不影响。"
+      subtitle="这张画布自己的对话模型、向量模型与向量库。数据源已迁到「🗄 数据中台」，画布之间互不影响。"
       onClose={onClose}
       footer={
         tab === 'chat' ? (

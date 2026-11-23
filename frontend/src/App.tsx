@@ -1,4 +1,4 @@
-﻿import { useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { ReactFlowProvider } from '@xyflow/react'
 import { useStore, type UploadPayload } from './store'
 import TopBar from './components/TopBar'
@@ -10,6 +10,8 @@ import UploadJobsPanel from './components/UploadJobsPanel'
 import ConflictDialog, { type ConflictChoice } from './components/ConflictDialog'
 import { CanvasModelModal, UserCenterModal } from './components/SettingsModals'
 import KnowledgeModal from './components/KnowledgeModal'
+import EvalModal from './components/EvalModal'
+import DataHubModal from './components/DataHubModal'
 import { api } from './api'
 
 export default function App() {
@@ -28,6 +30,8 @@ export default function App() {
   const [userCenterOpen, setUserCenterOpen] = useState(false)
   const [canvasModelOpen, setCanvasModelOpen] = useState(false)
   const [knowledgeOpen, setKnowledgeOpen] = useState(false)
+  const [evalOpen, setEvalOpen] = useState(false)
+  const [dataHubOpen, setDataHubOpen] = useState(false)
 
   const syncConflict = useStore((s) => s.syncConflict)
   const setSyncConflict = useStore((s) => s.setSyncConflict)
@@ -178,6 +182,8 @@ export default function App() {
         onOpenUserCenter={() => setUserCenterOpen(true)}
         onOpenCanvasModel={() => setCanvasModelOpen(true)}
       onOpenKnowledge={() => setKnowledgeOpen(true)}
+      onOpenEval={() => setEvalOpen(true)}
+      onOpenDataHub={() => setDataHubOpen(true)}
       />
       <div className="main">
         <ReactFlowProvider>
@@ -217,6 +223,8 @@ export default function App() {
       {userCenterOpen && <UserCenterModal onClose={() => setUserCenterOpen(false)} />}
       {canvasModelOpen && <CanvasModelModal onClose={() => setCanvasModelOpen(false)} />}
       {knowledgeOpen && <KnowledgeModal onClose={() => setKnowledgeOpen(false)} />}
+      {evalOpen && <EvalModal onClose={() => setEvalOpen(false)} />}
+      {dataHubOpen && <DataHubModal onClose={() => setDataHubOpen(false)} />}
       {syncConflict && (
         <ConflictDialog
           info={syncConflict}

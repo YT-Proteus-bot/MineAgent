@@ -13,9 +13,11 @@ interface Props {
   onOpenUserCenter: () => void
   onOpenCanvasModel: () => void
   onOpenKnowledge: () => void
+  onOpenEval: () => void
+  onOpenDataHub: () => void
 }
 
-export default function TopBar({ onOpenUserCenter, onOpenCanvasModel, onOpenKnowledge }: Props) {
+export default function TopBar({ onOpenUserCenter, onOpenCanvasModel, onOpenKnowledge, onOpenEval, onOpenDataHub }: Props) {
   const canvas = useStore((s) => s.canvas)
   const canvases = useStore((s) => s.canvases)
   const meta = useStore((s) => s.meta)
@@ -442,6 +444,14 @@ export default function TopBar({ onOpenUserCenter, onOpenCanvasModel, onOpenKnow
           </>
         )}
       </Popover>
+
+      <button onClick={onOpenEval} title="评测中台：用数据集评测当前画布的 Agent">
+        <span>🧪</span> 评测
+      </button>
+
+      <button onClick={onOpenDataHub} title="数据中台：当前画布的数据源与数据集（画布之间互相隔离）">
+        <span>🗄</span> 数据中台
+      </button>
 
       <button onClick={onOpenKnowledge} title="创建和管理知识库（上传文档、切分、向量化入库）">
         <span>📚</span> 知识库
