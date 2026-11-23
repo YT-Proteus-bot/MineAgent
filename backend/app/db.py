@@ -126,6 +126,25 @@ CREATE TABLE IF NOT EXISTS providers (
 );
 
 CREATE INDEX IF NOT EXISTS idx_providers_kind ON providers(kind, scope, canvas_id);
+
+-- 数据中台的数据集：把某个数据源（providers.kind='data'）里的表/查询登记成逻辑名
+-- spec 存 {"table": "orders"} 或 {"sql": "select ..."}；columns 是上次 introspect 的列缓存
+CREATE TABLE IF NOT EXISTS datasets (
+    id          TEXT PRIMARY KEY,
+    canvas_id   TEXT NOT NULL,
+    source_id   TEXT NOT NULL,
+    logical     TEXT NOT NULL,
+    kind        TEXT NOT NULL DEFAULT 'table',
+    spec        TEXT NOT NULL DEFAULT '{}',
+    columns     TEXT NOT NULL DEFAULT '[]',
+    mode        TEXT NOT NULL DEFAULT 'read',
+    description TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_datasets_logical ON datasets(canvas_id, logical);
+CREATE INDEX IF NOT EXISTS idx_datasets_source ON datasets(source_id);
 """
 
 

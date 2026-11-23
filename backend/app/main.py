@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import FRONTEND_DIST, HOST, PORT, ensure_dirs
 from .db import init_db
-from .routers import (assistant, backgrounds, canvases, community, frameworks,
+from .routers import (assistant, backgrounds, canvases, community, datahub, frameworks,
                       knowledge, meta, projects, providers, run, settings,
                       sources, versions)
 
@@ -43,6 +43,7 @@ app.include_router(projects.router)
 app.include_router(settings.router)
 app.include_router(versions.router)
 app.include_router(providers.router)
+app.include_router(datahub.router)
 app.include_router(frameworks.router)
 app.include_router(meta.router)
 app.include_router(community.router)
