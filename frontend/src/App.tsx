@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+﻿import { useEffect, useState } from 'react'
 import { ReactFlowProvider } from '@xyflow/react'
 import { useStore, type UploadPayload } from './store'
 import TopBar from './components/TopBar'
@@ -9,6 +9,7 @@ import RunPanel from './components/RunPanel'
 import UploadJobsPanel from './components/UploadJobsPanel'
 import ConflictDialog, { type ConflictChoice } from './components/ConflictDialog'
 import { CanvasModelModal, UserCenterModal } from './components/SettingsModals'
+import KnowledgeModal from './components/KnowledgeModal'
 import { api } from './api'
 
 export default function App() {
@@ -26,6 +27,7 @@ export default function App() {
 
   const [userCenterOpen, setUserCenterOpen] = useState(false)
   const [canvasModelOpen, setCanvasModelOpen] = useState(false)
+  const [knowledgeOpen, setKnowledgeOpen] = useState(false)
 
   const syncConflict = useStore((s) => s.syncConflict)
   const setSyncConflict = useStore((s) => s.setSyncConflict)
@@ -175,6 +177,7 @@ export default function App() {
       <TopBar
         onOpenUserCenter={() => setUserCenterOpen(true)}
         onOpenCanvasModel={() => setCanvasModelOpen(true)}
+      onOpenKnowledge={() => setKnowledgeOpen(true)}
       />
       <div className="main">
         <ReactFlowProvider>
@@ -213,6 +216,7 @@ export default function App() {
 
       {userCenterOpen && <UserCenterModal onClose={() => setUserCenterOpen(false)} />}
       {canvasModelOpen && <CanvasModelModal onClose={() => setCanvasModelOpen(false)} />}
+      {knowledgeOpen && <KnowledgeModal onClose={() => setKnowledgeOpen(false)} />}
       {syncConflict && (
         <ConflictDialog
           info={syncConflict}

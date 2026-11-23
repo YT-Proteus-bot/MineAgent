@@ -289,6 +289,56 @@ export const api = {
       { method: 'DELETE' },
     ),
 
+  // ---- 知识库（全局） ----
+  listKnowledge: () => request<{ items: any[] }>('/api/knowledge'),
+  createKnowledge: (payload: Record<string, any>) =>
+    request<{ ok: boolean; kb: any }>('/api/knowledge', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  getKnowledge: (id: string) =>
+    request<{ kb: any }>(`/api/knowledge/${id}`),
+  updateKnowledge: (id: string, payload: Record<string, any>) =>
+    request<{ ok: boolean; kb: any }>(`/api/knowledge/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    }),
+  deleteKnowledge: (id: string) =>
+    request<{ ok: boolean }>(`/api/knowledge/${id}`, { method: 'DELETE' }),
+  uploadKbFile: async (id: string, file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    const resp = await fetch(`/api/knowledge/${id}/files`, {
+      method: 'POST',
+      body: form,
+    })
+    if (!resp.ok) {
+      let detail = `${resp.status} ${resp.statusText}`
+      try {
+        const body = await resp.json()
+        detail = body.detail || detail
+      } catch {
+        /* ignore */
+      }
+      throw new Error(detail)
+    }
+    return (await resp.json()) as { ok: boolean; file: any; files: any[] }
+  },
+  deleteKbFile: (id: string, name: string) =>
+    request<{ ok: boolean; files: any[] }>(
+      `/api/knowledge/${id}/files?name=${encodeURIComponent(name)}`,
+      { method: 'DELETE' },
+    ),
+  buildKnowledge: (id: string) =>
+    request<{ ok: boolean; files: number; chunks: number; dim: number }>(
+      `/api/knowledge/${id}/build`,
+      { method: 'POST' },
+    ),
+  searchKnowledge: (id: string, q: string, topK = 5) =>
+    request<{ ok: boolean; hits: any[] }>(
+      `/api/knowledge/${id}/search?q=${encodeURIComponent(q)}&top_k=${topK}`,
+    ),
+
   // ---- 源码包（从源码还原架构） ----
   listSources: () =>
     request<{ sources: any[] }>('/api/sources'),

@@ -59,6 +59,34 @@ CREATE TABLE IF NOT EXISTS assistant_memories (
 
 CREATE INDEX IF NOT EXISTS idx_mem_canvas ON assistant_memories(canvas_id, updated_at DESC);
 
+-- 知识库：全局的，画布通过引用使用。
+-- 每个库自带向量模型 / 向量库配置，不依赖某张画布的 provider
+CREATE TABLE IF NOT EXISTS knowledge_bases (
+    id                      TEXT PRIMARY KEY,
+    name                    TEXT NOT NULL,
+    description             TEXT NOT NULL DEFAULT '',
+    collection              TEXT NOT NULL,
+    kind                    TEXT NOT NULL DEFAULT 'builtin',
+    template                TEXT NOT NULL DEFAULT 'general',
+    endpoint                TEXT NOT NULL DEFAULT '',
+    endpoint_key_cipher     TEXT NOT NULL DEFAULT '',
+    embedding_provider      TEXT NOT NULL DEFAULT '',
+    embedding_config        TEXT NOT NULL DEFAULT '{}',
+    embedding_secret_cipher TEXT NOT NULL DEFAULT '',
+    vector_provider         TEXT NOT NULL DEFAULT '',
+    vector_config           TEXT NOT NULL DEFAULT '{}',
+    vector_secret_cipher    TEXT NOT NULL DEFAULT '',
+    status                  TEXT NOT NULL DEFAULT 'draft',
+    file_count              INTEGER NOT NULL DEFAULT 0,
+    chunk_count             INTEGER NOT NULL DEFAULT 0,
+    chunk_config            TEXT NOT NULL DEFAULT '{}',
+    error                   TEXT NOT NULL DEFAULT '',
+    created_at              TEXT NOT NULL,
+    updated_at              TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_kb_time ON knowledge_bases(updated_at DESC);
+
 CREATE TABLE IF NOT EXISTS runs (
     id           TEXT PRIMARY KEY,
     canvas_id    TEXT NOT NULL,
@@ -142,6 +170,23 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "summary" not in chat_cols:
         conn.execute(
             "ALTER TABLE assistant_chats ADD COLUMN summary TEXT NOT NULL DEFAULT ''")
+
+    kb_cols = {row["name"] for row in conn.execute("PRAGMA table_info(knowledge_bases)")}
+    if "chunk_config" not in kb_cols:
+        conn.execute(
+            "ALTER TABLE knowledge_bases ADD COLUMN chunk_config TEXT NOT NULL DEFAULT '{}'")
+    if "kind" not in kb_cols:
+        conn.execute(
+            "ALTER TABLE knowledge_bases ADD COLUMN kind TEXT NOT NULL DEFAULT 'builtin'")
+    if "template" not in kb_cols:
+        conn.execute(
+            "ALTER TABLE knowledge_bases ADD COLUMN template TEXT NOT NULL DEFAULT 'general'")
+    if "endpoint" not in kb_cols:
+        conn.execute(
+            "ALTER TABLE knowledge_bases ADD COLUMN endpoint TEXT NOT NULL DEFAULT ''")
+    if "endpoint_key_cipher" not in kb_cols:
+        conn.execute(
+            "ALTER TABLE knowledge_bases ADD COLUMN endpoint_key_cipher TEXT NOT NULL DEFAULT ''")
     # ---- 远端同步：记住这张画布绑定的模板、上次同步的版本和图哈希 ----
     if "remote_slug" not in cols:
         conn.execute("ALTER TABLE canvases ADD COLUMN remote_slug TEXT NOT NULL DEFAULT ''")

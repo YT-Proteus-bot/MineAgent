@@ -12,9 +12,10 @@ import VersionHistoryModal from './VersionHistoryModal'
 interface Props {
   onOpenUserCenter: () => void
   onOpenCanvasModel: () => void
+  onOpenKnowledge: () => void
 }
 
-export default function TopBar({ onOpenUserCenter, onOpenCanvasModel }: Props) {
+export default function TopBar({ onOpenUserCenter, onOpenCanvasModel, onOpenKnowledge }: Props) {
   const canvas = useStore((s) => s.canvas)
   const canvases = useStore((s) => s.canvases)
   const meta = useStore((s) => s.meta)
@@ -441,6 +442,10 @@ export default function TopBar({ onOpenUserCenter, onOpenCanvasModel }: Props) {
           </>
         )}
       </Popover>
+
+      <button onClick={onOpenKnowledge} title="创建和管理知识库（上传文档、切分、向量化入库）">
+        <span>📚</span> 知识库
+      </button>
 
       <button onClick={onOpenCanvasModel}
               title="这张画布的对话模型、向量模型、向量库与数据源">
