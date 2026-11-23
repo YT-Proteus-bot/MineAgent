@@ -212,6 +212,30 @@ def list_tables(canvas_id: str, source_id: str) -> Dict[str, Any]:
     return {"tables": tables[:200]}
 
 
+@router.get("/refs")
+def list_refs(canvas_id: str) -> Dict[str, Any]:
+    """节点「数据接入」下拉的可选项：本画布数据集 + 数据源 + 外部接入映射。"""
+    row = _canvas(canvas_id)
+    with get_conn() as conn:
+        datasets = conn.execute(
+            "SELECT id, logical, kind, mode FROM datasets WHERE canvas_id = ? ORDER BY logical",
+            (canvas_id,)).fetchall()
+        sources = conn.execute(
+            "SELECT id, name, provider FROM providers WHERE kind = 'data' "
+            "AND (canvas_id = ? OR scope = 'global') ORDER BY name",
+            (canvas_id,)).fetchall()
+    try:
+        service = json.loads(row.get("graph") or "{}").get("service") or {}
+    except json.JSONDecodeError:
+        service = {}
+    remote = (service.get("data") or {}).get("datasets") or []
+    return {
+        "datasets": [dict(r) for r in datasets],
+        "sources": [dict(r) for r in sources],
+        "remote": [r for r in remote if isinstance(r, dict) and r.get("logical")],
+    }
+
+
 @router.get("/datasets/{dataset_id}/preview")
 def preview(canvas_id: str, dataset_id: str, limit: int = 20) -> Dict[str, Any]:
     row = _dataset_row(canvas_id, dataset_id)

@@ -3,6 +3,7 @@ import { api } from '../api'
 import { useStore } from '../store'
 import { isAgentKind, type AgentOrg } from '../types'
 import CodeEditor from './CodeEditor'
+import DataRefField, { NEEDS_DATA } from './DataRefField'
 import NodeModelModal from './NodeModelModal'
 
 function ParamField({
@@ -467,6 +468,18 @@ export default function NodeInspector() {
                 }}
               />
             ))}
+
+            {NEEDS_DATA.has(String(data.kind || '')) && canvas && (
+              <DataRefField
+                canvasId={canvas.id}
+                value={data.params?.data_ref}
+                onChange={(v) =>
+                  updateNode(node.id, {
+                    params: { ...(data.params || {}), data_ref: v },
+                  })
+                }
+              />
+            )}
 
             {presetDef && presetDef.params.length > 0 && (
               <>
