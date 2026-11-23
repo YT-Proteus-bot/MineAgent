@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
 
 import { useStore } from '../store'
+import { type ServiceConfig } from '../types'
+import { datasetsText, mergeService, parseDatasets } from '../serviceConfig'
 import { ProvidersPanel } from './ProvidersPanel'
 
 /**
@@ -9,7 +11,7 @@ import { ProvidersPanel } from './ProvidersPanel'
  * 数据源（连接 + 密钥）在「数据源」页，复用 providers(kind='data')；
  * 数据集（逻辑名 → 表 / SQL）在「数据集」页，节点里用 ctx.data.query("orders") 取数。
  */
-type Tab = 'sources' | 'datasets'
+type Tab = 'sources' | 'datasets' | 'service'
 
 interface Source {
   id: string
@@ -41,6 +43,8 @@ const EMPTY = { logical: '', source_id: '', kind: 'table', table: '', sql: '', d
 export default function DataHubModal({ onClose }: { onClose: () => void }) {
   const canvas = useStore((s) => s.canvas)
   const toast = useStore((s) => s.toast)
+  const setServiceConfig = useStore((s) => s.setServiceConfig)
+  const saveCanvas = useStore((s) => s.save)
   const [tab, setTab] = useState<Tab>('sources')
   const [datasets, setDatasets] = useState<Dataset[]>([])
   const [sources, setSources] = useState<Source[]>([])
@@ -48,6 +52,12 @@ export default function DataHubModal({ onClose }: { onClose: () => void }) {
   const [form, setForm] = useState({ ...EMPTY })
   const [preview, setPreview] = useState<{ name: string; data: Preview } | null>(null)
   const [busy, setBusy] = useState('')
+  const [svc, setSvc] = useState<ServiceConfig>(() => mergeService((canvas?.graph as any)?.service))
+  const [savingSvc, setSavingSvc] = useState(false)
+
+  useEffect(() => {
+    setSvc(mergeService((canvas?.graph as any)?.service))
+  }, [canvas?.id])
 
   const cid = canvas?.id || ''
 
@@ -145,6 +155,20 @@ export default function DataHubModal({ onClose }: { onClose: () => void }) {
     }
   }
 
+  const patchSvc = (key: string, value: any) =>
+    setSvc((f) => ({ ...f, data: { ...f.data, [key]: value } }))
+
+  const saveService = async () => {
+    setSavingSvc(true)
+    try {
+      setServiceConfig(svc)
+      const ok = await saveCanvas()
+      toast(ok ? '外部接入配置已保存（生成物会带上 integrations.json）' : '保存失败', ok ? 'ok' : 'err')
+    } finally {
+      setSavingSvc(false)
+    }
+  }
+
   const sourceName = (id: string) => sources.find((s) => s.id === id)?.name || sources.find((s) => s.id === id)?.provider || '—'
 
   return (
@@ -181,6 +205,13 @@ export default function DataHubModal({ onClose }: { onClose: () => void }) {
               >
                 数据集{datasets.length ? `（${datasets.length}）` : ''}
               </div>
+              <div
+                className={`tab${tab === 'service' ? ' active' : ''}`}
+                onClick={() => setTab('service')}
+                title="外部数据平台接入（HTTP 数据集 API），保存后编译进 integrations.json"
+              >
+                外部接入
+              </div>
             </div>
           </div>
         </div>
@@ -190,6 +221,92 @@ export default function DataHubModal({ onClose }: { onClose: () => void }) {
             <div className="kb-empty">先打开一张画布，再配置它的数据源。</div>
           ) : tab === 'sources' ? (
             <ProvidersPanel kind="data" canvasId={canvas.id} />
+          ) : tab === 'service' ? (
+            <>
+              <div className="hint-box" style={{ marginBottom: 12 }}>
+                这里配「外部数据平台」接入（HTTP 数据集 API）。保存后编译进生成物的
+                <code className="mono"> integrations.json </code>与
+                <code className="mono"> integrations/data_client.py</code>，
+                Token 只写环境变量名，不落盘。表 / SQL 取数请用「数据集」页。
+              </div>
+              <label className="row" style={{ gap: 8 }}>
+                <input
+                  type="checkbox"
+                  checked={svc.data.enabled}
+                  onChange={(e) => patchSvc('enabled', e.target.checked)}
+                  style={{ width: 15, height: 15 }}
+                />
+                <span className="small">启用外部数据平台（默认只读，写入需单独标 :write）</span>
+              </label>
+              <label className="field">
+                <span>接入方式</span>
+                <select value={svc.data.kind} onChange={(e) => patchSvc('kind', e.target.value)}>
+                  <option value="http">HTTP 数据集 API</option>
+                  <option value="sdk">自定义 SDK（模块名）</option>
+                  <option value="jdbc">JDBC（需额外依赖）</option>
+                  <option value="s3">S3 兼容（需额外依赖）</option>
+                </select>
+              </label>
+              <label className="field">
+                <span>Base URL</span>
+                <input
+                  value={svc.data.base_url}
+                  placeholder="https://data.company.com"
+                  onChange={(e) => patchSvc('base_url', e.target.value)}
+                />
+              </label>
+              <div className="row" style={{ gap: 10 }}>
+                <label className="field" style={{ flex: 1 }}>
+                  <span>认证</span>
+                  <select value={svc.data.auth} onChange={(e) => patchSvc('auth', e.target.value)}>
+                    <option value="none">无</option>
+                    <option value="bearer">Bearer Token</option>
+                    <option value="aksk">AK/SK</option>
+                    <option value="oidc">OIDC</option>
+                  </select>
+                </label>
+                <label className="field" style={{ flex: 1 }}>
+                  <span>Token 环境变量名</span>
+                  <input value={svc.data.secret_ref} onChange={(e) => patchSvc('secret_ref', e.target.value)} />
+                </label>
+              </div>
+              <label className="field">
+                <span>数据集映射（每行：逻辑名 = 物理表 / 路径，写权限加 :write）</span>
+                <textarea
+                  rows={4}
+                  className="mono"
+                  value={datasetsText(svc.data.datasets)}
+                  placeholder="customer_orders = dwd.customer_orders"
+                  onChange={(e) => patchSvc('datasets', parseDatasets(e.target.value))}
+                />
+              </label>
+              <div className="row" style={{ gap: 10 }}>
+                <label className="field" style={{ flex: 1 }}>
+                  <span>超时（秒）</span>
+                  <input
+                    type="number"
+                    min={5}
+                    value={svc.data.timeout_s}
+                    onChange={(e) => patchSvc('timeout_s', Number(e.target.value))}
+                  />
+                </label>
+                <label className="field" style={{ flex: 1 }}>
+                  <span>脱敏字段（逗号分隔）</span>
+                  <input
+                    value={(svc.data.pii_fields || []).join(', ')}
+                    placeholder="phone, id_card"
+                    onChange={(e) =>
+                      patchSvc('pii_fields', e.target.value.split(',').map((s) => s.trim()).filter(Boolean))
+                    }
+                  />
+                </label>
+              </div>
+              <div className="row" style={{ marginTop: 12 }}>
+                <button className="primary" onClick={() => void saveService()} disabled={savingSvc}>
+                  {savingSvc ? <span className="spin" /> : null} 保存接入配置
+                </button>
+              </div>
+            </>
           ) : (
             <>
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'flex-end', marginBottom: 12 }}>
