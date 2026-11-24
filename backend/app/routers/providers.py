@@ -17,8 +17,9 @@ from ..config import DATA_DIR
 from ..db import (clear_provider_default, delete_provider, get_provider,
                   list_providers, save_provider)
 from ..providers import (ProviderError, build_data_cfg, build_embedding_cfg,
-                         build_vector_cfg, find, get_database, get_store,
-                         probe_embedding, public_catalog, secret_fields)
+                         build_rerank_cfg, build_vector_cfg, find, get_database,
+                         get_store, probe_embedding, probe_rerank, public_catalog,
+                         secret_fields)
 from ..schemas import ProviderIn, ProviderOut, ProviderTestIn
 from ..security import decrypt, encrypt, mask
 
@@ -32,7 +33,7 @@ PROVIDER_DIR = DATA_DIR / "providers"
 # --------------------------------------------------------------------------- #
 @router.get("/catalog")
 def catalog():
-    """三类清单：向量模型 / 向量库 / 数据源，含字段定义与默认值。"""
+    """四类清单：向量模型 / 重排模型 / 向量库 / 数据源，含字段定义与默认值。"""
     return public_catalog()
 
 
@@ -82,7 +83,7 @@ def create(payload: ProviderIn):
     if find(payload.kind, payload.provider) is None:
         raise HTTPException(status_code=400,
                             detail=f"未知的 {payload.kind} 类型：{payload.provider}")
-    # 向量模型 / 向量库 / 数据源都是画布级配置
+    # 向量模型 / 重排模型 / 向量库 / 数据源都是画布级配置
     if not payload.canvas_id:
         raise HTTPException(status_code=400, detail="缺少 canvas_id：这些配置属于具体画布")
     pid = uuid.uuid4().hex[:16]
@@ -191,6 +192,10 @@ def test_connection(payload: ProviderTestIn):
         if kind == "embedding":
             cfg = build_embedding_cfg(record)
             result = probe_embedding(cfg)
+            result["protocol"] = cfg.get("protocol")
+        elif kind == "rerank":
+            cfg = build_rerank_cfg(record)
+            result = probe_rerank(cfg)
             result["protocol"] = cfg.get("protocol")
         elif kind == "vector":
             base_dir = PROVIDER_DIR / (payload.id or uuid.uuid4().hex[:8])

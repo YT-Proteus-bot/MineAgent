@@ -2274,6 +2274,7 @@ button.hud-btn.active {
   padding: 24px;
 }
 .kb-panel {
+  position: relative;
   width: min(1180px, 96vw);
   height: min(760px, 92vh);
   background: var(--bg-soft);
@@ -2668,4 +2669,224 @@ button.hud-btn.active {
 .kb-tpl-foot {
   margin-top: auto;
   padding-top: 8px;
+}
+
+/* ---------------- 评测中台 ---------------- */
+.eval-launch {
+  border: 1px solid var(--border-soft);
+  background: var(--panel);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-bottom: 16px;
+}
+.eval-launch-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.eval-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+  padding-bottom: 7px;
+}
+.eval-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.eval-table th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--muted);
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.eval-table td {
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--border-soft);
+  vertical-align: top;
+}
+.eval-table tr:hover td {
+  background: var(--panel-2);
+}
+.eval-detail {
+  margin-top: 20px;
+  border-top: 1px solid var(--border-soft);
+  padding-top: 14px;
+}
+.eval-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.eval-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.eval-metric {
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.eval-metric b {
+  font-size: 17px;
+}
+.eval-cases {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.eval-case {
+  border: 1px solid var(--border-soft);
+  border-radius: 9px;
+  background: var(--panel);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.eval-case-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.eval-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.eval-dot.ok {
+  background: var(--ok);
+}
+.eval-dot.bad {
+  background: var(--err);
+}
+.eval-output {
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--bg-soft);
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  padding: 8px 10px;
+  max-height: 140px;
+  overflow-y: auto;
+}
+.eval-sheet {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  width: min(620px, 92%);
+  max-height: 78%;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px 16px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+  z-index: 9;
+}
+.eval-sheet-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.eval-cases-input {
+  width: 100%;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.6;
+  background: var(--bg-soft);
+  color: var(--text);
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  padding: 10px 12px;
+  resize: vertical;
+}
+
+.eval-time {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  white-space: nowrap;
+  color: var(--text-dim);
+}
+
+.eval-metrics.second {
+  margin-top: -4px;
+}
+.eval-tags {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+  font-size: 12px;
+}
+.eval-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 7px;
+  background: var(--panel-2);
+  border: 1px solid var(--border-soft);
+  font-size: 11.5px;
+}
+.eval-trend {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  margin-bottom: 12px;
+  font-size: 12px;
+}
+.eval-trend-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+}
+.eval-trend-bar {
+  width: 10px;
+  border-radius: 3px 3px 0 0;
+  display: block;
+}
+.eval-compare {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 9px 12px;
+  margin-bottom: 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border-soft);
+  background: var(--panel-2);
+  font-size: 12px;
+}
+
+.eval-report {
+  display: flex;
+  flex-direction: column;
+}
+.eval-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-soft);
 }

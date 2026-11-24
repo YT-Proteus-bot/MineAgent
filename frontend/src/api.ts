@@ -289,6 +289,45 @@ export const api = {
       { method: 'DELETE' },
     ),
 
+  // ---- 评测中台 ----
+  listDatasets: () => request<{ items: any[] }>('/api/eval/datasets'),
+  createDataset: (payload: Record<string, any>) =>
+    request<{ ok: boolean; dataset: any }>('/api/eval/datasets', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  getDataset: (id: string) =>
+    request<{ dataset: any }>(`/api/eval/datasets/${id}`),
+  deleteDataset: (id: string) =>
+    request<{ ok: boolean }>(`/api/eval/datasets/${id}`, { method: 'DELETE' }),
+  listEvalRuns: (limit = 30) =>
+    request<{ items: any[] }>(`/api/eval/runs?limit=${limit}`),
+  createEvalRun: (payload: Record<string, any>) =>
+    request<{ ok: boolean; run: any }>('/api/eval/runs', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  getEvalRun: (id: string) => request<{ run: any }>(`/api/eval/runs/${id}`),
+  compareEvalRun: (id: string, base: string) =>
+    request<{ ok: boolean; compare: any }>(
+      `/api/eval/runs/${id}/compare?base=${encodeURIComponent(base)}`,
+    ),
+  evalTrend: (params: { canvas_id?: string; dataset_id?: string; limit?: number } = {}) => {
+    const q = new URLSearchParams()
+    if (params.canvas_id) q.set('canvas_id', params.canvas_id)
+    if (params.dataset_id) q.set('dataset_id', params.dataset_id)
+    if (params.limit) q.set('limit', String(params.limit))
+    const suffix = q.toString() ? `?${q.toString()}` : ''
+    return request<{ items: any[] }>(`/api/eval/trend${suffix}`)
+  },
+  deleteEvalRun: (id: string) =>
+    request<{ ok: boolean }>(`/api/eval/runs/${id}`, { method: 'DELETE' }),
+  setEvalVerdict: (resultId: string, verdict: string, note = '') =>
+    request<{ ok: boolean }>(`/api/eval/results/${resultId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ verdict, note }),
+    }),
+
   // ---- 知识库（全局） ----
   listKnowledge: () => request<{ items: any[] }>('/api/knowledge'),
   createKnowledge: (payload: Record<string, any>) =>

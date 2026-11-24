@@ -229,7 +229,7 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
         "function": {
             "name": "get_config",
             "description": "读取当前画布的配置：框架、推理模式、对话模型（不含密钥）、"
-                           "服务设置、以及已配的向量模型/向量库/数据源。改配置前先调它。",
+                           "服务设置、以及已配的向量模型/重排模型/向量库/数据源。改配置前先调它。",
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
@@ -309,12 +309,13 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "upsert_provider",
-            "description": "新建或修改一张画布的向量模型 / 向量库 / 数据源配置（非密钥字段）。"
+            "description": "新建或修改一张画布的向量模型 / 重排模型 / 向量库 / 数据源配置（非密钥字段）。"
                            "新建时不传 API Key，用户需要自己在画布配置里补 Key。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "kind": {"type": "string", "enum": ["embedding", "vector", "data"]},
+                    "kind": {"type": "string",
+                             "enum": ["embedding", "rerank", "vector", "data"]},
                     "provider": {"type": "string",
                                  "description": "厂商 id，如 openai / qdrant / postgres"},
                     "name": {"type": "string", "description": "实例名，用于节点里引用"},

@@ -71,7 +71,7 @@
 | 顶部「⚙ 服务」 | 画布级服务设置：入口 / 会话并发 / 可观测 / 安全；保存后编译进生成项目的服务文件 |
 | 顶部「运行」 | 编译并真实执行当前画布，执行过程流式回显到节点和运行面板 || 右上角「选择模式」 | 框架**左边**的下拉，列出该框架支持的推理模式（ReAct / CoT / Plan-and-Execute / 群聊…），选中后作为画布默认，新建 agent 节点会用它 |
 | 右上角下拉 | 选择 Agent 框架（LangChain/LangGraph、AutoGen、CrewAI…），切换后重建架构图 |
-| 右上角「画布配置」 | 这张画布自己的对话模型、向量模型、向量库与数据源 |
+| 右上角「画布配置」 | 这张画布自己的对话模型、向量检索模型与重排模型（数据源与向量库在「🗄 数据中台」） |
 | 右上角「用户中心」 | 账户与配置下拉：GitHub 账户 / 模型配置 / 公共模板 |
 | 运行按钮右侧「☁ 上传模板」 | 把当前画布和项目文件贡献成社区模板，自动创建 GitHub PR（不含任何密钥） |
 | 右键空白画布 | 弹出节点面板，113 种细粒度节点任选（带搜索）；新增后**按约束自动连线** |
@@ -299,7 +299,7 @@ Client ID / Secret，点「连接 GitHub」跳转网页授权（`public_repo` + 
 | `update_model` | 改对话模型（provider / base_url / model / 参数），**不动 Key** |
 | `set_mode` | 切默认推理模式 |
 | `switch_framework` | 切 Agent 框架（**会重建架构图**，二次确认） |
-| `upsert_provider` | 新建向量模型 / 向量库 / 数据源（只写非密钥字段） |
+| `upsert_provider` | 新建向量模型 / 重排模型 / 向量库 / 数据源（只写非密钥字段） |
 | `apply_architecture` | 按架构指纹整张生成画布（同时把框架与推理模式切过去） |
 | `run_canvas` | 运行画布（会消耗模型额度） |
 
@@ -307,7 +307,7 @@ Client ID / Secret，点「连接 GitHub」跳转网页授权（`public_repo` + 
 `switch_framework` 这种破坏性操作会在卡片和二次确认里都标明「会重建架构图」。
 
 **密钥边界**：AI 读不到也写不了 API Key。`get_config` 只返回 `has_key: true/false`；
-新建向量库/数据源后，它会提醒你去「画布配置」里补 Key。
+新建向量库/数据源后，它会提醒你去「🗄 数据中台」里补 Key。
 
 **记忆与压缩**
 
@@ -513,7 +513,7 @@ MineAgent/
 │  │  │  ├─ native.py           # ★ 画布 → agent.py 的框架原生代码生成
 │  │  │  ├─ generators.py       # 项目骨架、requirements、文件落盘
 │  │  │  └─ production.py       # 服务设置 → server.py / Dockerfile / CI 等生产化文件
-│  │  ├─ providers/             # ★ 向量模型 / 向量库 / 数据源的适配层
+│  │  ├─ providers/             # ★ 向量模型 / 重排模型 / 向量库 / 数据源的适配层
 │  │  │  ├─ catalog*.py         #   枚举清单（纯数据，加一家只改这里）
 │  │  │  ├─ embedding.py        #   6 类 embedding 协议
 │  │  │  ├─ vectorstore.py      #   14 个向量库适配器
@@ -558,7 +558,7 @@ tests/              # pytest 冒烟测试（不需要真实模型）
 agent.json          # 画布图定义（节点、连线、参数、节点代码）
 runner.py           # 零依赖预览执行器（不装框架也能在这里跑一遍）
 runtime_sdk.py      # runner 用的运行时（只用标准库）
-providers/          # 向量模型 / 向量库 / 数据源适配层（和平台同一个实现）
+providers/          # 向量模型 / 重排模型 / 向量库 / 数据源适配层（和平台同一个实现）
 run.ps1 / run.sh    # 一键运行
 config.json         # 模型配置 + 向量与数据源配置（不含 key）
 .env.example        # 脱离网页独立运行时，复制成 .env 填 key
@@ -1125,10 +1125,15 @@ Langflow 线性链、SmolAgents 代码行动
 
 ---
 
-## 向量模型 / 向量库 / 数据源
+## 向量模型 / 重排模型 / 向量库 / 数据源
 
-这些是**画布级**配置：入口在右上角「画布配置」→ 弹窗里的三个页签
-（**向量模型**、**向量库**、**数据源**），和对话模型并列。
+这些是**画布级**配置，按「模型」和「数据」分成两个入口：
+
+- **模型**：右上角「画布配置」→ 页签（对话模型 / 向量检索模型 / 重排模型）
+- **数据**：顶栏「🗄 数据中台」→ 页签（数据源 / **向量库** / 数据集 / 外部接入）
+
+向量库放在数据中台，是因为它本质是「数据放在哪」，和数据库、数据集同类；
+模型类的配置才留在画布配置里。
 
 同一张画布可以配**多套**：比如一个本地 bge-m3 建库、一个云端模型做查询，
 或者一个 Chroma 存文档、一个 pgvector 存订单。每种类型有一个「默认」，
@@ -1139,13 +1144,29 @@ Langflow 线性链、SmolAgents 代码行动
 ```
 
 不配也能跑：`embedding` / `vector_indexer` / `vector_store` / `hybrid_retriever`
-会回退到内置 SQLite 与哈希向量。
+会回退到内置 SQLite 与哈希向量，`reranker` 会回退到用对话模型打分。
+
+### 向量模型 vs 重排模型
+
+两件事别混：
+
+- **向量模型（embedding）** 决定「能不能找得到」——把文本压成向量，在同一空间里做近似检索；
+  建库和查询必须用同一个模型。
+- **重排模型（rerank）** 决定「排得准不准」——拿到召回的 20 条候选后，
+  把 query 和每条候选放在一起过一遍 cross-encoder，逐条打相关性分再取前 3 条。
+  它只在查询时用，不影响索引，随时可以换。
+
+所以典型链路是：切分 → 向量化 → 入库 → 检索（向量模型 + 向量库）→ 重排（重排模型）→ 拼上下文。
+只配向量模型也能跑通，但 top1 经常不是最佳答案时，加一层重排收益最明显。
+
+![重排模型配置](docs/screenshots/18-rerank-model.png)
 
 ### 内置清单
 
 | 类别 | 数量 | 覆盖 |
 | --- | --- | --- |
 | 向量模型 | 38 家 / 350+ 模型 | OpenAI、Azure、通义、智谱、硅基流动、火山、混元、千帆、百川、MiniMax、Cohere、Jina、Voyage、Gemini、Mistral、Together、Fireworks、DeepInfra、Nebius、Nomic、Mixedbread、Upstage、Snowflake、Vertex、Bedrock，以及 Ollama / TEI / vLLM / LM Studio / Xinference / LocalAI / FastChat，和 FastEmbed / sentence-transformers 进程内直跑 |
+| 重排模型 | 9 家 | Cohere Rerank、Jina Reranker、硅基流动（bge-reranker / Qwen3-Reranker）、阿里云百炼（gte-rerank）、Voyage AI、TEI / vLLM / Xinference 本地自部署，以及任意 OpenAI 风格 `/rerank` 网关 |
 | 向量库 | 46 个（全部已实现） | 内置 SQLite、sqlite-vec、Chroma、pgvector / pgvecto.rs / GaussDB、Qdrant、Milvus/Zilliz、Weaviate、LanceDB、FAISS、Elasticsearch、OpenSearch、Redis、Pinecone、DuckDB VSS、ClickHouse、Typesense、Upstash、Turbopuffer、Azure AI Search、ArangoDB、Vectara、Vespa、SurrealDB、Couchbase、Oracle、SAP HANA、Vertex AI、MySQL 家族（MariaDB/TiDB/OceanBase/Doris/StarRocks/SingleStore）、MongoDB Atlas、DashVector、腾讯云 VectorDB、百度向量数据库、VikingDB |
 | 数据源 | 48 个（全部已实现） | 关系型：PostgreSQL / MySQL / MariaDB / SQL Server / Oracle / SQLite / ClickHouse / DuckDB / TiDB / OceanBase / GaussDB / PolarDB / Greenplum / Redshift / Snowflake / BigQuery / Databricks / Trino / Presto / Hive；文档型：MongoDB / DocumentDB / Couchbase / Firestore / ArangoDB / CouchDB；图：Neo4j / Memgraph / NebulaGraph / TigerGraph / JanusGraph / Dgraph / Apache AGE / HugeGraph / TuGraph；KV：Redis / Valkey / Memcached / etcd / DynamoDB / Cassandra / ScyllaDB / HBase；时序：InfluxDB / TimescaleDB / TDengine / Prometheus / QuestDB |
 
@@ -1159,7 +1180,7 @@ Langflow 线性链、SmolAgents 代码行动
 
 **2. 密钥加密落库，只走环境变量。** 密钥字段单独加密存在 `providers` 表，
 接口只回显 `sk-****abcd`；生成项目时 `config.json` 里只有 `api_key_env` 的名字
-（第一个实例是 `MINEAGENT_EMB_KEY`，之后是 `_2`、`_3`，向量库 / 数据源同理），
+（第一个实例是 `MINEAGENT_EMB_KEY`，之后是 `_2`、`_3`，重排 / 向量库 / 数据源同理），
 值由运行时通过环境变量注入子进程，**不会写进任何项目文件**。
 
 **3. 依赖是懒加载的。** 没装 `chromadb` 时选不了 Chroma 的节点不会把流程跑崩，
@@ -1174,6 +1195,7 @@ ctx.embed_many(texts)                  # 批量
 ctx.vector_upsert(text, metadata={})   # 写入配置的向量库
 ctx.vector_search(query, top_k=4, where={"source": "faq"})
 ctx.use_collection("another")          # 临时换集合
+ctx.rerank(query, docs, top_k=3)       # 重排（走配置的重排模型；没配就用对话模型打分）
 ctx.query_data("SELECT * FROM orders") # 读数据源（SQL / Cypher / Redis 命令）
 ctx.write_data("INSERT INTO ...")      # 写数据源
 ```
@@ -1192,6 +1214,8 @@ ctx.vector_store_drop("docs")   # 清空旧集合
 # 再用新模型重新跑一遍 vector_indexer
 ```
 
+重排模型不写索引，换它不用重建，改完配置下一次检索就生效。
+
 ### 导出的项目怎么连
 
 `providers/` 目录会跟着 `runtime_sdk.py` 一起复制进 `projects/<画布>/`，
@@ -1203,6 +1227,7 @@ pip install qdrant-client
 
 # 2) 在 .env 里填密钥（网页上配过的话可以跳过）
 MINEAGENT_VEC_KEY=your-token
+MINEAGENT_RERANK_KEY=your-token   # 配了重排模型才有
 
 # 3) config.json 里已经有连接配置了，直接跑
 python runner.py --input "你的问题"

@@ -458,7 +458,7 @@ export default function TopBar({ onOpenUserCenter, onOpenCanvasModel, onOpenKnow
       </button>
 
       <button onClick={onOpenCanvasModel}
-              title="这张画布的对话模型、向量模型、向量库与数据源">
+              title="这张画布的对话模型、向量模型与重排模型（数据源与向量库在「数据中台」）">
         <span>⚙</span> 画布配置
       </button>
 

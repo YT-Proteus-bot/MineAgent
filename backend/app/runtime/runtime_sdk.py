@@ -372,7 +372,8 @@ class NodeContext:
                  delegate_fn: Optional[Callable[[str, Any], Any]] = None,
                  embedding_config: Optional[Dict[str, Any]] = None,
                  vector_config: Optional[Dict[str, Any]] = None,
-                 data_config: Optional[Dict[str, Any]] = None):
+                 data_config: Optional[Dict[str, Any]] = None,
+                 rerank_config: Optional[Dict[str, Any]] = None):
         self.node_id = node_id
         self.node_name = node_name
         self.kind = kind
@@ -388,9 +389,11 @@ class NodeContext:
         self._model_override = model_override or {}
         self._delegate_fn = delegate_fn
         self.cfg = self._effective_config()
-        # 向量模型 / 向量库 / 数据源：节点参数 > 传入的配置 > config.json
+        # 向量模型 / 重排模型 / 向量库 / 数据源：节点参数 > 传入的配置 > config.json
         self.embedding_config = self._provider_cfg(
             "embedding", embedding_config, self.params.get("embedding"))
+        self.rerank_config = self._provider_cfg(
+            "rerank", rerank_config, self.params.get("rerank"))
         self.vector_config = self._provider_cfg(
             "vector", vector_config, self.params.get("vector_store") or self.params.get("vector"))
         self.data_config = self._provider_cfg("data", data_config, self.params.get("data"))
@@ -1082,6 +1085,14 @@ class NodeContext:
         """是否配了真实向量模型（否则用内置哈希向量兜底）。"""
         return bool(self.embedding_config.get("model"))
 
+    @property
+    def has_rerank(self) -> bool:
+        """是否配了真实重排模型（否则用对话模型打分兜底）。"""
+        if not self.rerank_config:
+            return False
+        return bool(self.rerank_config.get("model")) or \
+            str(self.rerank_config.get("protocol") or "") == "tei"
+
     def embed(self, text: str) -> List[float]:
         """把一条文本转成向量。
 
@@ -1179,7 +1190,11 @@ class NodeContext:
         return scored[:top_k]
 
     def rerank(self, query: str, docs: List[Any], top_k: int = 3) -> List[Dict[str, Any]]:
-        """让模型给候选片段打相关性分并重排；模型不可用时回退到向量相似度。"""
+        """给召回候选打相关性分并重排。
+
+        配了「重排模型」就走它——cross-encoder 看的是 query 和片段的交互，
+        比向量相似度准；没配（或调用失败）才回退到对话模型打分，再兜底到余弦。
+        """
         items: List[Dict[str, Any]] = []
         for i, doc in enumerate(docs or []):
             if isinstance(doc, str):
@@ -1191,6 +1206,10 @@ class NodeContext:
             items.append({"id": i, "text": text})
         if not items:
             return []
+        if self.rerank_config:
+            ranked = self._rerank_with_model(query, items, top_k)
+            if ranked:
+                return ranked
         trimmed = items[:12]
         prompt = (
             f"问题：{query}\n\n"
@@ -1212,7 +1231,35 @@ class NodeContext:
                 scores[it["id"]] = cosine(qv, local_embed(it["text"]))
         ranked = [{**it, "score": round(scores.get(it["id"], 0.0), 4)} for it in trimmed]
         ranked.sort(key=lambda x: x["score"], reverse=True)
-        self.emit("rerank", {"in": len(items), "out": min(top_k, len(ranked))})
+        self.emit("rerank", {"in": len(items), "out": min(top_k, len(ranked)),
+                             "backend": "llm"})
+        return ranked[:top_k]
+
+    def _rerank_with_model(self, query: str, items: List[Dict[str, Any]],
+                           top_k: int) -> List[Dict[str, Any]]:
+        """走配置好的重排模型；失败时打一条 warn 并返回空，交给上层回退。"""
+        layer = _providers_layer()
+        if layer is None:
+            self.log("重排模型配置存在，但 providers 适配层缺失，回退到对话模型打分", "warn")
+            return []
+        try:
+            hits = layer.rerank_docs(self.rerank_config, query,
+                                     [it["text"] for it in items], top_n=top_k)
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"重排模型调用失败（{exc}），回退到对话模型打分", "warn")
+            return []
+        ranked: List[Dict[str, Any]] = []
+        for hit in hits:
+            try:
+                idx = int(hit.get("index"))
+            except (TypeError, ValueError):
+                continue
+            if 0 <= idx < len(items):
+                ranked.append({**items[idx], "score": hit.get("score", 0.0)})
+        if not ranked:
+            return []
+        self.emit("rerank", {"in": len(items), "out": len(ranked),
+                             "backend": self.rerank_config.get("provider") or "rerank"})
         return ranked[:top_k]
 
     def build_context(self, docs: List[Any], max_chars: int = 3000) -> str:
@@ -1738,7 +1785,7 @@ _SHARED_CTX: Optional["NodeContext"] = None
 
 
 def _shared_context() -> "NodeContext":
-    """读 config.json 里的 embedding / vector / data 三段，造一个共享上下文。
+    """读 config.json 里的 embedding / rerank / vector / data 四段，造一个共享上下文。
 
     原生 agent.py 里的节点是 `def xxx(state) -> dict`，没有 ctx。
     这些函数让它们复用同一套 provider 适配层，
@@ -1753,6 +1800,7 @@ def _shared_context() -> "NodeContext":
             embedding_config=cfg.get("embedding"),
             vector_config=cfg.get("vector"),
             data_config=cfg.get("data"),
+            rerank_config=cfg.get("rerank"),
         )
     return _SHARED_CTX
 
@@ -1766,6 +1814,11 @@ def project_embed(text: str, input_type: str = "document") -> List[float]:
 def project_vector_upsert(text: str, metadata: Optional[Dict[str, Any]] = None,
                           doc_id: str = "") -> Dict[str, Any]:
     return _shared_context().vector_upsert(text, metadata=metadata, doc_id=doc_id)
+
+
+def project_rerank(query: str, docs: List[Any], top_k: int = 3) -> List[Dict[str, Any]]:
+    """候选重排（读项目 config.json 的重排模型配置；没配就用对话模型打分）。"""
+    return _shared_context().rerank(query, docs, top_k=top_k)
 
 
 def project_vector_search(query: str, top_k: int = 4,

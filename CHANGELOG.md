@@ -5,6 +5,40 @@
 
 ---
 
+## 2026-11-23 · 重排模型
+
+主题是**重排模型**：画布配置原来只有「向量模型 / 向量库」，检索出来只能按向量相似度排序，
+这次把「召回」和「排序」拆开，补上第四类 provider。
+
+### 新增
+
+- **重排模型（rerank）作为一类画布级 provider**
+  - [`catalog_rerank.py`](backend/app/providers/catalog_rerank.py)：9 家厂商 ——
+    Cohere Rerank、Jina Reranker、硅基流动（bge-reranker / Qwen3-Reranker）、
+    阿里云百炼（gte-rerank）、Voyage AI、TEI / vLLM / Xinference 本地自部署，
+    以及任意 OpenAI 风格 `/rerank` 网关
+  - [`rerank.py`](backend/app/providers/rerank.py)：五类协议（openai_rerank / cohere /
+    voyage / dashscope / tei），把各家不同的请求字段和分数名归一成
+    `{index, score, text}`，按分数倒序返回
+  - 和另外三类一样：密钥单独加密落库、接口只回掩码、支持没保存的草稿直接「连接测试」、
+    画布内可配多套并设默认
+  - 画布配置弹窗多一个「重排模型」页签；助手 `upsert_provider` 的 kind 也支持 rerank
+
+- **运行时接入**
+  - `ctx.rerank` 优先走配置好的重排模型（cross-encoder，看的是 query 与片段的交互）；
+    没配或调用失败时打一条 warn，回退到原来的「对话模型打分 → 向量余弦」
+  - 新增 `ctx.has_rerank`、项目级 `project_rerank()`；`config.json` 多出 `rerank` 段，
+    密钥走 `MINEAGENT_RERANK_KEY`（第二个实例是 `_2`，以此类推）
+  - 重排节点参数多一个「重排模型」下拉：跟随画布默认 / 指定某个实例
+
+### 修复
+
+- **重排节点的原生代码一直是占位**：`reranker` 之前落在 `_block_generic`，
+  生成出来的 `agent.py` 只做一次模型调用，和画布上看到的「重排」不是一回事。
+  现在生成真正的重排代码（`project_rerank`），配没配重排模型都能跑
+
+---
+
 ## 2026-11-23
 
 主题是**知识库**：从零加了一条「上传文档 → 切分 → 向量化 → 检索」的完整链路。

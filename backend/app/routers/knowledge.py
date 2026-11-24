@@ -4,11 +4,14 @@
 """
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from .. import knowledge
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
 
@@ -18,6 +21,12 @@ def _wrap(fn, *args, **kwargs):
         return fn(*args, **kwargs)
     except knowledge.KnowledgeError as exc:
         raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        # 兜底：别让前端只看到一句「500 Internal Server Error」，
+        # 把真实原因带出去，同时把堆栈打进后端日志。
+        logger.exception("知识库操作失败：%s", getattr(fn, "__name__", fn))
+        raise HTTPException(
+            500, f"服务端内部错误：{type(exc).__name__}: {exc}") from exc
 
 
 @router.get("")

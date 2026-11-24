@@ -1,4 +1,4 @@
-"""三类枚举的统一入口。
+"""四类枚举的统一入口。
 
 前端只调 /api/providers/catalog 拿这一份，后端 CRUD / 连接测试 / 适配器
 分派也都从这里查。新增厂商只改 catalog_*.py。
@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 
 from .catalog_data import DATA
 from .catalog_embedding import EMB
+from .catalog_rerank import RERANK
 from .catalog_vector import VEC
 
 KINDS: Dict[str, Dict[str, Any]] = {
@@ -17,6 +18,11 @@ KINDS: Dict[str, Dict[str, Any]] = {
         "label": "向量模型",
         "desc": "把文本转成向量，建库和查询必须用同一个模型。",
         "items": EMB,
+    },
+    "rerank": {
+        "label": "重排模型",
+        "desc": "拿到召回候选后逐条打相关性分再排序，决定最终喂给模型的前几条。",
+        "items": RERANK,
     },
     "vector": {
         "label": "向量库",

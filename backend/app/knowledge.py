@@ -134,7 +134,7 @@ def create_kb(payload: Dict[str, Any]) -> Dict[str, Any]:
             "embedding_provider,embedding_config,embedding_secret_cipher,"
             "vector_provider,vector_config,vector_secret_cipher,"
             "status,chunk_config,created_at,updated_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (kb_id, name, str(payload.get("description") or ""), collection,
              "builtin", template,
              emb_provider,

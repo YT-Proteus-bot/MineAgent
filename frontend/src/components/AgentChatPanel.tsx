@@ -524,6 +524,7 @@ export default function AgentChatPanel() {
     if (p.tool === 'upsert_provider') {
       const kindLabel: Record<string, string> = {
         embedding: '向量模型',
+        rerank: '重排模型',
         vector: '向量库',
         data: '数据源',
       }

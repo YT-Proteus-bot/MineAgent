@@ -9,9 +9,11 @@ import { ProvidersPanel } from './ProvidersPanel'
  * 数据中台：画布级数据层的唯一入口。
  *
  * 数据源（连接 + 密钥）在「数据源」页，复用 providers(kind='data')；
+ * 向量库在「向量库」页，复用 providers(kind='vector')——它本质也是「数据的存放处」，
+ * 所以从「画布配置」挪到这里，模型相关的（对话/向量模型/重排）才留在画布配置；
  * 数据集（逻辑名 → 表 / SQL）在「数据集」页，节点里用 ctx.data.query("orders") 取数。
  */
-type Tab = 'sources' | 'datasets' | 'service'
+type Tab = 'sources' | 'vector' | 'datasets' | 'service'
 
 interface Source {
   id: string
@@ -199,6 +201,13 @@ export default function DataHubModal({ onClose }: { onClose: () => void }) {
                 数据源
               </div>
               <div
+                className={`tab${tab === 'vector' ? ' active' : ''}`}
+                onClick={() => setTab('vector')}
+                title="向量库：存向量和原文，按相似度检索（建库与检索必须是同一个）"
+              >
+                向量库
+              </div>
+              <div
                 className={`tab${tab === 'datasets' ? ' active' : ''}`}
                 onClick={() => setTab('datasets')}
                 title="数据集：把数据源里的表或查询登记成节点可直接引用的名字"
@@ -221,6 +230,8 @@ export default function DataHubModal({ onClose }: { onClose: () => void }) {
             <div className="kb-empty">先打开一张画布，再配置它的数据源。</div>
           ) : tab === 'sources' ? (
             <ProvidersPanel kind="data" canvasId={canvas.id} />
+          ) : tab === 'vector' ? (
+            <ProvidersPanel kind="vector" canvasId={canvas.id} />
           ) : tab === 'service' ? (
             <>
               <div className="hint-box" style={{ marginBottom: 12 }}>

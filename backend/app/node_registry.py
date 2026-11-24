@@ -37,7 +37,7 @@ def P(key: str, label: str, default=None, placeholder: str = "",
       options=None, help_text: str = "", source: str = "") -> Dict[str, Any]:
     """参数定义。带 options 的会渲染成下拉框。
 
-    source: 该参数要选的是画布里的哪类实例（embedding / vector / data）。
+    source: 该参数要选的是画布里的哪类实例（embedding / rerank / vector / data）。
     前端会据此从「画布配置」里拉实例列表，渲染成「跟随默认 / 具体实例」下拉。
     """
     item: Dict[str, Any] = {
@@ -223,8 +223,10 @@ _DEFS: List[tuple] = [
       P("top_k", "每路条数", 4), P("where", "向量过滤(JSON)", "")], "python"),
     ("bm25_search", "关键词检索", "rag", "⌕", "基于词频与 IDF 的传统检索。", ["out"],
      [P("top_k", "条数", 6)], "python"),
-    ("reranker", "重排 Rerank", "rag", "⇅", "让模型给候选片段打相关性分，取前 K。", ["out"],
-     [P("top_k", "保留条数", 3)], "python"),
+    ("reranker", "重排 Rerank", "rag", "⇅",
+     "用重排模型给候选片段打相关性分，取前 K（没配重排模型则用对话模型打分）。", ["out"],
+     [P("rerank", "重排模型", "", "跟随画布默认", source="rerank"),
+      P("top_k", "保留条数", 3)], "python"),
     ("context_builder", "上下文拼装", "rag", "▧", "把检索结果拼成带编号的参考上下文。", ["out"],
      [P("max_chars", "最大字符数", 3000)], "python"),
     ("citation_formatter", "引用标注", "rag", "❝", "给答案补 [1][2] 形式的来源编号。", ["out"], [], "python"),

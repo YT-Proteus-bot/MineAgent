@@ -19,8 +19,8 @@ function ParamField({
     placeholder: string
     options?: { value: string; label: string }[]
     help?: string
-    /** 这个参数要选画布里的哪类实例（embedding / vector / data） */
-    source?: 'embedding' | 'vector' | 'data'
+    /** 这个参数要选画布里的哪类实例（embedding / rerank / vector / data） */
+    source?: 'embedding' | 'rerank' | 'vector' | 'data'
   }
   value: any
   onChange: (v: any) => void

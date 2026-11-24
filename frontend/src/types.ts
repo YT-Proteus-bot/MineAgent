@@ -244,7 +244,7 @@ export interface NodeParamDef {
   placeholder: string
   options?: { value: string; label: string }[]
   help?: string
-  /** 这个参数要选画布里的哪类实例（embedding / vector / data） */
+  /** 这个参数要选画布里的哪类实例（embedding / rerank / vector / data） */
   source?: ProviderKind
 }
 
@@ -447,8 +447,8 @@ export interface ProjectFileEntry {
   language: string
 }
 
-/* ---------------- 向量模型 / 向量库 / 数据源 ---------------- */
-export type ProviderKind = 'embedding' | 'vector' | 'data'
+/* ---------------- 向量模型 / 重排模型 / 向量库 / 数据源 ---------------- */
+export type ProviderKind = 'embedding' | 'rerank' | 'vector' | 'data'
 
 export interface ProviderField {
   key: string

@@ -41,12 +41,21 @@ function defaultConfig(item: CatalogItem): Record<string, any> {
 }
 
 /**
- * 向量模型 / 向量库 / 数据源 三类配置的统一面板。
+ * 向量检索模型 / 重排模型 / 向量库 / 数据源 的统一配置面板。
  *
  * 字段完全由后端的 catalog 驱动：加一家厂商只改后端清单，
  * 这里不需要动；未实现（planned）的条目在下拉里禁用。
+ * title / desc 只在个别入口覆盖标题文案（比如画布配置里叫「向量检索模型」），
+ * 分类本身仍是 catalog 里的 embedding。
  */
-export function ProvidersPanel({ kind, canvasId }: { kind: ProviderKind; canvasId: string }) {
+export function ProvidersPanel({ kind, canvasId, title, desc }: {
+  kind: ProviderKind
+  canvasId: string
+  /** 覆盖面板标题；留空用 catalog 里的分类名 */
+  title?: string
+  /** 覆盖面板副标题；留空用 catalog 里的说明 */
+  desc?: string
+}) {
   const toast = useStore((s) => s.toast)
   const [catalog, setCatalog] = useState<ProviderCatalog | null>(null)
   const [records, setRecords] = useState<ProviderRecord[]>([])
@@ -280,8 +289,8 @@ export function ProvidersPanel({ kind, canvasId }: { kind: ProviderKind; canvasI
     <div className="providers-panel">
       <div className="providers-head">
         <div>
-          <div className="providers-title">{kindMeta?.label || kind}</div>
-          <div className="hint-text">{kindMeta?.desc}</div>
+          <div className="providers-title">{title || kindMeta?.label || kind}</div>
+          <div className="hint-text">{desc || kindMeta?.desc}</div>
         </div>
         <button className="primary" onClick={startCreate} disabled={!kindMeta}>
           + 新建

@@ -24,7 +24,7 @@ def _merge(record: Dict[str, Any]) -> Dict[str, Any]:
     if item is None:
         raise ProviderConfigError(
             f"未知的 {kind} 类型：{provider or '（空）'}",
-            hint="重新在「向量模型 / 向量库 / 数据源」里选择一次")
+            hint="重新在「向量模型 / 向量库 / 重排模型 / 数据源」里选择一次")
 
     cfg: Dict[str, Any] = {"provider": provider, "protocol": item["protocol"]}
     for key, value in (default_config(kind, provider) or {}).items():
@@ -40,6 +40,15 @@ def build_embedding_cfg(record: Dict[str, Any]) -> Dict[str, Any]:
     if not cfg.get("model"):
         raise ProviderConfigError("向量模型还没填模型名",
                                   hint="在向量模型配置里填 model，例如 text-embedding-3-small")
+    return cfg
+
+
+def build_rerank_cfg(record: Dict[str, Any]) -> Dict[str, Any]:
+    cfg = _merge(record)
+    # TEI 按部署时加载的模型推理，模型名只是备注，可以不填
+    if not cfg.get("model") and str(cfg.get("protocol") or "") != "tei":
+        raise ProviderConfigError("重排模型还没填模型名",
+                                  hint="在重排模型配置里填 model，例如 rerank-v3.5")
     return cfg
 
 

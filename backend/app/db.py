@@ -87,6 +87,56 @@ CREATE TABLE IF NOT EXISTS knowledge_bases (
 
 CREATE INDEX IF NOT EXISTS idx_kb_time ON knowledge_bases(updated_at DESC);
 
+-- 评测中台：数据集 + 评测任务 + 逐条结果（规则 / LLM / 人工三层判定）
+CREATE TABLE IF NOT EXISTS eval_datasets (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    cases       TEXT NOT NULL DEFAULT '[]',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS eval_runs (
+    id           TEXT PRIMARY KEY,
+    canvas_id    TEXT NOT NULL,
+    canvas_name  TEXT NOT NULL DEFAULT '',
+    dataset_id   TEXT NOT NULL,
+    dataset_name TEXT NOT NULL DEFAULT '',
+    status       TEXT NOT NULL DEFAULT 'pending',
+    judge_model  TEXT NOT NULL DEFAULT '',
+    use_judge    INTEGER NOT NULL DEFAULT 0,
+    repeat       INTEGER NOT NULL DEFAULT 1,
+    total        INTEGER NOT NULL DEFAULT 0,
+    done         INTEGER NOT NULL DEFAULT 0,
+    passed       INTEGER NOT NULL DEFAULT 0,
+    error        TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL,
+    finished_at  TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_eval_runs_time ON eval_runs(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS eval_results (
+    id            TEXT PRIMARY KEY,
+    run_id        TEXT NOT NULL,
+    case_id       TEXT NOT NULL,
+    input         TEXT NOT NULL DEFAULT '',
+    output        TEXT NOT NULL DEFAULT '',
+    latency_ms    REAL NOT NULL DEFAULT 0,
+    error         TEXT NOT NULL DEFAULT '',
+    rule_passed   INTEGER NOT NULL DEFAULT 0,
+    rule_detail   TEXT NOT NULL DEFAULT '{}',
+    llm_score     REAL,
+    llm_reason    TEXT NOT NULL DEFAULT '',
+    usage         TEXT NOT NULL DEFAULT '{}',
+    human_verdict TEXT NOT NULL DEFAULT '',
+    human_note    TEXT NOT NULL DEFAULT '',
+    created_at    TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_eval_results_run ON eval_results(run_id, created_at);
+
 CREATE TABLE IF NOT EXISTS runs (
     id           TEXT PRIMARY KEY,
     canvas_id    TEXT NOT NULL,
@@ -109,7 +159,7 @@ CREATE TABLE IF NOT EXISTS agent_models (
     PRIMARY KEY (canvas_id, node_id)
 );
 
--- 向量模型 / 向量库 / 数据源的实例配置
+-- 向量模型 / 重排模型 / 向量库 / 数据源的实例配置
 -- config 存非密文字段（JSON），secret_cipher 存密文字段的加密 JSON
 CREATE TABLE IF NOT EXISTS providers (
     id            TEXT PRIMARY KEY,
@@ -206,6 +256,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "endpoint_key_cipher" not in kb_cols:
         conn.execute(
             "ALTER TABLE knowledge_bases ADD COLUMN endpoint_key_cipher TEXT NOT NULL DEFAULT ''")
+
+    ev_cols = {row["name"] for row in conn.execute("PRAGMA table_info(eval_results)")}
+    if ev_cols and "usage" not in ev_cols:
+        conn.execute(
+            "ALTER TABLE eval_results ADD COLUMN usage TEXT NOT NULL DEFAULT '{}'")
+    run_cols = {row["name"] for row in conn.execute("PRAGMA table_info(eval_runs)")}
+    if run_cols and "repeat" not in run_cols:
+        conn.execute(
+            "ALTER TABLE eval_runs ADD COLUMN repeat INTEGER NOT NULL DEFAULT 1")
     # ---- 远端同步：记住这张画布绑定的模板、上次同步的版本和图哈希 ----
     if "remote_slug" not in cols:
         conn.execute("ALTER TABLE canvases ADD COLUMN remote_slug TEXT NOT NULL DEFAULT ''")

@@ -1,12 +1,13 @@
 """把画布的 provider 配置解析成运行时能直接用的一份。
 
-配置完全属于画布：同一张画布可以有多套向量模型 / 向量库 / 数据源，
+配置完全属于画布：同一张画布可以有多套向量模型 / 重排模型 / 向量库 / 数据源，
 每种类型有一个「默认」，节点参数里可以用实例名覆盖。
 
 返回结构（写进 config.json 的也是它，密钥除外）：
 
     {
       "embedding": {"default": "OpenAI 小模型", "items": {"OpenAI 小模型": {...}}},
+      "rerank":    {"default": "BGE 重排",     "items": {...}},
       "vector":    {"default": "本地 Chroma",   "items": {...}},
       "data":      {"default": "",             "items": {...}}
     }
@@ -23,16 +24,18 @@ from typing import Any, Dict, List, Optional
 from ..db import list_providers
 from ..security import decrypt
 from .catalog import find
-from .resolve import build_data_cfg, build_embedding_cfg, build_vector_cfg
+from .resolve import (build_data_cfg, build_embedding_cfg, build_rerank_cfg,
+                      build_vector_cfg)
 
 # 环境变量前缀：每个实例一个，序号在 _env_names 里定
 ENV_PREFIX = {
     "embedding": "MINEAGENT_EMB_KEY",
+    "rerank": "MINEAGENT_RERANK_KEY",
     "vector": "MINEAGENT_VEC_KEY",
     "data": "MINEAGENT_DATA_KEY",
 }
 
-KINDS = ("embedding", "vector", "data")
+KINDS = ("embedding", "rerank", "vector", "data")
 
 
 def _secret(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -113,6 +116,8 @@ def resolve_runtime_providers(canvas_id: str) -> Dict[str, Dict[str, Any]]:
             try:
                 if kind == "embedding":
                     cfg = build_embedding_cfg(record)
+                elif kind == "rerank":
+                    cfg = build_rerank_cfg(record)
                 elif kind == "vector":
                     cfg = build_vector_cfg(record)
                 else:

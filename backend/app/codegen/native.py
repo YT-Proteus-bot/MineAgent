@@ -761,7 +761,32 @@ def _block_retriever(node: Dict[str, Any]) -> str:
         f'    context = "\\n\\n".join(picked)\n'
         f'    _emit({{"event": "retrieval", "node": {_q(node["id"])}, "name": {_q(node["name"])},\n'
         f'           "count": len(picked)}})\n'
-        f'    return {{"data": context or query, "docs": picked, "hit": len(picked)}}\n'
+        f'    return {{"data": context or query, "docs": picked, "query": query,\n'
+        f'             "hit": len(picked)}}\n'
+    )
+
+
+def _block_reranker(node: Dict[str, Any]) -> str:
+    """重排：走 config.json 里配置的重排模型；没配就用对话模型打分。"""
+    fn = _pyid(node["name"])
+    top_k = int(_num(_params(node), "top_k", 3))
+    return (
+        f"def {fn}(state: AgentState) -> dict:\n"
+        f'    """{node.get("label") or "重排"} —— 用重排模型给候选片段打相关性分。\n'
+        f"\n"
+        f"    重排模型在 config.json 的 rerank 段里配置；没配就退回对话模型打分，\n"
+        f"    所以这段代码不配模型也能跑，只是慢一点、贵一点。\n"
+        f'    """\n'
+        f"    from runtime_sdk import project_rerank\n"
+        f'    data = state.get("data")\n'
+        f"    docs = state.get(\"docs\") or (data if isinstance(data, list) else [data])\n"
+        f"    docs = [d for d in (docs or []) if str(d).strip()]\n"
+        f"    query = str(state.get(\"query\") or (\"\" if isinstance(data, list) else (data or \"\")))\n"
+        f"    ranked = project_rerank(query, docs, top_k={top_k})\n"
+        f'    _emit({{"event": "rerank", "node": {_q(node["id"])},\n'
+        f'           "name": {_q(node["name"])}, "count": len(ranked)}})\n'
+        f'    return {{"data": ranked, "docs": [r.get("text") for r in ranked],\n'
+        f'             "query": query, "hit": len(ranked)}}\n'
     )
 
 
@@ -934,6 +959,8 @@ def node_block(node: Dict[str, Any], spec: Dict[str, Any] | None = None) -> str:
         body = _block_splitter(node)
     elif kind in ("vector_indexer", "embedding", "vector_store"):
         body = _block_indexer(node)
+    elif kind == "reranker":
+        body = _block_reranker(node)
     elif kind == "hybrid_retriever":
         body = _block_hybrid(node)
     elif kind in TOOL_KINDS:
@@ -2064,12 +2091,14 @@ def _main_section(spec: Dict[str, Any], framework: str) -> str:
             "    try:\n"
             "        answer = main(text)\n"
             "    except Exception as exc:  # noqa: BLE001\n"
-            '        _emit({"event": "run_end", "status": "error", "message": str(exc), "output": ""})\n'
+            '        _emit({"event": "run_end", "status": "error", "message": str(exc),'
+            ' "output": "", "usage": take_usage()})\n'
             "        raise\n"
             "    print(\"\")\n"
             '    print("=" * 16, "最终结果", "=" * 16)\n'
             "    print(answer)\n"
-            '    _emit({"event": "run_end", "status": "ok", "output": answer if isinstance(answer, str) else _brief(answer)})\n'
+            '    _emit({"event": "run_end", "status": "ok", "output": answer if isinstance(answer, str) else _brief(answer),'
+            ' "usage": take_usage()})\n'
         )
     else:
         run_main += (
@@ -2077,6 +2106,9 @@ def _main_section(spec: Dict[str, Any], framework: str) -> str:
             "    print(\"\")\n"
             '    print("=" * 16, "最终结果", "=" * 16)\n'
             "    print(answer)\n"
+            '    _emit({"event": "run_end", "status": "ok",'
+            ' "output": answer if isinstance(answer, str) else _brief(answer),'
+            ' "usage": take_usage()})\n'
         )
 
     return (

@@ -6,13 +6,14 @@ import ModelNameField from './ModelNameField'
 import { ProvidersPanel } from './ProvidersPanel'
 import type { GlobalSettings, ModelConfig, ProviderKind } from '../types'
 
-/** 用户中心的页签：对话模型 + 三类 provider 配置 */
+/** 用户中心的页签：对话模型 + 各类 provider 配置 */
 type TabId = 'chat' | ProviderKind
 
 const TABS: { id: TabId; label: string; hint: string }[] = [
   { id: 'chat', label: '对话模型', hint: '编排与运行时兜底用的大模型' },
-  { id: 'embedding', label: '向量模型', hint: '把文本转成向量的模型（建库与查询必须一致）' },
-  { id: 'vector', label: '向量库', hint: '存向量和原文，按相似度检索' },
+  { id: 'embedding', label: '向量检索模型',
+    hint: '把文本转成向量用于检索；建库与查询必须用同一个模型' },
+  { id: 'rerank', label: '重排模型', hint: '召回之后逐条打相关性分再排序，决定最终给模型看哪几条' },
 ]
 
 /** 默认服务商是 DeepSeek，其余按需切换 */
@@ -205,7 +206,7 @@ export function CanvasModelModal({ onClose }: { onClose: () => void }) {
   return (
     <Modal
       title={`画布配置 · ${canvas.name}`}
-      subtitle="这张画布自己的对话模型、向量模型与向量库。数据源已迁到「🗄 数据中台」，画布之间互不影响。"
+      subtitle="这张画布自己的对话模型、向量检索模型与重排模型。数据源与向量库已迁到「🗄 数据中台」，画布之间互不影响。"
       onClose={onClose}
       footer={
         tab === 'chat' ? (
@@ -233,7 +234,15 @@ export function CanvasModelModal({ onClose }: { onClose: () => void }) {
         ))}
       </div>
 
-      {tab !== 'chat' && <ProvidersPanel kind={tab} canvasId={canvas.id} />}
+      {tab !== 'chat' && (
+        // 标题跟着页签走：这个窗口里 embedding 叫「向量检索模型」，
+        // 分类本身仍是 catalog 里的 embedding，不影响别处
+        <ProvidersPanel
+          kind={tab}
+          canvasId={canvas.id}
+          title={TABS.find((t) => t.id === tab)?.label}
+        />
+      )}
 
       {tab === 'chat' && (
         <>

@@ -220,7 +220,7 @@ class AgentNodeModel(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
-# 向量模型 / 向量库 / 数据源
+# 向量模型 / 重排模型 / 向量库 / 数据源
 # --------------------------------------------------------------------------- #
 class ProviderIn(BaseModel):
     """新建 / 更新一条 provider 配置。
@@ -228,7 +228,7 @@ class ProviderIn(BaseModel):
     config 只放非密文字段；secret 只在写入时出现（密文字段单独加密存储）。
     """
 
-    kind: str = Field(description="embedding | vector | data")
+    kind: str = Field(description="embedding | rerank | vector | data")
     provider: str = Field(default="", description="catalog 里的厂商 id")
     name: str = ""
     config: Dict[str, Any] = Field(default_factory=dict)
